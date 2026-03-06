@@ -9,7 +9,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from app.models.session import Session, SessionState
-from app.services.auth_dependency import AuthenticatedUser, get_current_user
+from app.auth.dependencies import AuthenticatedUser, get_current_user
 from app.infrastructure.cache import store_session_state, retrieve_session_state
 
 router = APIRouter(prefix="/api/v1/sessions", tags=["sessions"])

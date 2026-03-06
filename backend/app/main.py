@@ -1,10 +1,8 @@
 
 import logging
 from contextlib import asynccontextmanager
-from typing import Optional
 
-from fastapi import FastAPI, Query
-from starlette.responses import RedirectResponse
+from fastapi import FastAPI
 from app.core.config import settings
 from app.infrastructure.cache import init_redis, close_redis
 from app.infrastructure.heartbeat import init_vitality_tracker, close_vitality_tracker
@@ -101,23 +99,15 @@ async def health_check():
 
 
 @app.get("/")
-async def root(neon_auth_session_verifier: Optional[str] = Query(None)):
-    """
-    Root endpoint.
-    - If 'neon_auth_session_verifier' is present, redirect to the Neon auth callback.
-    - Otherwise, return a welcome message.
-    """
-    if neon_auth_session_verifier:
-        return RedirectResponse(
-            url=f"/api/v1/auth/neon/callback?neon_auth_session_verifier={neon_auth_session_verifier}"
-        )
+async def root():
+    """Root endpoint."""
     return {"message": "Vertex Swarm Backend API", "version": settings.app_version}
 
 
 # Include API routes
-from app.api.v1 import auth, endpoints, sessions, neon_auth
+from app.api.v1 import endpoints, sessions
+from app.auth.routes import protected as auth
 
 app.include_router(auth.router)
 app.include_router(endpoints.router)
 app.include_router(sessions.router)
-app.include_router(neon_auth.router)

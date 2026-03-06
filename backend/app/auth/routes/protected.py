@@ -1,7 +1,7 @@
 """Authentication endpoints (Phase 2) — JWT validation + Neon Auth integration"""
 from fastapi import APIRouter, Depends, status
 
-from app.services.auth_dependency import AuthenticatedUser, get_current_user
+from app.auth.dependencies import AuthenticatedUser, get_current_user
 
 router = APIRouter(prefix="/api/v1/auth", tags=["auth"])
 
