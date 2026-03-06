@@ -1,0 +1,39 @@
+import * as vscode from 'vscode';
+import { TokenManager } from './token-manager';
+import { OAuthHandler } from './oauth-handler';
+import { VertexSwarmSidebarProvider } from './webview-provider';
+
+export async function activate(context: vscode.ExtensionContext): Promise<void> {
+  console.log('Vertex Swarm extension activated');
+
+  const tokenManager = new TokenManager(context.secrets);
+  const oauthHandler = new OAuthHandler(tokenManager, context);
+
+  // Register the sidebar WebviewView provider
+  const sidebarProvider = new VertexSwarmSidebarProvider(
+    context.extensionUri,
+    tokenManager,
+    oauthHandler,
+    context
+  );
+
+  context.subscriptions.push(
+    vscode.window.registerWebviewViewProvider(
+      VertexSwarmSidebarProvider.viewId,
+      sidebarProvider
+    )
+  );
+
+  // Logout command
+  context.subscriptions.push(
+    vscode.commands.registerCommand('vertex-swarm.logout', async () => {
+      await tokenManager.clearToken();
+      vscode.window.showInformationMessage('Vertex Swarm: Logged out');
+    })
+  );
+}
+
+export function deactivate(): void {
+  console.log('Vertex Swarm extension deactivated');
+}
+

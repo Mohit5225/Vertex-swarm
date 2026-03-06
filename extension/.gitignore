@@ -1,0 +1,29 @@
+# Environment Variables
+.env
+.env.local
+.env.*.local
+
+# Node Dependencies
+node_modules/
+dist/
+build/
+.next/
+out/
+
+# Build Artifacts
+*.vsix
+.vscode-test/
+
+# IDE & Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Misc
+*.log

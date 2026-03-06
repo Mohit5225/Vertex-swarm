@@ -1,0 +1,59 @@
+{
+  "name": "vertex-swarm-extension",
+  "displayName": "Vertex Swarm",
+  "description": "LLM-powered agent execution in VS Code",
+  "version": "0.0.1",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "main": "./dist/extension.js",
+  "activationEvents": [
+    "onView:vertex-swarm.sidebar"
+  ],
+  "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "vertex-swarm",
+          "title": "Vertex Swarm",
+          "icon": "media/icon.svg"
+        }
+      ]
+    },
+    "views": {
+      "vertex-swarm": [
+        {
+          "type": "webview",
+          "id": "vertex-swarm.sidebar",
+          "name": "Agent"
+        }
+      ]
+    },
+    "commands": [
+      {
+        "command": "vertex-swarm.start",
+        "title": "Vertex: Start Agent"
+      },
+      {
+        "command": "vertex-swarm.logout",
+        "title": "Vertex: Logout"
+      }
+    ]
+  },
+  "scripts": {
+    "dev": "vite build --watch",
+    "build": "vite build",
+    "package": "vsce package"
+  },
+  "dependencies": {},
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "@types/vscode": "^1.85.0",
+    "typescript": "~5.3.3",
+    "vite": "^5.0.0",
+    "@vscode/vsce": "^2.22.0"
+  }
+}

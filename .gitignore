@@ -1,0 +1,63 @@
+# Environment Variables
+.env
+.env.local
+.env.*.local
+
+# Project Docs (Management/Internal - Do Not Push)
+PHASE3_COMPLETION.md
+project_overview.md
+roadmap.md
+CROSS_PHASE_COMPATIBILITY_ANALYSIS.md
+PHASE1_AUDIT_REPORT.md
+TESTING_GUIDE.md
+
+# Test Files (Do Not Push)
+backend/tests/
+**/test_*.py
+**/conftest.py
+.pytest_cache/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+env/
+ENV/
+.venv
+pip-log.txt
+pip-delete-this-directory.txt
+.tox/
+.coverage
+.coverage.*
+.cache
+nosetests.xml
+coverage.xml
+*.cover
+.hypothesis/
+.pytest_cache/
+
+# Node
+node_modules/
+dist/
+build/
+.next/
+
+# IDE & Editor
+.vscode/
+.idea/
+.cursor/
+.windsurf/
+.trae/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Misc
+*.log

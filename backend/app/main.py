@@ -1,0 +1,123 @@
+
+import logging
+from contextlib import asynccontextmanager
+from typing import Optional
+
+from fastapi import FastAPI, Query
+from starlette.responses import RedirectResponse
+from app.core.config import settings
+from app.infrastructure.cache import init_redis, close_redis
+from app.infrastructure.heartbeat import init_vitality_tracker, close_vitality_tracker
+from app.infrastructure.jobs import init_archival_job, close_archival_job
+
+logger = logging.getLogger(__name__)
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """
+    FastAPI lifespan context manager.
+    Handles startup and shutdown of background services.
+    
+    Startup sequence:
+    1. Initialize Redis cache
+    2. Initialize agent vitality tracker (background heartbeat check)
+    3. Initialize session archival job (background TTL enforcement)
+    
+    Shutdown sequence (reverse order):
+    1. Stop archival job
+    2. Stop vitality tracker
+    3. Close Redis
+    """
+    # Startup
+    logger.info("🚀 Backend startup sequence")
+    
+    try:
+        logger.info("Initializing Redis cache...")
+        await init_redis()
+        logger.info("✅ Redis initialized")
+    except Exception as exc:
+        logger.error(f"❌ Redis initialization failed: {exc}")
+        raise
+    
+    try:
+        logger.info("Initializing agent vitality tracker...")
+        await init_vitality_tracker()
+        logger.info("✅ Agent vitality tracker initialized")
+    except Exception as exc:
+        logger.error(f"❌ Vitality tracker initialization failed: {exc}")
+        raise
+    
+    try:
+        logger.info("Initializing session archival job...")
+        await init_archival_job()
+        logger.info("✅ Session archival job initialized")
+    except Exception as exc:
+        logger.error(f"❌ Archival job initialization failed: {exc}")
+        raise
+    
+    logger.info("✅ All background services started")
+    
+    yield  # Application runs here
+    
+    # Shutdown
+    logger.info("🛑 Backend shutdown sequence")
+    
+    try:
+        logger.info("Stopping session archival job...")
+        await close_archival_job()
+        logger.info("✅ Archival job stopped")
+    except Exception as exc:
+        logger.error(f"Error stopping archival job: {exc}")
+    
+    try:
+        logger.info("Stopping agent vitality tracker...")
+        await close_vitality_tracker()
+        logger.info("✅ Vitality tracker stopped")
+    except Exception as exc:
+        logger.error(f"Error stopping vitality tracker: {exc}")
+    
+    try:
+        logger.info("Closing Redis...")
+        await close_redis()
+        logger.info("✅ Redis closed")
+    except Exception as exc:
+        logger.error(f"Error closing Redis: {exc}")
+    
+    logger.info("✅ Shutdown complete")
+
+
+app = FastAPI(
+    title=settings.app_name,
+    version=settings.app_version,
+    lifespan=lifespan,
+)
+
+
+@app.get("/health")
+async def health_check():
+    """Health check endpoint"""
+    return {"status": "healthy", "app": settings.app_name}
+
+
+@app.get("/")
+async def root(neon_auth_session_verifier: Optional[str] = Query(None)):
+    """
+    Root endpoint.
+    - If 'neon_auth_session_verifier' is present, redirect to the Neon auth callback.
+    - Otherwise, return a welcome message.
+    """
+    if neon_auth_session_verifier:
+        return RedirectResponse(
+            url=f"/api/v1/auth/neon/callback?neon_auth_session_verifier={neon_auth_session_verifier}"
+        )
+    return {"message": "Vertex Swarm Backend API", "version": settings.app_version}
+
+
+# Include API routes
+from app.api.v1 import auth, endpoints, sessions, neon_auth
+
+app.include_router(auth.router)
+app.include_router(endpoints.router)
+app.include_router(sessions.router)
+app.include_router(neon_auth.router)
