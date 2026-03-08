@@ -44,10 +44,16 @@ class Settings(BaseSettings):
     # ========================================
     # Neon Auth (Phase 2) — JWT Verification
     # ========================================
-    neon_auth_base_url: str = "https://ep-jolly-feather-aiaavjnk.neonauth.c-4.us-east-1.aws.neon.tech/neondb/auth"
-    neon_auth_jwks_url: str = "https://ep-jolly-feather-aiaavjnk.neonauth.c-4.us-east-1.aws.neon.tech/neondb/auth/.well-known/jwks.json"
+    neon_auth_base_url: str = ""
+    neon_auth_jwks_url: str = ""
     jwt_algorithm: str = "EdDSA"  # Neon Auth uses EdDSA with Ed25519 (OKP keys), verified via JWKS
     jwt_cache_ttl_seconds: int = 3600  # Cache JWKS keys for 1 hour
+
+    # ========================================
+    # OpenRouter / LiteLLM
+    # ========================================
+    openrouter_api_key: str = ""
+    openrouter_model: str = "openrouter/stepfun/step-3.5-flash:free"
 
     @property
     def database(self):

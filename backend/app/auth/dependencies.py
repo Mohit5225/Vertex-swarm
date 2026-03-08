@@ -5,7 +5,7 @@ from fastapi import Depends, Request
 
 from app.auth.middleware import AuthenticationError, extract_bearer_token
 from app.auth.core import NeonAuthVerificationError, verify_neon_auth_jwt
-from app.services.auth_handlers import get_user_by_id
+from app.db.postgres.auth import get_user_by_id
 from app.models.auth import NeonAuthUser
 from app.db.postgres.connection import AsyncSessionLocal
 

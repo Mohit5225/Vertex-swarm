@@ -70,28 +70,47 @@ async def archive_session(
         return False
     
     try:
+        orphan_index_keys = [
+            f"session:{session_id}:last_message_at",
+            f"session:{session_id}:agent_status",
+            f"session:{session_id}:last_heartbeat_response",
+            f"session:{session_id}:archived_at",
+            f"session:{session_id}:user_id",
+        ]
+
         # Step 1: Load session state from Redis
         # Try to load from persisted key (where it's actually stored)
         from app.infrastructure.cache import retrieve_session_state
         session_state = await retrieve_session_state(session_id)
         
         if not session_state:
-            logger.warning(f"Session {session_id} not found in Redis. May already be archived.")
-            return False
+            await redis.delete(*orphan_index_keys)
+            logger.info(
+                "Session %s not found in Redis persisted state. Cleared orphaned index keys.",
+                session_id,
+            )
+            return True
         
         # Step 2: Compress working memory
         wm_compressed = await compress_working_memory(session_state.persisted.working_memory)
-        
-        # Step 3: Write to Postgres (will implement ORM model in Phase 2)
-        # For now, we will use raw SQL or defer to later when DB schema is finalized
+
+        # Step 3: Write to Postgres archived_sessions table
+        from app.db.postgres.models import ArchivedSessionORM
+        raw_user_id = await redis.get(f"session:{session_id}:user_id")
+        user_id = raw_user_id if raw_user_id else "unknown"
+
         async with AsyncSessionLocal() as postgres_session:
-            # TODO: Create ORM model ArchivedSession and insert here
-            # For MVP Phase 1, log the archival intent
-            logger.info(
-                f"ARCHIVAL INTENT: session_id={session_id}, "
-                f"working_memory_size={len(wm_compressed['original'])} bytes, "
-                f"reason={reason}, archived_at={datetime.now(timezone.utc).isoformat()}"
-            )
+            async with postgres_session.begin():
+                archived_record = ArchivedSessionORM(
+                    session_id=session_id,
+                    user_id=user_id,
+                    working_memory_original=wm_compressed["original"],
+                    working_memory_compressed=wm_compressed["compressed"],
+                    archived_reason=reason,
+                )
+                postgres_session.add(archived_record)
+
+        logger.info(f"Archived session {session_id} to Postgres (user={user_id}, reason={reason})")
         
         # Step 4: Clear from Redis (conditional on Postgres success)
         # In production, use transaction; for now, delete after successful archival
@@ -103,6 +122,7 @@ async def archive_session(
             f"session:{session_id}:working_memory",
             f"session:{session_id}:task_graph",
             f"session:{session_id}:messages",
+            *orphan_index_keys,
         ]
         
         for key in keys_to_delete:

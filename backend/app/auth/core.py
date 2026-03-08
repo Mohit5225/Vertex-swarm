@@ -102,13 +102,18 @@ async def verify_neon_auth_jwt(token: str) -> dict:
             token,
             public_key,
             algorithms=[token_alg],
-            audience=None,  # Neon Auth JWTs don't include standard 'aud'
+            audience=None,
+            # Neon Auth may include an audience claim even when this backend
+            # does not enforce one. Disable audience validation explicitly.
+            options={"verify_aud": False},
         )
 
         return decoded
 
     except jwt.ExpiredSignatureError:
         raise NeonAuthVerificationError("Token has expired")
+    except jwt.InvalidAudienceError:
+        raise NeonAuthVerificationError("Invalid token audience")
     except jwt.InvalidSignatureError:
         raise NeonAuthVerificationError("Invalid token signature")
     except jwt.DecodeError as e:

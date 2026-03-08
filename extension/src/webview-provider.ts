@@ -8,6 +8,9 @@ import type {
   TokenData,
   StreamStartPayload,
   StreamCancelPayload,
+  OpenChatPayload,
+  ChatSummaryData,
+  ChatMessageData,
 } from './types/index';
 
 const BACKEND_URL = process.env.VERTEX_BACKEND_URL || 'http://localhost:8000';
@@ -21,6 +24,7 @@ export class VertexSwarmSidebarProvider implements vscode.WebviewViewProvider {
 
   private webviewView: vscode.WebviewView | undefined;
   private streamClient: SSEStreamClient | undefined;
+  private currentChatId: string | undefined;
 
   constructor(
     private readonly extensionUri: vscode.Uri,
@@ -56,10 +60,8 @@ export class VertexSwarmSidebarProvider implements vscode.WebviewViewProvider {
       this.context.subscriptions
     );
 
-    // When webview finishes loading, check for existing token
-    // and send auth-url immediately so login screen can render
+    // Send OAuth URL to webview so login screen can render
     this.sendAuthUrl();
-    this.checkAndSendExistingToken();
   }
 
   /**
@@ -83,22 +85,186 @@ export class VertexSwarmSidebarProvider implements vscode.WebviewViewProvider {
    * If a token already exists, send it to webview immediately
    */
   private async checkAndSendExistingToken(): Promise<void> {
-    const token = await this.tokenManager.getToken();
-    const userMetadata = await this.tokenManager.getUserMetadata();
+    const session = await this.tokenManager.getSession();
 
-    if (token && userMetadata) {
-      this.post({
-        type: 'token',
-        payload: {
-          token,
-          user: {
-            id: (userMetadata.id as string) || '',
-            email: (userMetadata.email as string) || '',
-            provider: (userMetadata.provider as string) || 'neon-auth',
-          },
-        } as TokenData,
-      });
+    if (session.status === 'expired') {
+      await vscode.window.showInformationMessage(
+        'Vertex Swarm session expired. Please sign in again.'
+      );
+      await this.handleLogout();
+      return;
     }
+
+    if (session.status !== 'valid') {
+      return;
+    }
+
+    this.post({
+      type: 'token',
+      payload: {
+        token: session.token,
+        user: {
+          id: (session.userMetadata.id as string) || '',
+          email: (session.userMetadata.email as string) || '',
+          provider: (session.userMetadata.provider as string) || 'neon-auth',
+        },
+      } as TokenData,
+    });
+  }
+
+  private async getValidToken(): Promise<string | undefined> {
+    const session = await this.tokenManager.getSession();
+
+    if (session.status === 'valid') {
+      return session.token;
+    }
+
+    if (session.status === 'expired') {
+      await vscode.window.showInformationMessage(
+        'Vertex Swarm session expired. Please sign in again.'
+      );
+    }
+
+    await this.handleLogout();
+    return undefined;
+  }
+
+  /**
+   * Create a new backend chat for multi-turn conversation state.
+   */
+  private async createChat(token: string): Promise<string | null> {
+    try {
+      const data = await this.requestJson<{ chatId: string }>(
+        '/api/v1/chats',
+        token,
+        {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({}),
+        }
+      );
+      
+      if (!data.chatId) {
+        throw new Error('No chatId in response');
+      }
+
+      return data.chatId;
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+      console.error('Failed to create chat:', errorMessage);
+      throw error;
+    }
+  }
+
+  private async fetchChatList(token: string): Promise<ChatSummaryData[]> {
+    return this.requestJson<ChatSummaryData[]>(
+      '/api/v1/chats',
+      token,
+      {
+        method: 'GET',
+        headers: {
+          Accept: 'application/json',
+        },
+      }
+    );
+  }
+
+  private async fetchChatMessages(token: string, chatId: string): Promise<ChatMessageData[]> {
+    return this.requestJson<ChatMessageData[]>(
+      `/api/v1/chats/${chatId}/messages`,
+      token,
+      {
+        method: 'GET',
+        headers: {
+          Accept: 'application/json',
+        },
+      }
+    );
+  }
+
+  private async sendChatList(token?: string): Promise<void> {
+    const validToken = token ?? await this.getValidToken();
+
+    if (!validToken) {
+      return;
+    }
+
+    try {
+      const chats = await this.fetchChatList(validToken);
+      this.post({
+        type: 'chat-list',
+        payload: {
+          chats,
+          activeChatId: this.currentChatId ?? null,
+        },
+      });
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+      if (!this.isUnauthorizedError(errorMessage)) {
+        console.error('Failed to load chat list:', errorMessage);
+        this.post({ type: 'error', payload: errorMessage });
+      }
+    }
+  }
+
+  private async openChat(token: string, chatId: string): Promise<void> {
+    const messages = await this.fetchChatMessages(token, chatId);
+    this.currentChatId = chatId;
+
+    this.post({
+      type: 'chat-opened',
+      payload: {
+        chatId,
+        messages,
+      },
+    });
+
+    await this.sendChatList(token);
+  }
+
+  private async requestJson<T>(
+    path: string,
+    token: string,
+    init: RequestInit
+  ): Promise<T> {
+    const headers = {
+      Authorization: `Bearer ${token}`,
+      ...(init.headers || {}),
+    };
+    const response = await fetch(`${BACKEND_URL}${path}`, {
+      ...init,
+      headers,
+    });
+
+    if (response.status === 401) {
+      await this.handleUnauthorized();
+      throw new Error('Authentication expired. Please sign in again.');
+    }
+
+    if (!response.ok) {
+      const errorData = await response.json().catch(
+        () => ({ detail: response.statusText })
+      ) as { detail?: string };
+      throw new Error(`${response.status} ${errorData.detail || response.statusText}`.trim());
+    }
+
+    return await response.json() as T;
+  }
+
+  private isUnauthorizedError(errorMessage: string): boolean {
+    return /(^|\s)401(\s|$)|expired|unauthorized/i.test(errorMessage);
+  }
+
+  private async handleUnauthorized(): Promise<void> {
+    await this.tokenManager.clearToken();
+    this.currentChatId = undefined;
+    this.streamClient = undefined;
+    await vscode.window.showWarningMessage(
+      'Vertex Swarm session expired. Please sign in again.'
+    );
+    await this.handleLogout();
   }
 
   /**
@@ -128,58 +294,124 @@ export class VertexSwarmSidebarProvider implements vscode.WebviewViewProvider {
 
       case 'request-token': {
         await this.checkAndSendExistingToken();
+        await this.sendChatList();
+        break;
+      }
+
+      case 'load-chat-list': {
+        await this.sendChatList();
         break;
       }
 
       case 'start-stream': {
         const payload = message.payload as StreamStartPayload;
-        const token = await this.tokenManager.getToken();
+        const token = await this.getValidToken();
 
         if (!token) {
-          this.post({ type: 'error', payload: 'No auth token. Please sign in first.' });
           return;
         }
 
-        this.streamClient = new SSEStreamClient(
-          BACKEND_URL,
-          token,
-          (event: SessionEvent) => {
-            this.post({ type: 'event', payload: event });
-          },
-          (error: string) => {
-            this.post({ type: 'error', payload: error });
-          },
-          () => {
-            this.post({ type: 'cancel-stream', payload: { sessionId: payload.sessionId } });
-          }
-        );
+        try {
+          const chatId = this.currentChatId ?? await this.createChat(token);
 
-        await this.streamClient.openStream(payload.sessionId);
+          if (!chatId) {
+            this.post({ type: 'error', payload: 'Failed to create chat' });
+            return;
+          }
+
+          this.currentChatId = chatId;
+          await this.sendChatList(token);
+
+          this.streamClient = new SSEStreamClient(
+            BACKEND_URL,
+            token,
+            (event: SessionEvent) => {
+              this.post({ type: 'event', payload: event });
+            },
+            (error: string) => {
+              if (this.isUnauthorizedError(error)) {
+                void this.handleUnauthorized();
+                return;
+              }
+
+              this.post({ type: 'error', payload: error });
+            },
+            () => {
+              this.post({ type: 'cancel-stream', payload: { sessionId: chatId } });
+            }
+          );
+
+          await this.streamClient.openChatStream(chatId, payload.message);
+          if (this.currentChatId === chatId) {
+            await this.sendChatList(token);
+          }
+        } catch (error) {
+          const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+          console.error('Failed to start stream:', errorMessage);
+          if (!this.isUnauthorizedError(errorMessage)) {
+            this.post({ type: 'error', payload: errorMessage });
+          }
+        }
+        break;
+      }
+
+      case 'open-chat': {
+        const payload = message.payload as OpenChatPayload;
+        const token = await this.getValidToken();
+
+        if (!token) {
+          return;
+        }
+
+        try {
+          await this.openChat(token, payload.chatId);
+        } catch (error) {
+          const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+          console.error('Failed to open chat:', errorMessage);
+          if (!this.isUnauthorizedError(errorMessage)) {
+            this.post({ type: 'error', payload: errorMessage });
+          }
+        }
         break;
       }
 
       case 'cancel-stream': {
         const payload = message.payload as StreamCancelPayload;
-        const token = await this.tokenManager.getToken();
-        if (this.streamClient && token) {
+        if (this.streamClient) {
           await this.streamClient.cancelStream(payload.sessionId);
         }
         break;
       }
 
+      case 'reset-chat': {
+        this.currentChatId = undefined;
+        this.streamClient = undefined;
+        await this.sendChatList();
+        break;
+      }
+
       case 'logout': {
-        await this.tokenManager.clearToken();
-        // Reload webview back to login screen
-        if (this.webviewView) {
-          this.webviewView.webview.html = this.buildWebviewHTML(this.webviewView.webview);
-          this.sendAuthUrl();
-        }
+        this.currentChatId = undefined;
+        await vscode.commands.executeCommand('vertex-swarm.logout');
         break;
       }
 
       default: {
         console.warn('VertexSwarm: unknown message type from webview');
       }
+    }
+  }
+
+  /**
+   * Public method for extension to trigger logout
+   */
+  public async handleLogout(): Promise<void> {
+    this.currentChatId = undefined;
+    this.streamClient = undefined;
+    if (this.webviewView) {
+      // Rebuild HTML to clear all React state
+      this.webviewView.webview.html = this.buildWebviewHTML(this.webviewView.webview);
+      this.sendAuthUrl();
     }
   }
 

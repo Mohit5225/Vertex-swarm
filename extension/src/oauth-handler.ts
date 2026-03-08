@@ -18,18 +18,15 @@ interface CallbackAuthResult {
  * OAuthHandler: Manages the full Neon Auth / Google social sign-in flow
  * for the VS Code extension.
  *
- * ## Architecture
- * 1. Extension starts a local HTTP server on a random port (0.0.0.0:0)
- * 2. Extension opens browser to http://localhost:{port}/start
- * 3. /start page POSTs to Neon Auth /sign-in/social via fetch (credentials: include)
- *    → Neon Auth returns { url } and sets the challenge cookie
- *    → CRITICAL: Origin MUST be http://localhost:{port}, NOT 127.0.0.1
- *      Neon Auth trusts localhost origins but rejects 127.0.0.1 with 403
- * 4. Browser redirects to the init URL → Google → Neon Auth callback
- * 5. Neon Auth redirects to http://localhost:{port}/callback?neon_auth_session_verifier=xxx
- * 6. /callback page exchanges the verifier for a session via GET /get-session
- * 7. The session token + user info are POSTed back to the local server
- * 8. Extension stores the token and completes the flow
+ * Flow:
+ * 1. Extension starts a local HTTP server on a random port.
+ * 2. Extension opens the browser to http://localhost:{port}/start.
+ * 3. /start POSTs to Neon Auth /sign-in/social using browser cookies.
+ * 4. Browser follows Neon's returned init URL to Google and back.
+ * 5. Neon Auth redirects to http://localhost:{port}/callback with a verifier.
+ * 6. /callback exchanges the verifier for a session.
+ * 7. A JWT for backend API auth + user info are POSTed back to the local server.
+ * 8. Extension stores the token and completes the flow.
  */
 export class OAuthHandler {
   private readonly neonAuthUrl: string;
@@ -44,13 +41,11 @@ export class OAuthHandler {
     private readonly tokenManager: TokenManager,
     private readonly context: vscode.ExtensionContext
   ) {
-    this.neonAuthUrl =
-      'https://ep-jolly-feather-aiaavjnk.neonauth.c-4.us-east-1.aws.neon.tech/neondb/auth';
+    this.neonAuthUrl = import.meta.env.VITE_NEON_AUTH_BASE_URL || 'http://localhost:8000';
   }
 
   /**
-   * Build localhost URLs. MUST use "localhost" — Neon Auth's trusted origins
-   * whitelist "localhost" but reject "127.0.0.1" with 403.
+   * MUST use localhost. Neon Auth trusts localhost origins but rejects 127.0.0.1.
    */
   private getCallbackUrl(): string {
     return `http://localhost:${this.allocatedPort}/callback`;
@@ -64,10 +59,6 @@ export class OAuthHandler {
     return `${this.neonAuthUrl}/sign-in`;
   }
 
-  /**
-   * Run the full OAuth flow:
-   *   start server → open browser → wait for token → store token
-   */
   async startAuthFlow(): Promise<boolean> {
     try {
       await this.startCallbackServer();
@@ -96,10 +87,6 @@ export class OAuthHandler {
     }
   }
 
-  // ---------------------------------------------------------------------------
-  // Local HTTP server
-  // ---------------------------------------------------------------------------
-
   private async startCallbackServer(): Promise<void> {
     if (this.localServer && this.allocatedPort) {
       return;
@@ -112,7 +99,6 @@ export class OAuthHandler {
       const server = http.createServer((req, res) => void this.handleRequest(req, res));
       this.localServer = server;
 
-      // Bind to 0.0.0.0 so both "localhost" and "127.0.0.1" resolve to this server.
       server.listen(0, '0.0.0.0', () => {
         const addr = server.address();
         if (!addr || typeof addr === 'string') {
@@ -134,7 +120,9 @@ export class OAuthHandler {
   }
 
   private async stopCallbackServer(): Promise<void> {
-    if (!this.localServer) return;
+    if (!this.localServer) {
+      return;
+    }
 
     return new Promise<void>((resolve) => {
       const server = this.localServer;
@@ -150,10 +138,6 @@ export class OAuthHandler {
       });
     });
   }
-
-  // ---------------------------------------------------------------------------
-  // Request router
-  // ---------------------------------------------------------------------------
 
   private async handleRequest(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
     const cors: Record<string, string> = {
@@ -171,19 +155,16 @@ export class OAuthHandler {
     try {
       const url = new URL(req.url || '/', `http://localhost:${this.allocatedPort}`);
 
-      // GET /start → serve the initiation page
       if (req.method === 'GET' && url.pathname === '/start') {
         this.serveHtml(res, this.buildStartPage());
         return;
       }
 
-      // GET /callback (or /) → Neon Auth redirects here with verifier
       if (req.method === 'GET' && (url.pathname === '/callback' || url.pathname === '/')) {
         this.serveHtml(res, this.buildCallbackPage(url));
         return;
       }
 
-      // POST /complete → browser sends the final token + user data
       if (req.method === 'POST' && url.pathname === '/complete') {
         const body = await this.readBody(req);
         const data = JSON.parse(body) as CallbackAuthResult;
@@ -196,7 +177,6 @@ export class OAuthHandler {
         return;
       }
 
-      // POST /error → browser reports an error
       if (req.method === 'POST' && url.pathname === '/error') {
         const body = await this.readBody(req);
         const data = JSON.parse(body) as { error?: string };
@@ -214,10 +194,6 @@ export class OAuthHandler {
       res.end('Internal server error');
     }
   }
-
-  // ---------------------------------------------------------------------------
-  // Polling for the result
-  // ---------------------------------------------------------------------------
 
   private waitForCallback(timeoutMs: number): Promise<CallbackAuthResult | null> {
     return new Promise((resolve, reject) => {
@@ -237,10 +213,6 @@ export class OAuthHandler {
     });
   }
 
-  // ---------------------------------------------------------------------------
-  // HTML page builders
-  // ---------------------------------------------------------------------------
-
   private buildStartPage(): string {
     const AUTH_URL = JSON.stringify(this.neonAuthUrl);
     const CALLBACK_URL = JSON.stringify(this.getCallbackUrl());
@@ -249,7 +221,7 @@ export class OAuthHandler {
 <html lang="en">
 <head>
   <meta charset="UTF-8"/>
-  <title>Vertex Swarm — Sign In</title>
+  <title>Vertex Swarm - Sign In</title>
   <style>
     *{box-sizing:border-box}
     body{margin:0;min-height:100vh;display:grid;place-items:center;background:#0f172a;color:#e2e8f0;font:14px/1.6 "Segoe UI",system-ui,sans-serif}
@@ -267,7 +239,7 @@ export class OAuthHandler {
 <div class="card">
   <h1>Vertex Swarm</h1>
   <p class="sub">Authenticating with Google via Neon Auth</p>
-  <div id="status" class="info">Initializing…</div>
+  <div id="status" class="info">Initializing...</div>
   <div id="log"></div>
 </div>
 <script>
@@ -280,6 +252,19 @@ export class OAuthHandler {
   function log(msg){ elLog.textContent += msg + '\\n'; }
   function setStatus(msg, cls){ elStatus.textContent = msg; elStatus.className = cls || 'info'; }
 
+  function forceGoogleAccountSelection(urlString){
+    try {
+      var url = new URL(urlString);
+      if (url.hostname === 'accounts.google.com' || url.hostname.endsWith('.accounts.google.com')) {
+        url.searchParams.set('prompt', 'select_account');
+      }
+      return url.toString();
+    } catch (e) {
+      log('Could not rewrite OAuth URL: ' + (e && e.message ? e.message : String(e)));
+      return urlString;
+    }
+  }
+
   function reportError(msg){
     return fetch('/error',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({error:msg})}).catch(function(){});
   }
@@ -287,9 +272,17 @@ export class OAuthHandler {
   async function begin(){
     log('Neon Auth: ' + AUTH_URL);
     log('Callback:  ' + CALLBACK);
-    setStatus('Contacting Neon Auth…', 'info');
+    setStatus('Clearing previous session...', 'info');
 
     try {
+      log('POST /sign-out (clearing Neon Auth session)');
+      await fetch(AUTH_URL + '/sign-out', {
+        method: 'POST',
+        credentials: 'include',
+        headers: { 'Content-Type': 'application/json' }
+      }).catch(function(e){ log('Neon Auth sign-out: ' + e.message); });
+
+      setStatus('Contacting Neon Auth...', 'info');
       log('POST /sign-in/social');
       var resp = await fetch(AUTH_URL + '/sign-in/social', {
         method: 'POST',
@@ -318,9 +311,10 @@ export class OAuthHandler {
         throw new Error('No redirect URL in response: ' + JSON.stringify(data));
       }
 
-      log('Redirecting to Google…');
-      setStatus('Redirecting to Google sign-in…', 'ok');
-      window.location.href = data.url;
+      var redirectUrl = forceGoogleAccountSelection(data.url);
+      log('Redirecting to Google...');
+      setStatus('Redirecting to Google sign-in...', 'ok');
+      window.location.href = redirectUrl;
 
     } catch(err) {
       var msg = err instanceof Error ? err.message : String(err);
@@ -352,7 +346,7 @@ export class OAuthHandler {
 <html lang="en">
 <head>
   <meta charset="UTF-8"/>
-  <title>Vertex Swarm — Completing Sign-In</title>
+  <title>Vertex Swarm - Completing Sign-In</title>
   <style>
     *{box-sizing:border-box}
     body{margin:0;min-height:100vh;display:grid;place-items:center;background:#0f172a;color:#e2e8f0;font:14px/1.6 "Segoe UI",system-ui,sans-serif}
@@ -367,8 +361,8 @@ export class OAuthHandler {
 <body>
 <div class="card">
   <h1>Vertex Swarm</h1>
-  <p class="sub">Completing sign-in…</p>
-  <div id="status" class="info">Exchanging session token…</div>
+  <p class="sub">Completing sign-in...</p>
+  <div id="status" class="info">Exchanging Neon session for API JWT...</div>
   <div id="log"></div>
 </div>
 <script>
@@ -392,7 +386,7 @@ export class OAuthHandler {
 
   async function finalize(){
     log('URL: ' + window.location.href);
-    log('Verifier: ' + (VERIFIER ? VERIFIER.substring(0,16) + '…' : '(none)'));
+    log('Verifier: ' + (VERIFIER ? VERIFIER.substring(0,16) + '...' : '(none)'));
 
     if (UPSTREAM_ERROR) {
       log('Upstream error: ' + UPSTREAM_ERROR);
@@ -412,8 +406,8 @@ export class OAuthHandler {
 
     try {
       var sessionUrl = AUTH_URL + '/get-session?neon_auth_session_verifier=' + encodeURIComponent(VERIFIER);
-      log('GET ' + sessionUrl.substring(0, 80) + '…');
-      setStatus('Exchanging verifier for session…', 'info');
+      log('GET ' + sessionUrl.substring(0, 80) + '...');
+      setStatus('Exchanging verifier for session...', 'info');
 
       var resp = await fetch(sessionUrl, {
         credentials: 'include',
@@ -428,15 +422,43 @@ export class OAuthHandler {
         throw new Error('Session exchange failed (HTTP ' + resp.status + '): ' + text.substring(0, 200));
       }
 
+      var jwtFromHeader = resp.headers.get('set-auth-jwt');
       var data = JSON.parse(text);
-      var token = (data && data.session && data.session.token) || (data && data.token);
+      var sessionToken = (data && data.session && data.session.token) || (data && data.token) || '';
       var user  = (data && data.user) || (data && data.session && data.session.user) || {};
+      var token = jwtFromHeader || '';
 
       if (!token) {
-        throw new Error('No session token in response. Body: ' + text.substring(0, 200));
+        log('JWT header missing, requesting /token...');
+        var tokenHeaders = { 'Accept': 'application/json' };
+        if (sessionToken) {
+          tokenHeaders['Authorization'] = 'Bearer ' + sessionToken;
+        }
+
+        var tokenResp = await fetch(AUTH_URL + '/token', {
+          credentials: 'include',
+          headers: tokenHeaders
+        });
+
+        log('Token status: ' + tokenResp.status);
+        var tokenText = await tokenResp.text();
+        log('Token body: ' + tokenText.substring(0, 300));
+
+        if (tokenResp.ok) {
+          var tokenData = JSON.parse(tokenText);
+          token = (tokenData && tokenData.token) || '';
+        }
       }
 
-      log('Token: ' + token.substring(0, 16) + '…');
+      if (!token) {
+        throw new Error('No JWT token returned by Neon Auth. Body: ' + text.substring(0, 200));
+      }
+
+      if (token.split('.').length !== 3) {
+        throw new Error('Neon Auth returned a non-JWT token for backend auth');
+      }
+
+      log('JWT: ' + token.substring(0, 16) + '...');
       log('User: ' + JSON.stringify(user));
       setStatus('Signed in as ' + (user.email || user.name || user.id || 'user') + '. You can close this tab and return to VS Code.', 'ok');
       await reportSuccess(token, user);
@@ -455,10 +477,6 @@ export class OAuthHandler {
 </body>
 </html>`;
   }
-
-  // ---------------------------------------------------------------------------
-  // Helpers
-  // ---------------------------------------------------------------------------
 
   private serveHtml(res: http.ServerResponse, html: string): void {
     res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });

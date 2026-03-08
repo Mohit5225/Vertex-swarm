@@ -28,7 +28,7 @@
         {
           "type": "webview",
           "id": "vertex-swarm.sidebar",
-          "name": "Agent"
+          "name": "Chat"
         }
       ]
     },
@@ -39,7 +39,8 @@
       },
       {
         "command": "vertex-swarm.logout",
-        "title": "Vertex: Logout"
+        "title": "Sign Out",
+        "icon": "$(sign-out)"
       }
     ]
   },

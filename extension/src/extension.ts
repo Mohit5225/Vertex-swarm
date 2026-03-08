@@ -20,7 +20,12 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   context.subscriptions.push(
     vscode.window.registerWebviewViewProvider(
       VertexSwarmSidebarProvider.viewId,
-      sidebarProvider
+      sidebarProvider,
+      {
+        webviewOptions: {
+          retainContextWhenHidden: true
+        }
+      }
     )
   );
 
@@ -28,7 +33,9 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   context.subscriptions.push(
     vscode.commands.registerCommand('vertex-swarm.logout', async () => {
       await tokenManager.clearToken();
-      vscode.window.showInformationMessage('Vertex Swarm: Logged out');
+
+      // Reset the sidebar locally without redirecting the user elsewhere.
+      await sidebarProvider.handleLogout();
     })
   );
 }

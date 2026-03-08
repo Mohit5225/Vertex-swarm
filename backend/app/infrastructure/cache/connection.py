@@ -177,14 +177,14 @@ def task_queue_key() -> str:
 # State Operations
 # ============================================================================
 
-async def store_session_state(session_id: str, state: SessionState, ttl: int = 604800) -> None:
+async def store_session_state(session_id: str, state: SessionState, ttl: int = 10800) -> None:
     """
     Store session state in Redis.
     
     Args:
         session_id: Unique session identifier
         state: Complete SessionState (persisted + ephemeral)
-        ttl: Time-to-live in seconds (default: 7 days for persisted)
+        ttl: Time-to-live in seconds (default: 10800 = 3 hours for persisted)
     
     Behavior:
         - Persisted state: stored with TTL (survives restarts)
@@ -204,6 +204,17 @@ async def store_session_state(session_id: str, state: SessionState, ttl: int = 6
     await client.set(
         session_ephemeral_key(session_id),
         serialized["ephemeral"],
+    )
+
+    last_message_at = int(state.persisted.last_message_at.timestamp())
+    await client.setex(
+        f"session:{session_id}:last_message_at",
+        ttl,
+        last_message_at,
+    )
+    await client.setnx(
+        f"session:{session_id}:agent_status",
+        "ACTIVE",
     )
 
 
@@ -235,6 +246,11 @@ async def delete_session_state(session_id: str) -> None:
         session_persisted_key(session_id),
         session_ephemeral_key(session_id),
         session_lock_key(session_id),
+        f"session:{session_id}:last_message_at",
+        f"session:{session_id}:agent_status",
+        f"session:{session_id}:last_heartbeat_response",
+        f"session:{session_id}:archived_at",
+        f"session:{session_id}:user_id",
     )
 
 

@@ -7,6 +7,8 @@ from app.core.config import settings
 from app.infrastructure.cache import init_redis, close_redis
 from app.infrastructure.heartbeat import init_vitality_tracker, close_vitality_tracker
 from app.infrastructure.jobs import init_archival_job, close_archival_job
+from app.db.postgres.connection import async_engine, Base
+import app.db.postgres.models  # noqa: F401 — registers ORM metadata before create_all
 
 logger = logging.getLogger(__name__)
 
@@ -29,7 +31,16 @@ async def lifespan(app: FastAPI):
     """
     # Startup
     logger.info("🚀 Backend startup sequence")
-    
+
+    try:
+        logger.info("Creating database tables...")
+        async with async_engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+        logger.info("✅ Database tables ready")
+    except Exception as exc:
+        logger.error(f"❌ Database table creation failed: {exc}")
+        raise
+
     try:
         logger.info("Initializing Redis cache...")
         await init_redis()
@@ -106,8 +117,10 @@ async def root():
 
 # Include API routes
 from app.api.v1 import endpoints, sessions
+from app.api.v1.chat import router as chat_router
 from app.auth.routes import protected as auth
 
 app.include_router(auth.router)
 app.include_router(endpoints.router)
 app.include_router(sessions.router)
+app.include_router(chat_router)

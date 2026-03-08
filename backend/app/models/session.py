@@ -19,6 +19,10 @@ class PersistedSessionState(BaseModel):
     )
     token_count: int = Field(default=0, ge=0, description="Total tokens consumed in this session")
     plan_state: Optional[Dict[str, Any]] = Field(None, description="Current decomposed plan representation")
+    last_message_at: datetime = Field(
+        default_factory=lambda: datetime.now(timezone.utc),
+        description="Timestamp of last user message. Resets on new message. Core reference for 3-hour TTL.",
+    )
 
 
 class EphemeralSessionState(BaseModel):

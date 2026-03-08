@@ -1,4 +1,4 @@
-"""Database queries for neon_auth schema."""
+"""Postgres auth queries."""
 from typing import Optional
 
 from sqlalchemy import text
@@ -8,9 +8,7 @@ from app.models.auth import NeonAuthUser
 
 
 async def get_user_by_id(session: AsyncSession, user_id: str) -> Optional[NeonAuthUser]:
-    """
-    Query neon_auth.user by ID from JWT subject claim.
-    """
+    """Query neon_auth.user by ID from JWT subject claim."""
     try:
         stmt = text("""
             SELECT id, email, "emailVerified", name, image, "createdAt", "updatedAt"

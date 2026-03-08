@@ -1,6 +1,6 @@
 """Session endpoints (Phase 3) — Create sessions and stream agent responses via SSE"""
-import asyncio
 import json
+import logging
 import uuid
 from datetime import datetime, timezone
 
@@ -8,11 +8,14 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
-from app.models.session import Session, SessionState
 from app.auth.dependencies import AuthenticatedUser, get_current_user
-from app.infrastructure.cache import store_session_state, retrieve_session_state
+from app.core.config import settings
+from app.infrastructure.cache import store_session_state, retrieve_session_state, get_redis
+from app.models.session import SessionState
+from app.services.llm_service import stream_chat_completion
 
 router = APIRouter(prefix="/api/v1/sessions", tags=["sessions"])
+logger = logging.getLogger(__name__)
 
 
 class CreateSessionRequest(BaseModel):
@@ -65,12 +68,17 @@ async def create_session(
             },
             "token_count": 0,
             "plan_state": None,
+            "last_message_at": datetime.now(timezone.utc),
         }
     )
     
     # Store in Redis (expires in 3 hours)
-    await store_session_state(session_id, session_state)
-    
+    await store_session_state(session_id, session_state, ttl=10800)
+
+    # Store user_id separately so archival job can attribute the archived record
+    redis_client = await get_redis()
+    await redis_client.setex(f"session:{session_id}:user_id", 10800, user.user_id)
+
     return {
         "sessionId": session_id,
         "runId": run_id,
@@ -90,22 +98,17 @@ async def stream_session(
     user: AuthenticatedUser = Depends(get_current_user)
 ):
     """
-    Stream agent execution events via Server-Sent Events (SSE).
-    
-    Phase 3 Implementation: Mock streaming with realistic event sequence.
-    Future: Replace with actual agent execution subprocess.
-    
+    Stream a real LLM response for the session via Server-Sent Events (SSE).
+
     Event types:
-    - "thinking": Agent's reasoning trace
-    - "tool_call": Calling external tool with args
-    - "tool_result": Return value from tool
-    - "output": Final agent response to user
+    - "status": Lifecycle status messages
+    - "output": Final model response to user
     - "error": Execution error
-    
+
     Flow:
-    1. Load session from Redis (verify user ownership)
-    2. Stream mock events every 500ms (realistic delay)
-    3. Close stream when events exhaust
+    1. Load session from Redis and verify user ownership
+    2. Call the configured OpenRouter model
+    3. Emit the final response when generation completes
     
     Args:
         session_id: Session ID to stream from
@@ -121,39 +124,51 @@ async def stream_session(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Session {session_id} not found"
         )
-    
-    # Get user message from session
-    user_message = session_state.persisted.get("working_memory", {}).get("user_message", "test")
+
+    redis_client = await get_redis()
+    owner_user_id = await redis_client.get(f"session:{session_id}:user_id")
+    if owner_user_id and owner_user_id != user.user_id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="You do not have access to this session",
+        )
+
+    # SessionState.persisted is a Pydantic model, not a dict.
+    user_message = session_state.persisted.working_memory.get("user_message", "test")
     
     async def event_generator():
-        """Generate SSE events."""
+        """Generate SSE events backed by OpenRouter instead of mock tool traces."""
         try:
-            # Event 1: Thinking trace
-            await asyncio.sleep(0.5)
-            yield f"data: {json.dumps({'id': 'evt-1', 'type': 'thinking', 'content': f'Analyzing user request: {user_message}'})}\n\n"
-            
-            # Event 2: Tool call (simulated)
-            await asyncio.sleep(0.5)
-            yield f"data: {json.dumps({'id': 'evt-2', 'type': 'tool_call', 'toolName': 'search', 'args': {'query': user_message}})}\n\n"
-            
-            # Event 3: Tool result
-            await asyncio.sleep(0.5)
-            yield f"data: {json.dumps({'id': 'evt-3', 'type': 'tool_result', 'content': f'Found 5 results for: {user_message}'})}\n\n"
-            
-            # Event 4: Thinking continued
-            await asyncio.sleep(0.5)
-            yield f"data: {json.dumps({'id': 'evt-4', 'type': 'thinking', 'content': 'Synthesizing results into response...'})}\n\n"
-            
-            # Event 5: Final output
-            await asyncio.sleep(0.5)
-            output_text = f"Based on your request '{user_message}', here are the key findings:\n\n1. **Finding 1**: Description of result\n2. **Finding 2**: Another important point\n3. **Finding 3**: Final insight"
-            yield f"data: {json.dumps({'id': 'evt-5', 'type': 'output', 'content': output_text})}\n\n"
-            
-            # Signal completion
-            await asyncio.sleep(0.3)
-            
+            if not settings.openrouter_api_key:
+                raise RuntimeError("OpenRouter is not configured on the backend")
+
+            session_state.persisted.working_memory["status"] = "running"
+            await store_session_state(session_id, session_state, ttl=10800)
+
+            yield f"data: {json.dumps({'id': 'evt-1', 'type': 'status', 'content': f'Calling model {settings.openrouter_model}...'})}\n\n"
+
+            full_response = ""
+            async for token in stream_chat_completion(
+                [{"role": "user", "content": user_message}]
+            ):
+                full_response += token
+
+            if not full_response.strip():
+                raise RuntimeError("OpenRouter returned an empty response")
+
+            session_state.persisted.working_memory["status"] = "completed"
+            session_state.persisted.working_memory["assistant_response"] = full_response
+            session_state.persisted.last_message_at = datetime.now(timezone.utc)
+            await store_session_state(session_id, session_state, ttl=10800)
+
+            yield f"data: {json.dumps({'id': 'evt-2', 'type': 'output', 'content': full_response})}\n\n"
+
         except Exception as e:
             error_msg = str(e)
+            logger.error("Session stream failed for %s: %s", session_id, error_msg, exc_info=True)
+            session_state.persisted.working_memory["status"] = "failed"
+            session_state.persisted.working_memory["last_error"] = error_msg
+            await store_session_state(session_id, session_state, ttl=10800)
             yield f"data: {json.dumps({'id': 'evt-error', 'type': 'error', 'content': f'Stream error: {error_msg}'})}\n\n"
     
     return StreamingResponse(
