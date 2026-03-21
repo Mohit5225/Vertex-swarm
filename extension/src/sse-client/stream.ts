@@ -8,6 +8,7 @@ export class SSEStreamClient {
   private eventSource: EventSource | null = null;
   private isConnected = false;
   private abortController: AbortController | null = null;
+  private eventCounter = 0;
 
   constructor(
     private readonly backendUrl: string,
@@ -48,7 +49,12 @@ export class SSEStreamClient {
     }
   }
 
-  async openChatStream(chatId: string, message: string): Promise<void> {
+  async openChatStream(
+    chatId: string,
+    message: string,
+    workspaceSkeleton?: string,
+    ideContextEnabled?: boolean
+  ): Promise<void> {
     try {
       const streamUrl = `${this.backendUrl}/api/v1/chats/${chatId}/messages`;
       this.abortController = new AbortController();
@@ -60,7 +66,11 @@ export class SSEStreamClient {
           Accept: 'text/event-stream',
           'Content-Type': 'application/json',
         },
-        body: JSON.stringify({ content: message }),
+        body: JSON.stringify({
+          content: message,
+          ide_context_enabled: Boolean(ideContextEnabled),
+          ...(workspaceSkeleton ? { workspace_skeleton: workspaceSkeleton } : {}),
+        }),
         signal: this.abortController.signal,
       });
 
@@ -122,6 +132,16 @@ export class SSEStreamClient {
           if (line.startsWith('data: ')) {
             try {
               const eventData = JSON.parse(line.substring(6));
+              if (
+                eventData &&
+                typeof eventData === 'object' &&
+                eventData.type === 'done'
+              ) {
+                await reader.cancel().catch(() => undefined);
+                this.onClose();
+                return;
+              }
+
               const normalizedEvent = this.normalizeEvent(eventData);
               if (normalizedEvent) {
                 this.onEvent(normalizedEvent);
@@ -203,24 +223,58 @@ export class SSEStreamClient {
       ? normalizedType
       : 'status';
     const toolName =
-      typeof eventData.toolName === 'string' ? eventData.toolName : undefined;
+      typeof eventData.toolName === 'string'
+        ? eventData.toolName
+        : typeof eventData.tool_name === 'string'
+          ? eventData.tool_name
+          : undefined;
+    const toolCallId =
+      typeof eventData.tool_call_id === 'string'
+        ? eventData.tool_call_id
+        : typeof eventData.toolCallId === 'string'
+          ? eventData.toolCallId
+          : undefined;
+    const sessionId =
+      typeof eventData.session_id === 'string'
+        ? eventData.session_id
+        : typeof eventData.sessionId === 'string'
+          ? eventData.sessionId
+          : undefined;
+    const chatId =
+      typeof eventData.chat_id === 'string'
+        ? eventData.chat_id
+        : typeof eventData.chatId === 'string'
+          ? eventData.chatId
+          : undefined;
+    const messageId =
+      typeof eventData.message_id === 'string'
+        ? eventData.message_id
+        : typeof eventData.messageId === 'string'
+          ? eventData.messageId
+          : undefined;
     const args =
       eventData.args && typeof eventData.args === 'object'
         ? (eventData.args as Record<string, unknown>)
         : undefined;
-    const metadata =
-      eventData.metadata && typeof eventData.metadata === 'object'
-        ? {
-            ...(eventData.metadata as Record<string, unknown>),
-            ...(toolName ? { toolName } : {}),
-            ...(args ? { args } : {}),
-            ...(rawType === 'token' ? { appendMode: 'token' } : {}),
-          }
-        : {
-            ...(toolName ? { toolName } : {}),
-            ...(args ? { args } : {}),
-            ...(rawType === 'token' ? { appendMode: 'token' } : {}),
-          };
+    const metadata = {
+      ...(eventData.metadata && typeof eventData.metadata === 'object'
+        ? (eventData.metadata as Record<string, unknown>)
+        : {}),
+      ...(toolName ? { tool_name: toolName } : {}),
+      ...(toolCallId ? { tool_call_id: toolCallId } : {}),
+      ...(sessionId ? { session_id: sessionId } : {}),
+      ...(chatId ? { chat_id: chatId } : {}),
+      ...(messageId ? { message_id: messageId } : {}),
+      ...(args ? { args } : {}),
+      ...(typeof eventData.status === 'string' ? { status: eventData.status } : {}),
+      ...(typeof eventData.execution_time_ms === 'number'
+        ? { execution_time_ms: eventData.execution_time_ms }
+        : {}),
+      ...(typeof eventData.error_code === 'string'
+        ? { error_code: eventData.error_code }
+        : {}),
+      ...(rawType === 'token' ? { appendMode: 'token' } : {}),
+    };
     const content =
       typeof eventData.content === 'string'
         ? eventData.content
@@ -229,7 +283,10 @@ export class SSEStreamClient {
           : '';
 
     return {
-      id: typeof eventData.id === 'string' ? eventData.id : `evt-${Date.now()}`,
+      id:
+        typeof eventData.id === 'string'
+          ? eventData.id
+          : `evt-${Date.now()}-${++this.eventCounter}`,
       type,
       content,
       timestamp:

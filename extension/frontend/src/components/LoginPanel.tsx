@@ -24,8 +24,8 @@ const LoginPanel: React.FC = () => {
           Sign in to open the agent.
         </h1>
         <p className="mt-3 max-w-[24rem] text-sm leading-7 text-[#92a0bb]">
-          The session is stored locally in the extension and expires after 60
-          days.
+          The session is stored locally in the extension and re-auth is needed
+          when the backend JWT expires.
         </p>
 
         {error && (
@@ -53,7 +53,7 @@ const LoginPanel: React.FC = () => {
         </div>
 
         <p className="mt-4 text-[12px] leading-6 text-[#7383a1]">
-          Stored locally / Browser account chooser / 60-day session window
+          Stored locally / Browser account chooser / backend JWT session
         </p>
       </div>
     </div>

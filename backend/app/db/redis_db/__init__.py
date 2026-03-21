@@ -1,5 +1,5 @@
-"""Cache layer — Redis for working memory and session state"""
-from app.infrastructure.cache.connection import (
+"""Redis database layer — session state persistence and retrieval"""
+from app.db.redis_db.connection import (
     init_redis,
     get_redis,
     close_redis,
@@ -14,6 +14,7 @@ from app.infrastructure.cache.connection import (
     session_ephemeral_key,
     session_lock_key,
     task_queue_key,
+    tool_result_stream_key,
     store_session_state,
     retrieve_session_state,
     delete_session_state,
@@ -37,6 +38,7 @@ __all__ = [
     "session_ephemeral_key",
     "session_lock_key",
     "task_queue_key",
+    "tool_result_stream_key",
     "store_session_state",
     "retrieve_session_state",
     "delete_session_state",

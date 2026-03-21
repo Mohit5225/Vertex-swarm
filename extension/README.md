@@ -55,3 +55,6 @@ npm run build
 ```bash
 npm run dev
 ```
+
+In VS Code, use the `Run Vertex Swarm Extension` debug configuration from `.vscode/launch.json`.
+It starts the extension host once and watches both the extension bundle and the frontend bundle in the background.

@@ -13,7 +13,7 @@ import logging
 import time
 from typing import Optional
 
-from app.infrastructure.cache import get_redis
+from app.db.redis_db import get_redis
 from app.db.session_store import archive_session
 
 logger = logging.getLogger(__name__)

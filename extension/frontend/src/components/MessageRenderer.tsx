@@ -1,9 +1,10 @@
-import React, { useState } from 'react'
+import React, { useState, useRef, useEffect } from 'react'
 import { type ChatMessage, type SessionEvent } from '../store/chatStore'
 import { useChatStore } from '../store/chatStore'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import { Cpu, ChevronDown, ChevronRight, Play, CheckCircle, Wrench } from 'lucide-react'
+import { describePendingMessage, getTraceEventSummary } from '../lib/trace'
 
 interface Props {
   message: ChatMessage
@@ -88,32 +89,40 @@ const getEventMeta = (event: SessionEvent) => {
 const ToolEvent: React.FC<{ event: SessionEvent }> = ({ event }) => {
   const [open, setOpen] = useState(event.type !== 'thinking')
   const meta = getEventMeta(event)
+  const summary = getTraceEventSummary(event)
+  const scrollRef = useRef<HTMLPreElement>(null)
+
+  // Ensure scroll stays at the bottom when new thinking text streams in,
+  // but keep all history accessible via scrolling up.
+  useEffect(() => {
+    if (scrollRef.current && event.type === 'thinking' && open) {
+      scrollRef.current.scrollTop = scrollRef.current.scrollHeight
+    }
+  }, [event.content, event.type, open])
 
   return (
     <div className="trace-item">
       <button
         type="button"
         onClick={() => setOpen(!open)}
-        className="flex w-full items-center justify-between gap-3 px-3 py-2.5 text-left"
+        className="flex w-full items-center justify-between gap-3 px-3 py-2.5 text-left transition-colors hover:bg-white/5"
       >
         <div className="flex min-w-0 items-center gap-3">
           <span className={`h-2.5 w-2.5 shrink-0 rounded-full ${meta.accent}`} />
-          <div className="min-w-0">
-            <div className="flex items-center gap-2 text-[#e7eefc]">
-              {meta.icon}
-              <span className="text-[11px] font-medium uppercase tracking-[0.18em]">
-                {meta.label}
-              </span>
-            </div>
-            {event.content && (
+            <div className="min-w-0">
+              <div className="flex items-center gap-2 text-[#e7eefc]">
+                {meta.icon}
+                <span className="text-[11px] font-medium uppercase tracking-[0.18em]">
+                  {meta.label}
+                </span>
+              </div>
               <p className="mt-1 truncate text-xs text-[#91a0bb] max-[360px]:hidden">
-                {event.content}
+                {summary}
               </p>
-            )}
+            </div>
           </div>
-        </div>
 
-        <span className="text-[#91a0bb]">
+        <span className="text-[#91a0bb] transition-transform duration-200">
           {open ? (
             <ChevronDown className="h-4 w-4" />
           ) : (
@@ -124,7 +133,10 @@ const ToolEvent: React.FC<{ event: SessionEvent }> = ({ event }) => {
 
       {open && event.content && (
         <div className="trace-panel pb-3 pr-3 pt-1">
-          <pre className="whitespace-pre-wrap break-words font-mono text-xs leading-6 text-[#dbe5f8]">
+          <pre 
+            ref={scrollRef}
+            className="whitespace-pre-wrap break-words font-mono text-xs leading-6 text-[#91a0bb] max-h-64 overflow-y-auto custom-scrollbar"
+          >
             {event.content}
           </pre>
         </div>
@@ -142,6 +154,7 @@ const MessageRenderer: React.FC<Props> = ({ message }) => {
   const isStreamingMessage =
     !isUser && isStreaming && activeMessageId === message.id
   const traceEvents = message.events?.filter((event) => event.type !== 'output')
+  const pendingLabel = describePendingMessage(message)
 
   return (
     <div
@@ -199,7 +212,7 @@ const MessageRenderer: React.FC<Props> = ({ message }) => {
 
           {!message.content && !isUser && (
             <p className="text-sm leading-6 text-[#91a0bb]">
-              Waiting for the first tool event...
+              {pendingLabel}
             </p>
           )}
         </div>

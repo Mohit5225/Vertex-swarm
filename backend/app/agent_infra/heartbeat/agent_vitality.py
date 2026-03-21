@@ -14,7 +14,7 @@ import logging
 import time
 from typing import Optional, Dict, Any
 
-from app.infrastructure.cache import get_redis
+from app.db.redis_db import get_redis
 
 logger = logging.getLogger(__name__)
 

@@ -1,4 +1,5 @@
 """JWT verification dependency for FastAPI routes (Phase 2)"""
+import logging
 from typing import Optional
 
 from fastapi import Depends, Request
@@ -8,6 +9,8 @@ from app.auth.core import NeonAuthVerificationError, verify_neon_auth_jwt
 from app.db.postgres.auth import get_user_by_id
 from app.models.auth import NeonAuthUser
 from app.db.postgres.connection import AsyncSessionLocal
+
+logger = logging.getLogger(__name__)
 
 
 class AuthenticatedUser:
@@ -63,9 +66,8 @@ async def get_current_user(request: Request) -> AuthenticatedUser:
             user_id = jwt_claims.get("sub")
             if user_id:
                 db_user = await get_user_by_id(session, user_id)
-    except Exception as e:
-        # Log but don't fail authentication
-        print(f"Warning: Could not fetch user from database: {e}")
+    except Exception:
+        logger.warning("Could not fetch authenticated user profile", exc_info=True)
 
     return AuthenticatedUser(jwt_claims=jwt_claims, db_user=db_user)
 
@@ -101,8 +103,8 @@ async def get_current_user_optional(request: Request) -> Optional[AuthenticatedU
             user_id = jwt_claims.get("sub")
             if user_id:
                 db_user = await get_user_by_id(session, user_id)
-    except Exception as e:
-        print(f"Warning: Could not fetch user from database: {e}")
+    except Exception:
+        logger.warning("Could not fetch optional authenticated user profile", exc_info=True)
 
     return AuthenticatedUser(jwt_claims=jwt_claims, db_user=db_user)
 

@@ -3,7 +3,7 @@ from typing import Any, Dict, Optional
 import json
 import redis.asyncio as redis
 from redis.asyncio import Redis as AsyncRedis
-from app.cache.config import RedisSettings
+from app.db.redis_db.config import RedisSettings
 from app.models.session import PersistedSessionState, EphemeralSessionState, SessionState
 
 # ============================================================================
@@ -58,7 +58,7 @@ async def close_redis():
     """
     global _redis_client
     if _redis_client:
-        await _redis_client.close()
+        await _redis_client.aclose()
         _redis_client = None
 
 
@@ -144,7 +144,7 @@ def deserialize_session_state(persisted_json: str, ephemeral_json: Optional[str]
     if ephemeral_json:
         ephemeral = deserialize_ephemeral_state(ephemeral_json)
     else:
-        ephemeral = EphemeralSessionState()
+        ephemeral = EphemeralSessionState(in_flight_tool_call=None)
     
     return SessionState(persisted=persisted, ephemeral=ephemeral)
 
@@ -173,18 +173,28 @@ def task_queue_key() -> str:
     return "task_queue:events"
 
 
+def tool_result_stream_key(
+    session_id: str,
+    chat_id: str,
+    message_id: str,
+    tool_call_id: str,
+) -> str:
+    """Redis Streams key for a single tool result channel."""
+    return f"tool_result_stream:{session_id}:{chat_id}:{message_id}:{tool_call_id}"
+
+
 # ============================================================================
 # State Operations
 # ============================================================================
 
-async def store_session_state(session_id: str, state: SessionState, ttl: int = 604800) -> None:
+async def store_session_state(session_id: str, state: SessionState, ttl: int = 10800) -> None:
     """
     Store session state in Redis.
     
     Args:
         session_id: Unique session identifier
         state: Complete SessionState (persisted + ephemeral)
-        ttl: Time-to-live in seconds (default: 7 days for persisted)
+        ttl: Time-to-live in seconds (default: 10800 = 3 hours for persisted)
     
     Behavior:
         - Persisted state: stored with TTL (survives restarts)
@@ -204,6 +214,17 @@ async def store_session_state(session_id: str, state: SessionState, ttl: int = 6
     await client.set(
         session_ephemeral_key(session_id),
         serialized["ephemeral"],
+    )
+
+    last_message_at = int(state.persisted.last_message_at.timestamp())
+    await client.setex(
+        f"session:{session_id}:last_message_at",
+        ttl,
+        last_message_at,
+    )
+    await client.setnx(
+        f"session:{session_id}:agent_status",
+        "ACTIVE",
     )
 
 
@@ -235,6 +256,11 @@ async def delete_session_state(session_id: str) -> None:
         session_persisted_key(session_id),
         session_ephemeral_key(session_id),
         session_lock_key(session_id),
+        f"session:{session_id}:last_message_at",
+        f"session:{session_id}:agent_status",
+        f"session:{session_id}:last_heartbeat_response",
+        f"session:{session_id}:archived_at",
+        f"session:{session_id}:user_id",
     )
 
 

@@ -5,6 +5,9 @@ import { VertexSwarmSidebarProvider } from './webview-provider';
 
 export async function activate(context: vscode.ExtensionContext): Promise<void> {
   console.log('Vertex Swarm extension activated');
+  const outputChannel = vscode.window.createOutputChannel('Vertex Swarm');
+  outputChannel.appendLine(`[${new Date().toISOString()}] Extension activated`);
+  context.subscriptions.push(outputChannel);
 
   const tokenManager = new TokenManager(context.secrets);
   const oauthHandler = new OAuthHandler(tokenManager, context);
@@ -14,7 +17,8 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     context.extensionUri,
     tokenManager,
     oauthHandler,
-    context
+    context,
+    outputChannel
   );
 
   context.subscriptions.push(

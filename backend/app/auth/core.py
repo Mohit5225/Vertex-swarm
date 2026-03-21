@@ -1,5 +1,4 @@
 """JWT verification and Neon Auth integration (Phase 2)"""
-import asyncio
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
@@ -24,9 +23,9 @@ class JWKSCache:
             return True
         return datetime.now(timezone.utc) >= self._expires_at
 
-    async def get(self) -> dict:
+    async def get(self, force_refresh: bool = False) -> dict:
         """Get JWKS from cache or fetch fresh"""
-        if not self.is_expired() and self._cache:
+        if not force_refresh and not self.is_expired() and self._cache:
             return self._cache
 
         # Fetch fresh JWKS
@@ -64,19 +63,22 @@ async def verify_neon_auth_jwt(token: str) -> dict:
         raise NeonAuthVerificationError("No token provided")
 
     try:
-        # Get JWKS keys
-        jwks_data = await _jwks_cache.get()
-        keys = {key["kid"]: key for key in jwks_data.get("keys", [])}
-
-        if not keys:
-            raise NeonAuthVerificationError("No JWKS keys available")
-
         # Decode without verification first to get kid
         unverified_header = jwt.get_unverified_header(token)
         kid = unverified_header.get("kid")
 
         if not kid:
             raise NeonAuthVerificationError("Token missing 'kid' header")
+
+        jwks_data = await _jwks_cache.get()
+        keys = {key["kid"]: key for key in jwks_data.get("keys", [])}
+
+        if not keys:
+            raise NeonAuthVerificationError("No JWKS keys available")
+
+        if kid not in keys:
+            refreshed_jwks_data = await _jwks_cache.get(force_refresh=True)
+            keys = {key["kid"]: key for key in refreshed_jwks_data.get("keys", [])}
 
         if kid not in keys:
             raise NeonAuthVerificationError(f"Key {kid} not found in JWKS")

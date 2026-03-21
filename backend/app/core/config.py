@@ -1,13 +1,18 @@
 """Unified application configuration — merges all settings"""
-from pydantic import ConfigDict
+from pathlib import Path
+
+from pydantic import ConfigDict, field_validator
 from pydantic_settings import BaseSettings
+
+
+BACKEND_ROOT = Path(__file__).resolve().parents[2]
 
 
 class Settings(BaseSettings):
     """Unified application settings"""
 
     model_config = ConfigDict(
-        env_file=".env",
+        env_file=BACKEND_ROOT / ".env",
         case_sensitive=False,
         extra="ignore",
     )
@@ -19,6 +24,29 @@ class Settings(BaseSettings):
     app_version: str = "0.1.0"
     debug: bool = False
     env: str = "development"
+
+    @field_validator("debug", mode="before")
+    @classmethod
+    def _parse_debug(cls, value):
+        if isinstance(value, bool):
+            return value
+
+        if isinstance(value, str):
+            normalized = value.strip().lower()
+            if normalized in {"1", "true", "yes", "on", "debug"}:
+                return True
+            if normalized in {"0", "false", "no", "off", "release", "prod", "production"}:
+                return False
+
+        return value
+
+    # ========================================
+    # CORS
+    # ========================================
+    cors_origins: list = ["http://localhost:52080", "http://localhost:5173", "http://localhost:3000"]
+    cors_allow_credentials: bool = True
+    cors_allow_methods: list = ["GET", "POST", "PUT", "DELETE", "OPTIONS", "PATCH"]
+    cors_allow_headers: list = ["*"]
 
     # ========================================
     # Database (PostgreSQL / Neon)
@@ -54,6 +82,9 @@ class Settings(BaseSettings):
     # ========================================
     openrouter_api_key: str = ""
     openrouter_model: str = "openrouter/stepfun/step-3.5-flash:free"
+    openrouter_fallback_model: str = "openrouter/z-ai/glm-4.5-air:free"  # Fallback on 429 rate limit
+    openrouter_reasoning_enabled: bool = True
+    openrouter_reasoning_effort: str = "medium"
 
     @property
     def database(self):

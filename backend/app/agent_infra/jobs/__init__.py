@@ -1,5 +1,5 @@
 """Background jobs for session management"""
-from app.infrastructure.jobs.archival_job import (
+from app.agent_infra.jobs.archival_job import (
     SessionArchivalJob,
     init_archival_job,
     close_archival_job,

@@ -1,6 +1,11 @@
 """Redis cache configuration"""
-from pydantic_settings import BaseSettings
+from pathlib import Path
+
 from pydantic import ConfigDict
+from pydantic_settings import BaseSettings
+
+
+BACKEND_ROOT = Path(__file__).resolve().parents[3]
 
 
 class RedisSettings(BaseSettings):
@@ -15,7 +20,8 @@ class RedisSettings(BaseSettings):
     health_check_interval: int = 30
 
     model_config = ConfigDict(
-        env_file=".env",
+        env_file=BACKEND_ROOT / ".env",
         case_sensitive=False,
         env_prefix="REDIS_",
+        extra="ignore",
     )

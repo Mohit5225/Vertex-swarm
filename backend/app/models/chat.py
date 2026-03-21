@@ -10,6 +10,7 @@ class ChatModel(BaseModel):
     chat_id: UUID
     user_id: str
     title: Optional[str] = None
+    ide_context_enabled: bool = False
     created_at: datetime
     updated_at: datetime
 

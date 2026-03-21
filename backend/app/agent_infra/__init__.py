@@ -1,15 +1,15 @@
 """Infrastructure layer — background services and jobs"""
-from app.infrastructure.cache import (
+from app.db.redis_db import (
     init_redis,
     get_redis,
     close_redis,
 )
-from app.infrastructure.heartbeat import (
+from app.agent_infra.heartbeat import (
     init_vitality_tracker,
     close_vitality_tracker,
     get_vitality_tracker,
 )
-from app.infrastructure.jobs import (
+from app.agent_infra.jobs import (
     init_archival_job,
     close_archival_job,
     get_archival_job,

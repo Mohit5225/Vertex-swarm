@@ -11,10 +11,39 @@ export interface SessionEvent {
   metadata?: Record<string, unknown>;
 }
 
+export interface ToolContext {
+  tool_call_id: string;
+  session_id: string;
+  chat_id: string;
+  message_id: string;
+}
+
+export interface ToolResult {
+  tool_name: string;
+  tool_call_id: string;
+  session_id: string;
+  chat_id: string;
+  message_id: string;
+  status: 'success' | 'error' | 'timeout';
+  content: string;
+  execution_time_ms: number;
+  error_code?: string;
+}
+
+export interface ToolCallPayload {
+  tool_call_id: string;
+  tool_name: string;
+  args: Record<string, unknown>;
+  session_id: string;
+  chat_id: string;
+  message_id: string;
+}
+
 // Messages FROM Extension Host TO Webview
 export type ExtensionToWebviewMessage =
   | { type: 'token'; payload: TokenData }
   | { type: 'auth-url'; payload: { url: string } }
+  | { type: 'logged-out'; payload: { reason?: string | null; authUrl?: string | null } }
   | { type: 'event'; payload: SessionEvent }
   | { type: 'chat-list'; payload: ChatListPayload }
   | { type: 'chat-opened'; payload: ChatOpenedPayload }
@@ -30,7 +59,9 @@ export type WebviewToExtensionMessage =
   | { type: 'load-chat-list' }
   | { type: 'start-stream'; payload: StreamStartPayload }
   | { type: 'open-chat'; payload: OpenChatPayload }
+  | { type: 'set-ide-context'; payload: SetIdeContextPayload }
   | { type: 'cancel-stream'; payload: StreamCancelPayload }
+  | { type: 'tool_call'; payload: ToolCallPayload }
   | { type: 'reset-chat' }
   | { type: 'logout' };
 
@@ -49,6 +80,7 @@ export interface TokenData {
 export interface StreamStartPayload {
   sessionId: string;
   message: string;
+  ideContextEnabled: boolean;
 }
 
 export interface StreamCancelPayload {
@@ -60,12 +92,14 @@ export interface ChatSummaryData {
   title: string | null;
   createdAt: string;
   updatedAt: string;
+  ideContextEnabled: boolean;
 }
 
 export interface ChatMessageData {
   messageId: string;
   role: string;
   content: string;
+  events?: SessionEvent[];
   createdAt: string;
 }
 
@@ -76,9 +110,15 @@ export interface ChatListPayload {
 
 export interface ChatOpenedPayload {
   chatId: string;
+  ideContextEnabled: boolean;
   messages: ChatMessageData[];
 }
 
 export interface OpenChatPayload {
   chatId: string;
+}
+
+export interface SetIdeContextPayload {
+  chatId: string;
+  enabled: boolean;
 }

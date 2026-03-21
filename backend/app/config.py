@@ -1,7 +1,11 @@
 """Application configuration"""
-import os
-from pydantic_settings import BaseSettings
+from pathlib import Path
+
 from pydantic import ConfigDict
+from pydantic_settings import BaseSettings
+
+
+BACKEND_ROOT = Path(__file__).resolve().parents[1]
 
 
 class Settings(BaseSettings):
@@ -23,7 +27,10 @@ class Settings(BaseSettings):
     # Redis
     redis_url: str = "redis://localhost:6379/0"
 
-    model_config = ConfigDict(env_file=".env", case_sensitive=False)
+    model_config = ConfigDict(
+        env_file=BACKEND_ROOT / ".env",
+        case_sensitive=False,
+    )
 
     @property
     def database(self):

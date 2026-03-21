@@ -21,10 +21,12 @@ export interface ChatSummary {
   title: string | null
   createdAt: string
   updatedAt: string
+  ideContextEnabled: boolean
 }
 
 interface ChatState {
   currentChatId: string | null
+  currentIdeContextEnabled: boolean
   activeMessageId: string | null
   chats: ChatSummary[]
   messages: ChatMessage[]
@@ -34,7 +36,12 @@ interface ChatState {
   // Actions
   setCurrentChatId: (id: string | null) => void
   setChatList: (chats: ChatSummary[], activeChatId?: string | null) => void
-  replaceMessages: (chatId: string, messages: ChatMessage[]) => void
+  replaceMessages: (
+    chatId: string,
+    messages: ChatMessage[],
+    ideContextEnabled?: boolean
+  ) => void
+  setCurrentIdeContextEnabled: (enabled: boolean) => void
   addMessage: (message: ChatMessage) => void
   beginAssistantMessage: () => void
   addEvent: (event: SessionEvent) => void
@@ -81,8 +88,27 @@ const appendEventContent = (currentContent: string, event: SessionEvent): string
   return currentContent
 }
 
+const shouldMergeEvent = (previous: SessionEvent | undefined, next: SessionEvent) => {
+  if (!previous) {
+    return false
+  }
+
+  return previous.type === 'thinking' && next.type === 'thinking'
+}
+
+const mergeEvent = (previous: SessionEvent, next: SessionEvent): SessionEvent => ({
+  ...previous,
+  content: `${previous.content || ''}${next.content || ''}`,
+  timestamp: next.timestamp,
+  metadata: {
+    ...(previous.metadata || {}),
+    ...(next.metadata || {}),
+  },
+})
+
 export const useChatStore = create<ChatState>((set) => ({
   currentChatId: null,
+  currentIdeContextEnabled: false,
   activeMessageId: null,
   chats: [],
   messages: [],
@@ -90,7 +116,20 @@ export const useChatStore = create<ChatState>((set) => ({
   error: null,
 
   setCurrentChatId: (id: string | null) => {
-    set({ currentChatId: id })
+    set((state) => {
+      if (!id) {
+        return {
+          currentChatId: null,
+          currentIdeContextEnabled: false,
+        }
+      }
+
+      const matchingChat = state.chats.find((chat) => chat.chatId === id)
+      return {
+        currentChatId: id,
+        currentIdeContextEnabled: matchingChat?.ideContextEnabled ?? false,
+      }
+    })
   },
 
   setChatList: (chats: ChatSummary[], activeChatId?: string | null) => {
@@ -100,12 +139,32 @@ export const useChatStore = create<ChatState>((set) => ({
         typeof activeChatId === 'undefined'
           ? state.currentChatId
           : activeChatId,
+      currentIdeContextEnabled: (() => {
+        const resolvedActiveChatId =
+          typeof activeChatId === 'undefined'
+            ? state.currentChatId
+            : activeChatId
+
+        if (!resolvedActiveChatId) {
+          return state.currentIdeContextEnabled
+        }
+
+        const matchingChat = chats.find(
+          (chat) => chat.chatId === resolvedActiveChatId
+        )
+        return matchingChat?.ideContextEnabled ?? state.currentIdeContextEnabled
+      })(),
     }))
   },
 
-  replaceMessages: (chatId: string, messages: ChatMessage[]) => {
+  replaceMessages: (
+    chatId: string,
+    messages: ChatMessage[],
+    ideContextEnabled = false
+  ) => {
     set({
       currentChatId: chatId,
+      currentIdeContextEnabled: ideContextEnabled,
       activeMessageId: null,
       isStreaming: false,
       error: null,
@@ -114,6 +173,19 @@ export const useChatStore = create<ChatState>((set) => ({
         events: message.events || [],
       })),
     })
+  },
+
+  setCurrentIdeContextEnabled: (enabled: boolean) => {
+    set((state) => ({
+      currentIdeContextEnabled: enabled,
+      chats: state.currentChatId
+        ? state.chats.map((chat) =>
+            chat.chatId === state.currentChatId
+              ? { ...chat, ideContextEnabled: enabled }
+              : chat
+          )
+        : state.chats,
+    }))
   },
 
   addMessage: (message: ChatMessage) => {
@@ -178,10 +250,19 @@ export const useChatStore = create<ChatState>((set) => ({
       }
 
       const targetMessage = messages[targetIndex]
+      const currentEvents = [...(targetMessage.events || [])]
+      const previousEvent = currentEvents[currentEvents.length - 1]
+      const nextEvents = shouldMergeEvent(previousEvent, normalizedEvent)
+        ? [
+            ...currentEvents.slice(0, -1),
+            mergeEvent(previousEvent as SessionEvent, normalizedEvent),
+          ]
+        : [...currentEvents, normalizedEvent]
+
       messages[targetIndex] = {
         ...targetMessage,
         content: appendEventContent(targetMessage.content, normalizedEvent),
-        events: [...(targetMessage.events || []), normalizedEvent],
+        events: nextEvents,
       }
 
       return {
@@ -212,6 +293,7 @@ export const useChatStore = create<ChatState>((set) => ({
     set((state) => ({
       messages: [],
       currentChatId: null,
+      currentIdeContextEnabled: false,
       activeMessageId: null,
       error: null,
       isStreaming: false,

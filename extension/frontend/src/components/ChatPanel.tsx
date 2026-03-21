@@ -6,6 +6,7 @@ import InputArea from './InputArea'
 import ConfirmDialog from './ConfirmDialog'
 import { getVsCodeApi } from '../lib/vscode'
 import { ArrowLeft, History, LogOut, RefreshCw, Settings } from 'lucide-react'
+import { describeStreamState } from '../lib/trace'
 
 const starterPrompts = [
   {
@@ -48,6 +49,13 @@ const ChatPanel: React.FC = () => {
   const { user, logout } = useAuthStore()
   const { clearMessages, messages, isStreaming, error, chats, currentChatId } =
     useChatStore()
+  const {
+    currentIdeContextEnabled,
+    setCurrentIdeContextEnabled,
+  } = useChatStore((state) => ({
+    currentIdeContextEnabled: state.currentIdeContextEnabled,
+    setCurrentIdeContextEnabled: state.setCurrentIdeContextEnabled,
+  }))
   const [queuedPrompt, setQueuedPrompt] = useState('')
   const [showLogoutConfirm, setShowLogoutConfirm] = useState(false)
   const [showSessionPanel, setShowSessionPanel] = useState(false)
@@ -70,6 +78,11 @@ const ChatPanel: React.FC = () => {
       : latestUserMessage.content
   }, [messages])
 
+  const streamStateDescription = useMemo(
+    () => describeStreamState(messages, isStreaming),
+    [messages, isStreaming]
+  )
+
   const sessionStateLabel = isStreaming
     ? 'Running'
     : messages.length > 0
@@ -77,8 +90,10 @@ const ChatPanel: React.FC = () => {
       : 'Idle'
 
   useEffect(() => {
+    // Only smooth scroll if there are messages and we're not streaming super fast, 
+    // or just let native scroll happen. But auto-scroll is crucial for chat UX.
     messagesEndRef.current?.scrollIntoView({
-      behavior: messages.length > 0 ? 'smooth' : 'auto',
+      behavior: isStreaming ? 'auto' : 'smooth', // 'auto' removes the laggy smooth-scroll animation during high-frequency tokens
     })
   }, [messages, isStreaming])
 
@@ -134,8 +149,25 @@ const ChatPanel: React.FC = () => {
   const handleStartFresh = () => {
     getVsCodeApi()?.postMessage({ type: 'reset-chat' })
     clearMessages()
+    setCurrentIdeContextEnabled(false)
     setShowSessionPanel(false)
     setShowHistoryPanel(false)
+  }
+
+  const handleToggleIdeContext = (enabled: boolean) => {
+    setCurrentIdeContextEnabled(enabled)
+
+    if (!currentChatId) {
+      return
+    }
+
+    getVsCodeApi()?.postMessage({
+      type: 'set-ide-context',
+      payload: {
+        chatId: currentChatId,
+        enabled,
+      },
+    })
   }
 
   const handleOpenChat = (chatId: string) => {
@@ -188,11 +220,10 @@ const ChatPanel: React.FC = () => {
                   </h2>
                 </div>
                 <p className="mt-1 hidden text-[11px] leading-5 text-[#7d89a6] min-[460px]:block">
-                  {isStreaming
-                    ? 'Agent execution in progress'
-                    : messages.length > 0
-                      ? 'Ready for the next prompt'
-                      : 'Start with a task, bug, file path, or review request'}
+                  {streamStateDescription}
+                </p>
+                <p className="mt-1 text-[11px] leading-5 text-[#8f9cb7]">
+                  IDE context: {currentIdeContextEnabled ? 'On' : 'Off'}
                 </p>
               </div>
             </div>
@@ -377,7 +408,7 @@ const ChatPanel: React.FC = () => {
                 {isStreaming && (
                   <div className="flex items-center gap-2 px-1 py-2 text-sm text-[#95a2bd] animate-fade-up">
                     <span className="h-1.5 w-1.5 rounded-full bg-[#48d2b4] animate-pulse" />
-                    <span>Agent execution in progress</span>
+                    <span>{streamStateDescription}</span>
                   </div>
                 )}
 
@@ -396,6 +427,8 @@ const ChatPanel: React.FC = () => {
             <InputArea
               disabled={isStreaming}
               queuedPrompt={queuedPrompt}
+              ideContextEnabled={currentIdeContextEnabled}
+              onToggleIdeContext={handleToggleIdeContext}
               onQueuedPromptApplied={() => setQueuedPrompt('')}
             />
           </div>

@@ -1,5 +1,5 @@
 """Agent heartbeat and vitality monitoring"""
-from app.infrastructure.heartbeat.agent_vitality import (
+from app.agent_infra.heartbeat.agent_vitality import (
     AgentVitalityTracker,
     init_vitality_tracker,
     close_vitality_tracker,

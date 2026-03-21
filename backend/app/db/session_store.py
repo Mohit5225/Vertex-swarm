@@ -11,7 +11,7 @@ import logging
 from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 
-from app.infrastructure.cache import get_redis, serialize_session_state, deserialize_session_state
+from app.db.redis_db import get_redis, serialize_session_state, deserialize_session_state
 from app.models.session import Session
 from app.db.postgres import AsyncSessionLocal
 
@@ -80,7 +80,7 @@ async def archive_session(
 
         # Step 1: Load session state from Redis
         # Try to load from persisted key (where it's actually stored)
-        from app.infrastructure.cache import retrieve_session_state
+        from app.db.redis_db import retrieve_session_state
         session_state = await retrieve_session_state(session_id)
         
         if not session_state:

@@ -1,10 +1,13 @@
 """Postgres auth queries."""
+import logging
 from typing import Optional
 
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.auth import NeonAuthUser
+
+logger = logging.getLogger(__name__)
 
 
 async def get_user_by_id(session: AsyncSession, user_id: str) -> Optional[NeonAuthUser]:
@@ -32,8 +35,12 @@ async def get_user_by_id(session: AsyncSession, user_id: str) -> Optional[NeonAu
             created_at=row[5],
             updated_at=row[6],
         )
-    except Exception as e:
-        print(f"Error querying neon_auth.user: {e}")
+    except Exception:
+        logger.warning(
+            "neon_auth.user lookup failed for user_id=%s",
+            user_id,
+            exc_info=True,
+        )
         return None
 
 

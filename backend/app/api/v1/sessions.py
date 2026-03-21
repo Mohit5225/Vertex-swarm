@@ -10,7 +10,7 @@ from pydantic import BaseModel
 
 from app.auth.dependencies import AuthenticatedUser, get_current_user
 from app.core.config import settings
-from app.infrastructure.cache import store_session_state, retrieve_session_state, get_redis
+from app.db.redis_db import store_session_state, retrieve_session_state, get_redis
 from app.models.session import SessionState
 from app.services.llm_service import stream_chat_completion
 

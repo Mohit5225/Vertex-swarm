@@ -5,9 +5,16 @@ export type StoredSession =
       status: 'valid';
       token: string;
       userMetadata: Record<string, unknown>;
+      sessionToken?: string;
+      expiresAt: number;
     }
-  | { status: 'missing' }
-  | { status: 'expired' };
+  | {
+      status: 'expired';
+      userMetadata: Record<string, unknown>;
+      sessionToken?: string;
+      expiresAt?: number;
+    }
+  | { status: 'missing' };
 
 /**
  * TokenManager: Handles secure token storage via VS Code SecretStorage
@@ -16,6 +23,7 @@ export type StoredSession =
 export class TokenManager {
   private static readonly TOKEN_KEY = 'vertex-swarm-auth-token';
   private static readonly USER_KEY = 'vertex-swarm-auth-user';
+  private static readonly SESSION_TOKEN_KEY = 'vertex-swarm-auth-session-token';
   private static readonly SESSION_TTL_MS = 60 * 24 * 60 * 60 * 1000;
 
   constructor(private readonly secrets: vscode.SecretStorage) {}
@@ -23,7 +31,11 @@ export class TokenManager {
   /**
    * Store token and user metadata securely
    */
-  async setToken(token: string, userMetadata: Record<string, unknown>): Promise<void> {
+  async setToken(
+    token: string,
+    userMetadata: Record<string, unknown>,
+    sessionToken?: string
+  ): Promise<void> {
     try {
       const now = Date.now();
       const jwtExpiryMs = this.getJwtExpiryMs(token);
@@ -38,6 +50,9 @@ export class TokenManager {
         TokenManager.USER_KEY,
         JSON.stringify(storedUserMetadata)
       );
+      if (sessionToken) {
+        await this.secrets.store(TokenManager.SESSION_TOKEN_KEY, sessionToken);
+      }
     } catch (error) {
       console.error('Failed to store token:', error);
       throw new Error('Could not store authentication token');
@@ -49,25 +64,33 @@ export class TokenManager {
    */
   async getSession(): Promise<StoredSession> {
     try {
-      const [token, userJson] = await Promise.all([
+      const [token, userJson, sessionToken] = await Promise.all([
         this.secrets.get(TokenManager.TOKEN_KEY),
         this.secrets.get(TokenManager.USER_KEY),
+        this.secrets.get(TokenManager.SESSION_TOKEN_KEY),
       ]);
-
-      if (!token && !userJson) {
+      if (!token && !userJson && !sessionToken) {
         return { status: 'missing' };
       }
 
-      if (!token || !userJson) {
+      const userMetadata = userJson
+        ? (JSON.parse(userJson) as Record<string, unknown>)
+        : {};
+
+      if (!token) {
+        if (sessionToken) {
+          return {
+            status: 'expired',
+            userMetadata,
+            sessionToken,
+            expiresAt: this.normalizeExpiryMs(userMetadata.expiresAt),
+          };
+        }
         await this.clearToken();
         return { status: 'missing' };
       }
 
-      const userMetadata = JSON.parse(userJson) as Record<string, unknown>;
-      let expiresAt =
-        typeof userMetadata.expiresAt === 'number'
-          ? userMetadata.expiresAt
-          : Number(userMetadata.expiresAt);
+      let expiresAt = this.normalizeExpiryMs(userMetadata.expiresAt);
 
       if (!Number.isFinite(expiresAt)) {
         const jwtExpiryMs = this.getJwtExpiryMs(token);
@@ -93,18 +116,35 @@ export class TokenManager {
           status: 'valid',
           token,
           userMetadata: upgradedUserMetadata,
+          sessionToken: sessionToken || undefined,
+          expiresAt: upgradedUserMetadata.expiresAt,
         };
       }
 
       if (expiresAt <= Date.now()) {
+        if (sessionToken) {
+          return {
+            status: 'expired',
+            userMetadata,
+            sessionToken,
+            expiresAt,
+          };
+        }
+
         await this.clearToken();
-        return { status: 'expired' };
+        return {
+          status: 'expired',
+          userMetadata,
+          expiresAt,
+        };
       }
 
       return {
         status: 'valid',
         token,
         userMetadata,
+        sessionToken: sessionToken || undefined,
+        expiresAt,
       };
     } catch (error) {
       console.error('Failed to retrieve stored session:', error);
@@ -143,6 +183,7 @@ export class TokenManager {
     try {
       await this.secrets.delete(TokenManager.TOKEN_KEY);
       await this.secrets.delete(TokenManager.USER_KEY);
+      await this.secrets.delete(TokenManager.SESSION_TOKEN_KEY);
     } catch (error) {
       console.error('Failed to clear token:', error);
     }
@@ -170,6 +211,15 @@ export class TokenManager {
       console.warn('Failed to decode JWT expiry from stored token:', error);
       return undefined;
     }
+  }
+
+  private normalizeExpiryMs(value: unknown): number | undefined {
+    const expiresAt =
+      typeof value === 'number'
+        ? value
+        : Number(value);
+
+    return Number.isFinite(expiresAt) ? expiresAt : undefined;
   }
 
   private normalizeBase64(value: string): string {

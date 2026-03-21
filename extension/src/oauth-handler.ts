@@ -12,6 +12,12 @@ interface AuthenticatedUserPayload {
 interface CallbackAuthResult {
   token: string;
   user: AuthenticatedUserPayload;
+  sessionToken?: string;
+}
+
+interface RefreshedAccessToken {
+  token: string;
+  sessionToken?: string;
 }
 
 /**
@@ -59,6 +65,38 @@ export class OAuthHandler {
     return `${this.neonAuthUrl}/sign-in`;
   }
 
+  async refreshAccessToken(sessionToken: string): Promise<RefreshedAccessToken | null> {
+    try {
+      const response = await fetch(`${this.neonAuthUrl}/token`, {
+        headers: {
+          Accept: 'application/json',
+          Authorization: `Bearer ${sessionToken}`,
+        },
+      });
+
+      const responseText = await response.text();
+      if (!response.ok) {
+        console.warn('[OAuthHandler] Silent token refresh failed:', response.status, responseText);
+        return null;
+      }
+
+      const payload = JSON.parse(responseText) as Record<string, unknown>;
+      const refreshedToken = this.extractJwtToken(payload);
+      if (refreshedToken) {
+        return {
+          token: refreshedToken,
+          sessionToken: this.extractSessionToken(payload),
+        };
+      }
+
+      console.warn('[OAuthHandler] Silent token refresh returned no token');
+      return null;
+    } catch (error) {
+      console.warn('[OAuthHandler] Silent token refresh errored:', error);
+      return null;
+    }
+  }
+
   async startAuthFlow(): Promise<boolean> {
     try {
       await this.startCallbackServer();
@@ -73,7 +111,7 @@ export class OAuthHandler {
         id: authResult.user.id || '',
         email: authResult.user.email || '',
         provider: this.provider,
-      });
+      }, authResult.sessionToken);
 
       return true;
     } catch (error) {
@@ -380,8 +418,67 @@ export class OAuthHandler {
     return fetch('/error',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({error:msg})}).catch(function(){});
   }
 
-  function reportSuccess(token, user){
-    return fetch('/complete',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({token:token,user:user})}).catch(function(){});
+  function reportSuccess(token, user, sessionToken){
+    return fetch('/complete',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({token:token,user:user,sessionToken:sessionToken})}).catch(function(){});
+  }
+
+  function isJwtLike(value){
+    return typeof value === 'string' && value.split('.').length === 3;
+  }
+
+  function readPath(obj, path){
+    var current = obj;
+    for (var i = 0; i < path.length; i++) {
+      if (!current || typeof current !== 'object') {
+        return '';
+      }
+      current = current[path[i]];
+    }
+    return typeof current === 'string' ? current : '';
+  }
+
+  function extractJwtToken(payload){
+    var candidates = [
+      readPath(payload, ['token']),
+      readPath(payload, ['jwt']),
+      readPath(payload, ['accessToken']),
+      readPath(payload, ['access_token']),
+      readPath(payload, ['session', 'jwt']),
+      readPath(payload, ['session', 'accessToken']),
+      readPath(payload, ['session', 'access_token'])
+    ];
+
+    for (var i = 0; i < candidates.length; i++) {
+      if (isJwtLike(candidates[i])) {
+        return candidates[i];
+      }
+    }
+
+    return '';
+  }
+
+  function extractSessionToken(payload){
+    var candidates = [
+      readPath(payload, ['session', 'token']),
+      readPath(payload, ['session', 'sessionToken']),
+      readPath(payload, ['session', 'session_token']),
+      readPath(payload, ['session', 'refreshToken']),
+      readPath(payload, ['session', 'refresh_token']),
+      readPath(payload, ['sessionToken']),
+      readPath(payload, ['session_token']),
+      readPath(payload, ['refreshToken']),
+      readPath(payload, ['refresh_token']),
+      readPath(payload, ['token'])
+    ];
+
+    for (var i = 0; i < candidates.length; i++) {
+      var candidate = candidates[i];
+      if (candidate && !isJwtLike(candidate)) {
+        return candidate;
+      }
+    }
+
+    return '';
   }
 
   async function finalize(){
@@ -424,9 +521,9 @@ export class OAuthHandler {
 
       var jwtFromHeader = resp.headers.get('set-auth-jwt');
       var data = JSON.parse(text);
-      var sessionToken = (data && data.session && data.session.token) || (data && data.token) || '';
+      var sessionToken = extractSessionToken(data);
       var user  = (data && data.user) || (data && data.session && data.session.user) || {};
-      var token = jwtFromHeader || '';
+      var token = jwtFromHeader || extractJwtToken(data) || '';
 
       if (!token) {
         log('JWT header missing, requesting /token...');
@@ -446,7 +543,8 @@ export class OAuthHandler {
 
         if (tokenResp.ok) {
           var tokenData = JSON.parse(tokenText);
-          token = (tokenData && tokenData.token) || '';
+          token = extractJwtToken(tokenData) || '';
+          sessionToken = sessionToken || extractSessionToken(tokenData);
         }
       }
 
@@ -461,7 +559,7 @@ export class OAuthHandler {
       log('JWT: ' + token.substring(0, 16) + '...');
       log('User: ' + JSON.stringify(user));
       setStatus('Signed in as ' + (user.email || user.name || user.id || 'user') + '. You can close this tab and return to VS Code.', 'ok');
-      await reportSuccess(token, user);
+      await reportSuccess(token, user, sessionToken);
 
     } catch(err) {
       var msg = err instanceof Error ? err.message : String(err);
@@ -492,5 +590,54 @@ export class OAuthHandler {
       req.on('end', () => resolve(Buffer.concat(chunks).toString('utf-8')));
       req.on('error', reject);
     });
+  }
+
+  private extractJwtToken(payload: Record<string, unknown>): string | undefined {
+    const candidates = [
+      this.readStringPath(payload, ['token']),
+      this.readStringPath(payload, ['jwt']),
+      this.readStringPath(payload, ['accessToken']),
+      this.readStringPath(payload, ['access_token']),
+      this.readStringPath(payload, ['session', 'jwt']),
+      this.readStringPath(payload, ['session', 'accessToken']),
+      this.readStringPath(payload, ['session', 'access_token']),
+    ];
+
+    return candidates.find((value) => this.isJwtLike(value));
+  }
+
+  private extractSessionToken(payload: Record<string, unknown>): string | undefined {
+    const candidates = [
+      this.readStringPath(payload, ['session', 'token']),
+      this.readStringPath(payload, ['session', 'sessionToken']),
+      this.readStringPath(payload, ['session', 'session_token']),
+      this.readStringPath(payload, ['session', 'refreshToken']),
+      this.readStringPath(payload, ['session', 'refresh_token']),
+      this.readStringPath(payload, ['sessionToken']),
+      this.readStringPath(payload, ['session_token']),
+      this.readStringPath(payload, ['refreshToken']),
+      this.readStringPath(payload, ['refresh_token']),
+      this.readStringPath(payload, ['token']),
+    ];
+
+    return candidates.find((value) => typeof value === 'string' && value.length > 0 && !this.isJwtLike(value));
+  }
+
+  private readStringPath(payload: Record<string, unknown>, path: string[]): string | undefined {
+    let current: unknown = payload;
+
+    for (const segment of path) {
+      if (!current || typeof current !== 'object') {
+        return undefined;
+      }
+
+      current = (current as Record<string, unknown>)[segment];
+    }
+
+    return typeof current === 'string' && current ? current : undefined;
+  }
+
+  private isJwtLike(value: unknown): value is string {
+    return typeof value === 'string' && value.split('.').length === 3;
   }
 }
