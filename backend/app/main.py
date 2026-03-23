@@ -141,13 +141,10 @@ async def root():
 
 
 # Include API routes
-from app.api.v1 import endpoints, sessions
+from app.api.v1 import endpoints
 from app.api.v1.chat import router as chat_router
 from app.api.v1.tools import router as tools_router
-from app.auth.routes import protected as auth
 
-app.include_router(auth.router)
 app.include_router(endpoints.router)
-app.include_router(sessions.router)
 app.include_router(chat_router)
 app.include_router(tools_router)

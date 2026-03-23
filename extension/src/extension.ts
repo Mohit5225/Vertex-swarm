@@ -10,7 +10,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   context.subscriptions.push(outputChannel);
 
   const tokenManager = new TokenManager(context.secrets);
-  const oauthHandler = new OAuthHandler(tokenManager, context);
+  const oauthHandler = new OAuthHandler(tokenManager);
 
   // Register the sidebar WebviewView provider
   const sidebarProvider = new VertexSwarmSidebarProvider(

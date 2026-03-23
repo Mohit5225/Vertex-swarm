@@ -72,45 +72,7 @@ async def get_current_user(request: Request) -> AuthenticatedUser:
     return AuthenticatedUser(jwt_claims=jwt_claims, db_user=db_user)
 
 
-async def get_current_user_optional(request: Request) -> Optional[AuthenticatedUser]:
-    """
-    FastAPI dependency for optional authentication.
-    
-    Returns None if no token provided, but raises error if token is invalid.
-    
-    Usage:
-        @router.get("/public")
-        async def public_route(user: Optional[AuthenticatedUser] = Depends(get_current_user_optional)):
-            if user:
-                # User is authenticated
-                ...
-            else:
-                # No token provided
-                ...
-    """
-    token = await extract_bearer_token(request)
-    if not token:
-        return None
-
-    try:
-        jwt_claims = await verify_neon_auth_jwt(token)
-    except NeonAuthVerificationError as e:
-        raise AuthenticationError(str(e))
-
-    db_user: Optional[NeonAuthUser] = None
-    try:
-        async with AsyncSessionLocal() as session:
-            user_id = jwt_claims.get("sub")
-            if user_id:
-                db_user = await get_user_by_id(session, user_id)
-    except Exception:
-        logger.warning("Could not fetch optional authenticated user profile", exc_info=True)
-
-    return AuthenticatedUser(jwt_claims=jwt_claims, db_user=db_user)
-
-
 __all__ = [
     "AuthenticatedUser",
     "get_current_user",
-    "get_current_user_optional",
 ]

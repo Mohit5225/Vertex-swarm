@@ -21,13 +21,13 @@ Extension Host (Node.js/TypeScript)
 
 2. **Streaming:**
    - Webview sends `start-stream` message
-   - Extension opens SSE connection to Backend `/api/v1/sessions/{id}/stream`
+   - Extension opens SSE connection to Backend `/api/v1/chats/{chatId}/messages`
    - Events parsed and relayed to Webview via postMessage
    - Webview updates Zustand store → React re-renders
 
 3. **Cancellation:**
    - Webview sends `cancel-stream` message
-   - Extension sends POST to Backend `/api/v1/sessions/{id}/cancel`
+   - Extension sends POST to Backend `/api/v1/chats/{chatId}/cancel`
    - Stream closes
 
 ## Key Files

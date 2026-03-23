@@ -8,7 +8,7 @@ import { WorkspaceStore } from './workspace-store';
 import type {
   WebviewToExtensionMessage,
   SessionEvent,
-  TokenData,
+  AuthenticatedSessionData,
   StreamStartPayload,
   StreamCancelPayload,
   OpenChatPayload,
@@ -90,10 +90,6 @@ export class VertexSwarmSidebarProvider implements vscode.WebviewViewProvider {
       undefined,
       this.context.subscriptions
     );
-
-    // Send OAuth URL to webview so login screen can render
-    this.sendAuthUrl();
-    void this.primeWebviewSession();
   }
 
   /**
@@ -107,44 +103,34 @@ export class VertexSwarmSidebarProvider implements vscode.WebviewViewProvider {
     this.outputChannel.appendLine(`[${new Date().toISOString()}] ${message}`);
   }
 
-  /**
-   * Send OAuth URL to webview on load so login screen can render buttons
-   */
-  private sendAuthUrl(): void {
-    this.log('sending auth URL to webview');
-    this.post({
-      type: 'auth-url',
-      payload: { url: this.oauthHandler.getAuthUrl() },
-    });
-  }
-
   private postLoggedOut(reason?: string): void {
     this.log(`posting logged-out state${reason ? ` reason="${reason}"` : ''}`);
     this.post({
       type: 'logged-out',
-      payload: {
-        reason: reason ?? null,
-        authUrl: this.oauthHandler.getAuthUrl(),
-      },
+      payload: { reason: reason ?? null },
     });
   }
 
-  private async primeWebviewSession(): Promise<void> {
-    try {
-      const hasValidSession = await this.checkAndSendExistingToken();
-      if (hasValidSession) {
-        await this.sendChatList();
-      }
-    } catch (error) {
-      const errorMessage = error instanceof Error ? error.message : String(error);
-      this.log(`initial webview session prime failed: ${errorMessage}`);
-    }
+  private buildAuthenticatedSessionData(
+    userMetadata: Record<string, unknown>
+  ): AuthenticatedSessionData {
+    return {
+      user: {
+        id: (userMetadata.id as string) || '',
+        email: (userMetadata.email as string) || '',
+        provider: (userMetadata.provider as string) || 'neon-auth',
+      },
+    };
   }
 
-  /**
-   * If a token already exists, send it to webview immediately
-   */
-  private async checkAndSendExistingToken(): Promise<boolean> {
+  private postAuthenticated(session: Extract<StoredSession, { status: 'valid' }>): void {
+    this.post({
+      type: 'authenticated',
+      payload: this.buildAuthenticatedSessionData(session.userMetadata),
+    });
+  }
+
+  private async syncWebviewSession(): Promise<boolean> {
     const session = await this.getRestoredSession();
     this.log(`session lookup completed status=${session.status}`);
 
@@ -161,17 +147,7 @@ export class VertexSwarmSidebarProvider implements vscode.WebviewViewProvider {
       return false;
     }
 
-    this.post({
-      type: 'token',
-      payload: {
-        token: session.token,
-        user: {
-          id: (session.userMetadata.id as string) || '',
-          email: (session.userMetadata.email as string) || '',
-          provider: (session.userMetadata.provider as string) || 'neon-auth',
-        },
-      } as TokenData,
-    });
+    this.postAuthenticated(session);
     return true;
   }
 
@@ -306,17 +282,7 @@ export class VertexSwarmSidebarProvider implements vscode.WebviewViewProvider {
     const refreshedSession = await this.tokenManager.getSession();
     this.log(`silent refresh completed status=${refreshedSession.status} (${reason})`);
     if (refreshedSession.status === 'valid') {
-      this.post({
-        type: 'token',
-        payload: {
-          token: refreshedSession.token,
-          user: {
-            id: (refreshedSession.userMetadata.id as string) || '',
-            email: (refreshedSession.userMetadata.email as string) || '',
-            provider: (refreshedSession.userMetadata.provider as string) || 'neon-auth',
-          },
-        } as TokenData,
-      });
+      this.postAuthenticated(refreshedSession);
     }
 
     return refreshedSession;
@@ -511,17 +477,15 @@ export class VertexSwarmSidebarProvider implements vscode.WebviewViewProvider {
    */
   private async handleWebviewMessage(message: WebviewToExtensionMessage): Promise<void> {
     switch (message.type) {
-      case 'request-auth-url': {
-        this.sendAuthUrl();
-        break;
-      }
-
       case 'open-browser': {
         this.log('starting OAuth browser flow');
         const success = await this.oauthHandler.startAuthFlow();
         if (success) {
           this.log('OAuth flow completed successfully');
-          await this.checkAndSendExistingToken();
+          const hasValidSession = await this.syncWebviewSession();
+          if (hasValidSession) {
+            await this.sendChatList();
+          }
         }
         break;
       }
@@ -533,9 +497,9 @@ export class VertexSwarmSidebarProvider implements vscode.WebviewViewProvider {
         break;
       }
 
-      case 'request-token': {
-        this.log('webview requested current token');
-        const hasValidSession = await this.checkAndSendExistingToken();
+      case 'request-session': {
+        this.log('webview requested current session');
+        const hasValidSession = await this.syncWebviewSession();
         if (hasValidSession) {
           await this.sendChatList();
         }

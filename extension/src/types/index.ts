@@ -39,11 +39,18 @@ export interface ToolCallPayload {
   message_id: string;
 }
 
+export interface AuthenticatedSessionData {
+  user: {
+    id: string;
+    email: string;
+    provider: string;
+  };
+}
+
 // Messages FROM Extension Host TO Webview
 export type ExtensionToWebviewMessage =
-  | { type: 'token'; payload: TokenData }
-  | { type: 'auth-url'; payload: { url: string } }
-  | { type: 'logged-out'; payload: { reason?: string | null; authUrl?: string | null } }
+  | { type: 'authenticated'; payload: AuthenticatedSessionData }
+  | { type: 'logged-out'; payload: { reason?: string | null } }
   | { type: 'event'; payload: SessionEvent }
   | { type: 'chat-list'; payload: ChatListPayload }
   | { type: 'chat-opened'; payload: ChatOpenedPayload }
@@ -52,10 +59,9 @@ export type ExtensionToWebviewMessage =
 
 // Messages FROM Webview TO Extension Host
 export type WebviewToExtensionMessage =
-  | { type: 'request-auth-url' }
+  | { type: 'request-session' }
   | { type: 'open-browser' }
   | { type: 'copy-link' }
-  | { type: 'request-token' }
   | { type: 'load-chat-list' }
   | { type: 'start-stream'; payload: StreamStartPayload }
   | { type: 'open-chat'; payload: OpenChatPayload }
@@ -68,17 +74,7 @@ export type WebviewToExtensionMessage =
 // Legacy union kept for backward compat
 export type ExtensionMessage = ExtensionToWebviewMessage | WebviewToExtensionMessage;
 
-export interface TokenData {
-  token: string;
-  user: {
-    id: string;
-    email: string;
-    provider: string;
-  };
-}
-
 export interface StreamStartPayload {
-  sessionId: string;
   message: string;
   ideContextEnabled: boolean;
 }

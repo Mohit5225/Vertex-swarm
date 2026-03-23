@@ -43,10 +43,7 @@ export class OAuthHandler {
   private pendingAuthResult: CallbackAuthResult | null = null;
   private pendingAuthError: string | null = null;
 
-  constructor(
-    private readonly tokenManager: TokenManager,
-    private readonly context: vscode.ExtensionContext
-  ) {
+  constructor(private readonly tokenManager: TokenManager) {
     this.neonAuthUrl = import.meta.env.VITE_NEON_AUTH_BASE_URL || 'http://localhost:8000';
   }
 

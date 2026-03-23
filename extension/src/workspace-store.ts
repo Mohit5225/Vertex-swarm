@@ -25,6 +25,7 @@ export class WorkspaceStore implements vscode.Disposable {
   private skeletonBuiltAtMs = 0;
   private lastStructuralChangeAtMs = Date.now();
   private watcher: vscode.FileSystemWatcher | null = null;
+  private renameWatcher: vscode.Disposable | null = null;
 
   private readonly shortCacheTtlMs = 30_000;
   private readonly staleAfterMs = 30 * 60 * 1000;
@@ -104,23 +105,28 @@ export class WorkspaceStore implements vscode.Disposable {
   }
 
   private startWatcher(): void {
-    if (this.watcher) {
+    if (this.watcher || this.renameWatcher) {
       return;
     }
 
     this.watcher = vscode.workspace.createFileSystemWatcher('**/*');
-    const onStructuralChange = () => {
-      this.workspaceSkeleton = null;
-      this.skeletonBuiltAtMs = 0;
-      this.lastStructuralChangeAtMs = Date.now();
-    };
+    const onStructuralChange = () => this.invalidateSkeletonCache();
 
     this.watcher.onDidCreate(onStructuralChange);
     this.watcher.onDidDelete(onStructuralChange);
+    this.renameWatcher = vscode.workspace.onDidRenameFiles(onStructuralChange);
+  }
+
+  private invalidateSkeletonCache(): void {
+    this.workspaceSkeleton = null;
+    this.skeletonBuiltAtMs = 0;
+    this.lastStructuralChangeAtMs = Date.now();
   }
 
   dispose(): void {
     this.watcher?.dispose();
     this.watcher = null;
+    this.renameWatcher?.dispose();
+    this.renameWatcher = null;
   }
 }

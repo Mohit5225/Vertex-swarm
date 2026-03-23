@@ -79,7 +79,6 @@ const InputArea: React.FC<Props> = ({
       getVsCodeApi()?.postMessage({
         type: 'start-stream',
         payload: {
-          sessionId: '', // Extension will create the actual session
           message: userMessage,
           ideContextEnabled,
         },

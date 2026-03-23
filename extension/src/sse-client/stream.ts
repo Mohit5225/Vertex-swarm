@@ -18,37 +18,6 @@ export class SSEStreamClient {
     private readonly onClose: () => void
   ) {}
 
-  /**
-   * Open SSE connection to backend stream endpoint
-   */
-  async openStream(sessionId: string): Promise<void> {
-    try {
-      const streamUrl = `${this.backendUrl}/api/v1/sessions/${sessionId}/stream`;
-      this.abortController = new AbortController();
-
-      const response = await fetch(streamUrl, {
-        method: 'GET',
-        headers: {
-          Authorization: `Bearer ${this.token}`,
-          Accept: 'text/event-stream',
-        },
-        signal: this.abortController.signal,
-      });
-
-      if (!response.ok) {
-        throw new Error(await this.buildErrorMessage(response));
-      }
-
-      this.isConnected = true;
-      await this.parseStreamResponse(response);
-    } catch (error) {
-      const errorMessage = error instanceof Error ? error.message : 'Unknown error';
-      console.error('SSE stream error:', errorMessage);
-      this.onError(errorMessage);
-      this.cleanup();
-    }
-  }
-
   async openChatStream(
     chatId: string,
     message: string,

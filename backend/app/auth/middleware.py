@@ -1,8 +1,5 @@
 """Authentication middleware for Neon Auth JWT validation (Phase 2)"""
-from typing import Optional
-
 from fastapi import HTTPException, Request, status
-from fastapi.responses import JSONResponse
 
 
 class AuthenticationError(HTTPException):
@@ -37,31 +34,7 @@ async def extract_bearer_token(request: Request) -> Optional[str]:
     
     return parts[1]
 
-
-def attach_user_to_request(request: Request, user_data: dict):
-    """
-    Attach authenticated user data to request scope for downstream use.
-    
-    Args:
-        request: FastAPI request object
-        user_data: Dictionary with user info (id, email, name, etc.)
-    """
-    request.scope["user"] = user_data
-
-
-def get_user_from_request(request: Request) -> Optional[dict]:
-    """
-    Retrieve user data attached by auth middleware.
-    
-    Returns:
-        User data dict or None if not authenticated
-    """
-    return request.scope.get("user")
-
-
 __all__ = [
     "AuthenticationError",
     "extract_bearer_token",
-    "attach_user_to_request",
-    "get_user_from_request",
 ]

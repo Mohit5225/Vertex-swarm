@@ -153,30 +153,6 @@ export class TokenManager {
   }
 
   /**
-   * Retrieve stored token
-   */
-  async getToken(): Promise<string | undefined> {
-    const session = await this.getSession();
-    return session.status === 'valid' ? session.token : undefined;
-  }
-
-  /**
-   * Retrieve user metadata
-   */
-  async getUserMetadata(): Promise<Record<string, unknown> | undefined> {
-    const session = await this.getSession();
-    return session.status === 'valid' ? session.userMetadata : undefined;
-  }
-
-  /**
-   * Check if token exists
-   */
-  async hasToken(): Promise<boolean> {
-    const session = await this.getSession();
-    return session.status === 'valid';
-  }
-
-  /**
    * Clear stored token (logout)
    */
   async clearToken(): Promise<void> {

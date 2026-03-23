@@ -16,6 +16,7 @@ from app.core.config import settings
 from app.db.postgres.connection import AsyncSessionLocal
 from app.db.postgres.models import ChatORM, MessageORM
 from app.db.redis_db import get_redis, tool_result_stream_key
+from app.db.redis_sessions import bootstrap_chat_session, build_chat_session_id
 from app.schemas.tool import ToolResultSchema
 from app.services.llm_service import stream_chat_events
 
@@ -115,19 +116,20 @@ def _tool_call_content(tool_name: str, tool_args: dict[str, Any]) -> str:
 
 
 def _log_trace_event(
-    user_id: str,
+    user_id: str | None,
     chat_id: UUID,
     session_id: str,
     message_id: str,
     event: dict[str, Any],
 ) -> None:
+    safe_user_id = user_id or "unknown"
     event_type = str(event.get("type", "unknown"))
     content = str(event.get("content", ""))
 
     if event_type == "thinking":
         logger.info(
             "thinking trace user_id=%s chat_id=%s session_id=%s message_id=%s preview=%s",
-            user_id,
+            safe_user_id,
             chat_id,
             session_id,
             message_id,
@@ -138,7 +140,7 @@ def _log_trace_event(
     if event_type == "status":
         logger.info(
             "status update user_id=%s chat_id=%s session_id=%s message_id=%s status=%s",
-            user_id,
+            safe_user_id,
             chat_id,
             session_id,
             message_id,
@@ -149,7 +151,7 @@ def _log_trace_event(
     if event_type == "tool_call":
         logger.info(
             "tool requested user_id=%s chat_id=%s session_id=%s message_id=%s tool_call_id=%s tool_name=%s args=%s",
-            user_id,
+            safe_user_id,
             chat_id,
             session_id,
             message_id,
@@ -162,7 +164,7 @@ def _log_trace_event(
     if event_type == "tool_result":
         logger.info(
             "tool result received user_id=%s chat_id=%s session_id=%s message_id=%s tool_call_id=%s tool_name=%s status=%s execution_time_ms=%s",
-            user_id,
+            safe_user_id,
             chat_id,
             session_id,
             message_id,
@@ -176,7 +178,7 @@ def _log_trace_event(
     if event_type == "error":
         logger.error(
             "stream error event user_id=%s chat_id=%s session_id=%s message_id=%s error=%s",
-            user_id,
+            safe_user_id,
             chat_id,
             session_id,
             message_id,
@@ -248,7 +250,14 @@ async def send_message(
     if not chat:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Chat not found")
 
-    synthetic_session_id = f"chat-{chat_id}"
+    synthetic_session_id = build_chat_session_id(chat_id)
+
+    await bootstrap_chat_session(
+        synthetic_session_id,
+        user.user_id,
+        chat_id,
+        req.content,
+    )
 
     logger.info(
         "message received user_id=%s chat_id=%s session_id=%s ide_context_enabled=%s",

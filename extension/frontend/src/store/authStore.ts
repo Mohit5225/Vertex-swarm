@@ -10,18 +10,11 @@ interface User {
 
 interface AuthState {
   isAuthenticated: boolean
-  token: string | null
   user: User | null
-  authUrl: string | null
   loading: boolean
   error: string | null
 
   // Actions
-  setToken: (token: string) => void
-  setUser: (user: User) => void
-  setAuthUrl: (url: string) => void
-  setLoading: (loading: boolean) => void
-  setError: (error: string | null) => void
   logout: () => void
   initializeExtensionBridge: () => void
 }
@@ -48,8 +41,7 @@ const requestBridgeState = () => {
     throw new Error('VS Code API unavailable')
   }
 
-  vscodeApi.postMessage({ type: 'request-auth-url' })
-  vscodeApi.postMessage({ type: 'request-token' })
+  vscodeApi.postMessage({ type: 'request-session' })
 }
 
 const startRestoreWatchdog = () => {
@@ -85,21 +77,13 @@ const handleExtensionMessage = (event: MessageEvent) => {
   const message = event.data
 
   switch (message?.type) {
-    case 'auth-url':
-      useAuthStore.setState({
-        authUrl: message.payload.url,
-      })
-      break
-
-    case 'token': {
+    case 'authenticated': {
       clearRestoreTimers()
-      const { token, user } = message.payload
+      const { user } = message.payload
       useAuthStore.setState({
-        token,
         user,
         isAuthenticated: true,
         loading: false,
-        authUrl: null,
         error: null,
       })
       break
@@ -111,9 +95,7 @@ const handleExtensionMessage = (event: MessageEvent) => {
       useChatStore.getState().setChatList([], null)
       useAuthStore.setState({
         isAuthenticated: false,
-        token: null,
         user: null,
-        authUrl: message.payload?.authUrl || useAuthStore.getState().authUrl,
         loading: false,
         error: message.payload?.reason || null,
       })
@@ -201,31 +183,9 @@ const handleExtensionMessage = (event: MessageEvent) => {
 
 export const useAuthStore = create<AuthState>((set) => ({
   isAuthenticated: false,
-  token: null,
   user: null,
-  authUrl: null,
   loading: true,
   error: null,
-
-  setToken: (token: string) => {
-    set({ token, isAuthenticated: true, loading: false })
-  },
-
-  setUser: (user: User) => {
-    set({ user, isAuthenticated: true, loading: false })
-  },
-
-  setAuthUrl: (url: string) => {
-    set({ authUrl: url, loading: false })
-  },
-
-  setLoading: (loading: boolean) => {
-    set({ loading })
-  },
-
-  setError: (error: string | null) => {
-    set({ error })
-  },
 
   logout: () => {
     clearRestoreTimers()
@@ -233,7 +193,6 @@ export const useAuthStore = create<AuthState>((set) => ({
     useChatStore.getState().setChatList([], null)
     set({
       isAuthenticated: false,
-      token: null,
       user: null,
       error: null,
       loading: false,
