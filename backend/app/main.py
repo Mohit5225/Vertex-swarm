@@ -7,8 +7,9 @@ from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import text
 from app.core.config import settings
 from app.db.redis_db import init_redis, close_redis
-from app.agent_infra.heartbeat import init_vitality_tracker, close_vitality_tracker
-from app.agent_infra.jobs import init_archival_job, close_archival_job
+from app.db.redis_db.agent_infra.heartbeat import init_vitality_tracker, close_vitality_tracker
+
+from app.db.redis_db.agent_infra.jobs import init_archival_job, close_archival_job
 from app.db.postgres.connection import async_engine, Base
 import app.db.postgres.models  # noqa: F401 — registers ORM metadata before create_all
 

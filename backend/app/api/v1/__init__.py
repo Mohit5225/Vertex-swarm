@@ -1,4 +1,4 @@
 """API v1 routes"""
-from . import endpoints, sessions, tools
+from . import endpoints, tools
 
-__all__ = ["endpoints", "sessions", "tools"]
+__all__ = ["endpoints", "tools"]

@@ -1,5 +1,6 @@
 """Authentication middleware for Neon Auth JWT validation (Phase 2)"""
-from fastapi import HTTPException, Request, status
+from fastapi import HTTPException, Request, status 
+from typing import Optional
 
 
 class AuthenticationError(HTTPException):

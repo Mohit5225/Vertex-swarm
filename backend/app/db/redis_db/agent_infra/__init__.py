@@ -4,12 +4,12 @@ from app.db.redis_db import (
     get_redis,
     close_redis,
 )
-from app.agent_infra.heartbeat import (
+from app.db.redis_db.agent_infra.heartbeat import (
     init_vitality_tracker,
     close_vitality_tracker,
     get_vitality_tracker,
 )
-from app.agent_infra.jobs import (
+from app.db.redis_db.agent_infra.jobs import (
     init_archival_job,
     close_archival_job,
     get_archival_job,

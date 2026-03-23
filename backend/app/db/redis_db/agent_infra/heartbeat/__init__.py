@@ -1,5 +1,5 @@
 """Agent heartbeat and vitality monitoring"""
-from app.agent_infra.heartbeat.agent_vitality import (
+from app.db.redis_db.agent_infra.heartbeat.live_agent_status import (
     AgentVitalityTracker,
     init_vitality_tracker,
     close_vitality_tracker,
