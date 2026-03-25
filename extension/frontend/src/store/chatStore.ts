@@ -96,9 +96,47 @@ const shouldMergeEvent = (previous: SessionEvent | undefined, next: SessionEvent
   return previous.type === 'thinking' && next.type === 'thinking'
 }
 
+const normalizeEventComparisonContent = (content?: string) =>
+  typeof content === 'string' ? content.replace(/\s+/g, ' ').trim() : ''
+
+const mergeStreamingText = (previousContent: string, nextContent: string) => {
+  if (!previousContent) {
+    return nextContent
+  }
+
+  if (!nextContent) {
+    return previousContent
+  }
+
+  if (previousContent === nextContent) {
+    return previousContent
+  }
+
+  if (nextContent.startsWith(previousContent)) {
+    return nextContent
+  }
+
+  if (previousContent.endsWith(nextContent)) {
+    return previousContent
+  }
+
+  const maxOverlap = Math.min(previousContent.length, nextContent.length)
+
+  for (let overlapLength = maxOverlap; overlapLength > 0; overlapLength -= 1) {
+    if (
+      previousContent.slice(-overlapLength) ===
+      nextContent.slice(0, overlapLength)
+    ) {
+      return `${previousContent}${nextContent.slice(overlapLength)}`
+    }
+  }
+
+  return `${previousContent}${nextContent}`
+}
+
 const mergeEvent = (previous: SessionEvent, next: SessionEvent): SessionEvent => ({
   ...previous,
-  content: `${previous.content || ''}${next.content || ''}`,
+  content: mergeStreamingText(previous.content || '', next.content || ''),
   timestamp: next.timestamp,
   metadata: {
     ...(previous.metadata || {}),
@@ -251,6 +289,28 @@ export const useChatStore = create<ChatState>((set) => ({
 
       const targetMessage = messages[targetIndex]
       const currentEvents = [...(targetMessage.events || [])]
+
+      // Deduplicate: Check if event with this ID already exists
+      const eventAlreadyExists = currentEvents.some(
+        (e) => e.id === normalizedEvent.id
+      )
+      if (eventAlreadyExists) {
+        return state // Skip duplicate
+      }
+
+      // Additional semantic dedupe for providers that resend the same status/reasoning
+      // with a different event id during retries/reconnect windows.
+      const lastEvent = currentEvents[currentEvents.length - 1]
+      const sameAsPrevious =
+        Boolean(lastEvent) &&
+        lastEvent?.type === normalizedEvent.type &&
+        normalizeEventComparisonContent(lastEvent?.content) ===
+          normalizeEventComparisonContent(normalizedEvent.content)
+
+      if (sameAsPrevious) {
+        return state
+      }
+
       const previousEvent = currentEvents[currentEvents.length - 1]
       const nextEvents = shouldMergeEvent(previousEvent, normalizedEvent)
         ? [

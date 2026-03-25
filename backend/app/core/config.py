@@ -76,6 +76,7 @@ class Settings(BaseSettings):
     neon_auth_jwks_url: str = ""
     jwt_algorithm: str = "EdDSA"  # Neon Auth uses EdDSA with Ed25519 (OKP keys), verified via JWKS
     jwt_cache_ttl_seconds: int = 3600  # Cache JWKS keys for 1 hour
+    jwt_token_leeway_seconds: int = 300  # Clock skew tolerance (iat, exp validation)
 
     # ========================================
     # OpenRouter / LiteLLM

@@ -51,12 +51,16 @@ async def get_current_user(request: Request) -> AuthenticatedUser:
     # Extract token from Authorization header
     token = await extract_bearer_token(request)
     if not token:
+        logger.error(f"No token provided for {request.method} {request.url.path}")
         raise AuthenticationError("Missing authentication token")
 
     # Verify JWT signature against JWKS
     try:
+        logger.debug(f"Verifying JWT token (length={len(token)}) for {request.url.path}")
         jwt_claims = await verify_neon_auth_jwt(token)
+        logger.info(f"Token verified for user_id={jwt_claims.get('sub')} at {request.url.path}")
     except NeonAuthVerificationError as e:
+        logger.error(f"JWT verification failed for {request.url.path}: {str(e)}", exc_info=True)
         raise AuthenticationError(str(e))
 
     # Optionally fetch full user record from neon_auth.user

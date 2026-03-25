@@ -162,19 +162,19 @@ const InputArea: React.FC<Props> = ({
   return (
     <div
       className={`composer-shell transition-all duration-200 ${
-        isFocused ? 'ring-1 ring-white/12' : ''
+        isFocused ? 'ring-1 ring-[#8bd7ff]/20' : ''
       }`}
     >
-      <div className="flex items-center justify-between gap-3 px-4 pb-2 pt-3 text-[10px] font-medium uppercase tracking-[0.18em] text-[#7385a7]">
-        <span className="truncate">
-          {disabled ? 'Agent running' : 'New message'}
-        </span>
-        <span className="hidden text-[#60718f] min-[420px]:block">
-          {trimmedMessage ? `${trimmedMessage.length} chars` : 'Ask anything'}
-        </span>
+      <div className="flex items-center px-4 pt-3 pb-0 text-[10px] font-semibold uppercase tracking-[0.18em]">
+        {ideContextEnabled && (
+          <span className="inline-flex items-center gap-1.5 rounded-full border border-[#8a4bff]/30 bg-[#8a4bff]/10 px-2.5 py-1 text-[#c6a8ff]">
+            <Sparkles className="h-3 w-3" />
+            IDE context
+          </span>
+        )}
       </div>
 
-      <div className="px-4">
+      <div className="px-4 pt-1">
         <textarea
           ref={textareaRef}
           value={message}
@@ -184,12 +184,12 @@ const InputArea: React.FC<Props> = ({
           onBlur={() => setIsFocused(false)}
           placeholder="Describe the task, files, constraints, and desired outcome."
           disabled={disabled}
-          className="min-h-[96px] w-full resize-none bg-transparent text-[15px] leading-7 text-[#f4f7ff] placeholder:text-[#6e7f9d] focus:outline-none disabled:cursor-not-allowed disabled:opacity-60 max-[360px]:min-h-[76px]"
+          className="min-h-[72px] w-full resize-none bg-transparent text-[15px] leading-7 text-[#f4f7ff] placeholder:text-[#6e7f9d] focus:outline-none disabled:cursor-not-allowed disabled:opacity-60 max-[360px]:min-h-[60px]"
           rows={1}
         />
       </div>
 
-      <div className="flex items-center justify-between gap-3 border-t border-white/6 px-4 pb-3 pt-2">
+      <div className="flex items-center justify-between gap-3 border-t border-white/6 px-4 pb-4 pt-3">
         <div className="flex min-w-0 items-center gap-2">
           <div className="relative" ref={quickActionsRef}>
             <button
@@ -199,7 +199,7 @@ const InputArea: React.FC<Props> = ({
               className={`inline-flex h-10 w-10 items-center justify-center rounded-full border transition ${
                 disabled
                   ? 'cursor-not-allowed border-white/10 bg-white/[0.03] text-[#657594]'
-                  : 'border-white/15 bg-white/[0.05] text-[#d9e2f6] hover:bg-white/[0.08]'
+                  : 'border-white/12 bg-white/[0.04] text-[#d9e2f6] hover:bg-white/[0.08]'
               }`}
               title="Quick actions"
             >
@@ -207,7 +207,7 @@ const InputArea: React.FC<Props> = ({
             </button>
 
             {showQuickActions && (
-              <div className="absolute bottom-[calc(100%+0.6rem)] left-0 z-20 w-[16rem] rounded-2xl border border-white/10 bg-[#1e2432]/95 p-2 shadow-[0_22px_60px_rgba(0,0,0,0.45)] backdrop-blur-xl">
+              <div className="absolute bottom-[calc(100%+0.7rem)] left-0 z-20 w-[16rem] rounded-[22px] border border-white/10 bg-[#141b2b]/96 p-2 shadow-[0_22px_60px_rgba(0,0,0,0.45)] backdrop-blur-xl">
                 <button
                   type="button"
                   disabled={disabled}
@@ -258,7 +258,7 @@ const InputArea: React.FC<Props> = ({
                     <Zap className="h-4 w-4" />
                     <span>Speed</span>
                   </div>
-                  <span className="text-lg leading-none">›</span>
+                  <span className="text-lg leading-none">{'>'}</span>
                 </button>
               </div>
             )}
@@ -286,7 +286,7 @@ const InputArea: React.FC<Props> = ({
                   }
                   setShowContextDismissButton((value) => !value)
                 }}
-                className="relative inline-flex h-9 w-9 items-center justify-center rounded-full bg-[#8a4bff]/18 text-[#b57cff] ring-1 ring-[#8a4bff]/45 transition hover:bg-[#8a4bff]/24"
+                className="relative inline-flex h-9 w-9 items-center justify-center rounded-full bg-[#8a4bff]/14 text-[#b57cff] ring-1 ring-[#8a4bff]/35 transition hover:bg-[#8a4bff]/22"
                 title="IDE context enabled"
               >
                 <Sparkles className="h-4 w-4" />
@@ -314,10 +314,10 @@ const InputArea: React.FC<Props> = ({
             type="button"
             onClick={handleSend}
             disabled={disabled || !trimmedMessage}
-            className={`inline-flex shrink-0 items-center justify-center gap-2 rounded-full px-3 py-2 text-sm font-medium transition ${
+            className={`inline-flex shrink-0 items-center justify-center gap-2 rounded-full px-4 py-2.5 text-sm font-medium transition ${
               disabled || !trimmedMessage
                 ? 'cursor-not-allowed bg-white/[0.04] text-[#7383a1]'
-                : 'bg-[#f3f0dd] text-[#08101e] shadow-[0_10px_30px_rgba(243,240,221,0.16)] hover:-translate-y-[1px]'
+                : 'bg-[#f3f0dd] text-[#08101e] shadow-[0_14px_30px_rgba(243,240,221,0.18)] hover:-translate-y-[1px]'
             }`}
           >
             <span className="max-[360px]:hidden">

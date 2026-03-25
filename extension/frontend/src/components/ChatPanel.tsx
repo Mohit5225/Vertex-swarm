@@ -89,6 +89,14 @@ const ChatPanel: React.FC = () => {
       ? 'Ready'
       : 'Idle'
 
+  const latestAgentMessage = useMemo(
+    () => [...messages].reverse().find((message) => message.type === 'agent'),
+    [messages]
+  )
+
+  const shouldShowInlineStreamingState =
+    isStreaming && !latestAgentMessage?.events?.length
+
   useEffect(() => {
     // Only smooth scroll if there are messages and we're not streaming super fast, 
     // or just let native scroll happen. But auto-scroll is crucial for chat UX.
@@ -185,15 +193,19 @@ const ChatPanel: React.FC = () => {
 
   return (
     <>
-      <div className="flex h-full min-h-0 flex-col">
-        <div className="relative border-b border-white/6 px-3 py-3 md:px-4">
-          <div className="flex items-center justify-between gap-3">
-            <div className="min-w-0 flex items-center gap-2">
+      <div className="flex h-full min-h-0 flex-col overflow-hidden">
+        <div className="relative border-b chat-divider px-2 pb-2 pt-3">
+          <p className="text-[11px] font-semibold uppercase tracking-[0.22em] text-[#8ea0c0]">
+            Vertex Swarm
+          </p>
+
+          <div className="mt-2.5 flex items-start justify-between gap-2">
+            <div className="min-w-0 flex items-start gap-2">
               {messages.length > 0 && (
                 <button
                   type="button"
                   onClick={handleStartFresh}
-                  className="icon-btn"
+                  className="icon-btn mt-0.5"
                   title="Start a fresh task"
                   disabled={isStreaming}
                 >
@@ -204,7 +216,7 @@ const ChatPanel: React.FC = () => {
               <div className="min-w-0">
                 <div className="flex items-center gap-2">
                   <span
-                    className={`h-1.5 w-1.5 shrink-0 rounded-full ${
+                    className={`h-2 w-2 shrink-0 rounded-full ${
                       isStreaming
                         ? 'bg-[#48d2b4]'
                         : messages.length > 0
@@ -213,22 +225,28 @@ const ChatPanel: React.FC = () => {
                     }`}
                   />
                   <h2
-                    className="truncate text-sm font-medium text-[#f3f6ff]"
+                    className="truncate text-[1.08rem] font-semibold tracking-[-0.01em] text-[#f4f7ff]"
                     title={chatTitle}
                   >
                     {chatTitle}
                   </h2>
                 </div>
-                <p className="mt-1 hidden text-[11px] leading-5 text-[#7d89a6] min-[460px]:block">
-                  {streamStateDescription}
-                </p>
-                <p className="mt-1 text-[11px] leading-5 text-[#8f9cb7]">
-                  IDE context: {currentIdeContextEnabled ? 'On' : 'Off'}
-                </p>
+
+                <div className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-1 text-[11px] leading-5 text-[#8f9cb7]">
+                  <span className="hidden min-[460px]:inline text-[#7d89a6]">
+                    {streamStateDescription}
+                  </span>
+                  <span className="hidden min-[460px]:inline text-white/15">
+                    |
+                  </span>
+                  <span>
+                    IDE context: {currentIdeContextEnabled ? 'On' : 'Off'}
+                  </span>
+                </div>
               </div>
             </div>
 
-            <div className="flex items-center gap-1.5">
+            <div className="flex items-center gap-1">
               <button
                 type="button"
                 onClick={() => {
@@ -278,7 +296,7 @@ const ChatPanel: React.FC = () => {
           {showHistoryPanel && (
             <div
               ref={historyPanelRef}
-              className="absolute left-3 top-[calc(100%+0.5rem)] z-20 w-[min(20rem,calc(100vw-1.5rem))] rounded-[20px] border border-white/8 bg-[#0b1221]/96 p-4 shadow-[0_22px_60px_rgba(0,0,0,0.38)] backdrop-blur-xl md:left-4"
+              className="absolute left-2 top-[calc(100%+0.6rem)] z-20 w-[min(20rem,calc(100vw-1rem))] rounded-[22px] border border-white/10 bg-[#0c1220]/96 p-4 shadow-[0_22px_60px_rgba(0,0,0,0.38)] backdrop-blur-xl"
             >
               <div className="flex items-center justify-between gap-3">
                 <p className="text-[11px] font-medium uppercase tracking-[0.2em] text-[#7d89a6]">
@@ -333,7 +351,7 @@ const ChatPanel: React.FC = () => {
           {showSessionPanel && (
             <div
               ref={sessionPanelRef}
-              className="absolute right-3 top-[calc(100%+0.5rem)] z-20 w-[min(17rem,calc(100vw-1.5rem))] rounded-[20px] border border-white/8 bg-[#0b1221]/96 p-4 shadow-[0_22px_60px_rgba(0,0,0,0.38)] backdrop-blur-xl md:right-4"
+              className="absolute right-2 top-[calc(100%+0.6rem)] z-20 w-[min(17rem,calc(100vw-1rem))] rounded-[22px] border border-white/10 bg-[#0c1220]/96 p-4 shadow-[0_22px_60px_rgba(0,0,0,0.38)] backdrop-blur-xl"
             >
               <div className="flex items-center justify-between gap-3">
                 <p className="text-[11px] font-medium uppercase tracking-[0.2em] text-[#7d89a6]">
@@ -376,54 +394,57 @@ const ChatPanel: React.FC = () => {
           )}
         </div>
 
-        <div className="flex min-h-0 flex-1 flex-col">
-          <div className="flex-1 overflow-y-auto px-3 pb-3 pt-4 md:px-4">
-            {messages.length === 0 ? (
-              <div className="mx-auto flex h-full w-full max-w-xl flex-col justify-end pb-6">
-                <p className="text-[11px] font-medium uppercase tracking-[0.2em] text-[#7082a4]">
-                  Suggested starts
-                </p>
-                <p className="mt-2 max-w-[30rem] text-sm leading-6 text-[#8f9cb7]">
-                  Start with a task, file path, bug, or review request.
-                </p>
-                <div className="mt-4 flex flex-wrap gap-2">
-                  {starterPrompts.map((prompt) => (
-                    <button
-                      key={prompt.label}
-                      type="button"
-                      onClick={() => setQueuedPrompt(prompt.prompt)}
-                      className="rounded-full bg-white/[0.04] px-3 py-1.5 text-[13px] text-[#dbe5f8] transition hover:bg-white/[0.08]"
-                    >
-                      {prompt.label}
-                    </button>
-                  ))}
+        <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
+          <div className="flex-1 overflow-hidden">
+            <div className="h-full overflow-y-auto overflow-x-hidden">
+              {messages.length === 0 ? (
+                <div className="mx-auto flex h-full w-full max-w-[42rem] flex-col justify-end px-3 pb-8 pt-8">
+                  <p className="text-[11px] font-medium uppercase tracking-[0.2em] text-[#7082a4]">
+                    Suggested starts
+                  </p>
+                  <p className="mt-2 max-w-[30rem] text-sm leading-7 text-[#8f9cb7]">
+                    Start with a task, bug, review request, or file path and
+                    the sidebar will stay clean while the agent works through it.
+                  </p>
+                  <div className="mt-4 flex flex-wrap gap-2">
+                    {starterPrompts.map((prompt) => (
+                      <button
+                        key={prompt.label}
+                        type="button"
+                        onClick={() => setQueuedPrompt(prompt.prompt)}
+                        className="rounded-full bg-white/[0.04] px-3 py-1.5 text-[13px] text-[#dbe5f8] transition hover:bg-white/[0.08]"
+                      >
+                        {prompt.label}
+                      </button>
+                    ))}
+                  </div>
                 </div>
-              </div>
-            ) : (
-              <div className="space-y-2 pb-2">
-                {messages.map((message) => (
-                  <MessageRenderer key={message.id} message={message} />
-                ))}
+              ) : (
+                <div className="space-y-2 px-4 pb-4 pt-3 sm:px-5">
+                  {messages.map((message) => (
+                    <MessageRenderer key={message.id} message={message} />
+                  ))}
 
-                {isStreaming && (
-                  <div className="flex items-center gap-2 px-1 py-2 text-sm text-[#95a2bd] animate-fade-up">
-                    <span className="h-1.5 w-1.5 rounded-full bg-[#48d2b4] animate-pulse" />
-                    <span>{streamStateDescription}</span>
-                  </div>
-                )}
+                  {shouldShowInlineStreamingState && (
+                    <div className="flex items-center gap-2 px-1 py-2 text-sm text-[#95a2bd] animate-fade-up">
+                      <span className="h-1.5 w-1.5 rounded-full bg-[#48d2b4] animate-pulse" />
+                      <span>{streamStateDescription}</span>
+                    </div>
+                  )}
 
-                {error && (
-                  <div className="border-l-2 border-[#f27d75] pl-3 text-sm leading-6 text-[#ffbeb8]">
-                    {error}
-                  </div>
-                )}
+                  {error && (
+                    <div className="border-l-2 border-[#f27d75] pl-3 text-sm leading-6 text-[#ffbeb8]">
+                      {error}
+                    </div>
+                  )}
 
-                <div ref={messagesEndRef} />
-              </div>
-            )}
+                  <div ref={messagesEndRef} />
+                </div>
+              )}
+            </div>
           </div>
 
-          <div className="border-t border-white/6 px-3 pb-4 pt-3 md:px-4">
+          <div className="border-t chat-divider bg-[linear-gradient(180deg,rgba(255,255,255,0.02),transparent)] px-3 pb-3 pt-2 sm:px-4">
             <InputArea
               disabled={isStreaming}
               queuedPrompt={queuedPrompt}

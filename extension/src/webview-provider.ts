@@ -827,11 +827,30 @@ export class VertexSwarmSidebarProvider implements vscode.WebviewViewProvider {
                  script-src 'nonce-${nonce}';
                  img-src ${webview.cspSource} data:;
                  font-src ${webview.cspSource};" />
+  <style>
+    html, body, #root {
+      width: 100%;
+      height: 100%;
+      margin: 0 !important;
+      padding: 0 !important;
+      border: 0;
+      overflow: hidden;
+      background: transparent;
+    }
+
+    body {
+      box-sizing: border-box;
+    }
+
+    *, *::before, *::after {
+      box-sizing: inherit;
+    }
+  </style>
   <link rel="stylesheet" href="${styleUri}" />
   <title>Vertex Swarm</title>
 </head>
-<body>
-  <div id="root"></div>
+<body style="margin:0;padding:0;overflow:hidden;background:transparent;">
+  <div id="root" style="width:100%;height:100%;"></div>
   <script nonce="${nonce}" type="module" src="${scriptUri}"></script>
 </body>
 </html>`;

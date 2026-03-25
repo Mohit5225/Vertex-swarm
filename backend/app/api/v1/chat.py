@@ -18,7 +18,7 @@ from app.db.postgres.models import ChatORM, MessageORM
 from app.db.redis_db import get_redis, tool_result_stream_key
 from app.db.redis_sessions import bootstrap_chat_session, build_chat_session_id
 from app.schemas.tool import ToolResultSchema
-from app.services.llm_service import stream_chat_events
+from app.services.llm_service import stream_chat_events, wrap_tool_response_codeforge
 
 logger = logging.getLogger(__name__)
 
@@ -511,15 +511,20 @@ async def send_message(
                                 "content": f"{assistant_turn_content}\n<tool>{tool_block}</tool>",
                             }
                         )
+                        
+                        # Inject tool response using CodeForge format (compatible with Qwen3-14B)
+                        codeforge_response = wrap_tool_response_codeforge(
+                            tool_name=tool_name,
+                            tool_status=tool_result.status,
+                            tool_content=tool_result.content,
+                            error_code=tool_result.error_code,
+                        )
+                        
                         llm_messages.append(
                             {
-                                "role": "user",
-                                "content": (
-                                    f"Tool result for {tool_name} (tool_call_id={tool_call_id}):\n"
-                                    f"status={tool_result.status}\n"
-                                    f"content={tool_result.content}\n"
-                                    f"error_code={tool_result.error_code or 'null'}"
-                                ),
+                                "role": "tool",
+                                "tool_call_id": tool_call_id,
+                                "content": codeforge_response,
                             }
                         )
 

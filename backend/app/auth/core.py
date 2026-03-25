@@ -1,12 +1,15 @@
 """JWT verification and Neon Auth integration (Phase 2)"""
 from datetime import datetime, timedelta, timezone
 from typing import Optional
+import logging
 
 import aiohttp
 import jwt
 from jwt import PyJWKClientError
 
 from app.core.config import settings
+
+logger = logging.getLogger(__name__)
 
 
 class JWKSCache:
@@ -66,6 +69,7 @@ async def verify_neon_auth_jwt(token: str) -> dict:
         # Decode without verification first to get kid
         unverified_header = jwt.get_unverified_header(token)
         kid = unverified_header.get("kid")
+        logger.debug(f"Token kid={kid}, alg={unverified_header.get('alg')}")
 
         if not kid:
             raise NeonAuthVerificationError("Token missing 'kid' header")
@@ -77,11 +81,12 @@ async def verify_neon_auth_jwt(token: str) -> dict:
             raise NeonAuthVerificationError("No JWKS keys available")
 
         if kid not in keys:
+            logger.warning(f"Kid {kid} not in cache, forcing JWKS refresh...")
             refreshed_jwks_data = await _jwks_cache.get(force_refresh=True)
             keys = {key["kid"]: key for key in refreshed_jwks_data.get("keys", [])}
 
         if kid not in keys:
-            raise NeonAuthVerificationError(f"Key {kid} not found in JWKS")
+            raise NeonAuthVerificationError(f"Key {kid} not found in JWKS (available kids: {list(keys.keys())})")
 
         # Build public key from JWKS
         # Supports both RSA (RS256) and OKP (EdDSA/Ed25519) keys
@@ -100,6 +105,7 @@ async def verify_neon_auth_jwt(token: str) -> dict:
         # Use algorithm from key's 'alg' field, fallback to config
         token_alg = unverified_header.get("alg", settings.jwt_algorithm)
         
+        logger.debug(f"Decoding with alg={token_alg}, leeway={settings.jwt_token_leeway_seconds}s")
         decoded = jwt.decode(
             token,
             public_key,
@@ -108,12 +114,45 @@ async def verify_neon_auth_jwt(token: str) -> dict:
             # Neon Auth may include an audience claim even when this backend
             # does not enforce one. Disable audience validation explicitly.
             options={"verify_aud": False},
+            leeway=settings.jwt_token_leeway_seconds,  # Tolerance for clock skew (iat, exp)
         )
-
+        
+        logger.debug(f"Token decoded successfully: sub={decoded.get('sub')}, iat={decoded.get('iat')}, exp={decoded.get('exp')}")
         return decoded
 
     except jwt.ExpiredSignatureError:
         raise NeonAuthVerificationError("Token has expired")
+    except jwt.ImmatureSignatureError:
+        try:
+            unverified_payload = jwt.decode(
+                token,
+                options={
+                    "verify_signature": False,
+                    "verify_exp": False,
+                    "verify_iat": False,
+                    "verify_nbf": False,
+                    "verify_aud": False,
+                },
+            )
+            token_iat = unverified_payload.get("iat")
+            server_now = int(datetime.now(timezone.utc).timestamp())
+            if isinstance(token_iat, (int, float)):
+                skew_seconds = int(token_iat) - server_now
+                logger.error(
+                    "Token iat is ahead of backend clock by %ss (iat=%s, now=%s, leeway=%ss)",
+                    skew_seconds,
+                    int(token_iat),
+                    server_now,
+                    settings.jwt_token_leeway_seconds,
+                )
+            else:
+                logger.error(
+                    "Token failed iat validation and iat claim is non-numeric (iat=%s)",
+                    token_iat,
+                )
+        except Exception as diagnostics_error:
+            logger.error("Unable to compute JWT iat skew diagnostics: %s", diagnostics_error)
+        raise NeonAuthVerificationError("Token is not yet valid (clock skew detected)")
     except jwt.InvalidAudienceError:
         raise NeonAuthVerificationError("Invalid token audience")
     except jwt.InvalidSignatureError:

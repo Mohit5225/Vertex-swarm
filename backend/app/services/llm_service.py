@@ -11,6 +11,43 @@ from app.core.config import settings
 
 logger = logging.getLogger(__name__)
 
+
+def wrap_tool_response_codeforge(
+    tool_name: str,
+    tool_status: str,
+    tool_content: str,
+    error_code: str | None = None
+) -> str:
+    """
+    Wrap tool result in CodeForge-compatible format.
+    
+    Qwen3-14B was trained on 160K trajectories using this exact structure.
+    Every tool call response MUST use this wrapper to ensure model reasoning precision.
+    
+    Args:
+        tool_name: e.g., "read_file_paginated", "grep_workspace"
+        tool_status: "success" or "error"
+        tool_content: The actual output (file content, grep results, bash output, etc.)
+        error_code: Optional error identifier (e.g., "ENOENT", "RANGE_TOO_LARGE")
+    
+    Returns:
+        XML-wrapped response matching CodeForge training format
+    """
+    response_data = {
+        "output": tool_content,
+        "exit_code": 0 if tool_status == "success" else 1,
+    }
+    
+    if error_code:
+        response_data["error_code"] = error_code
+    
+    return (
+        f"<tool_response>\n"
+        f"{json.dumps(response_data)}\n"
+        f"</tool_response>"
+    )
+
+
 DEVELOPER_ASSISTANT_PERSONA = """You are Vertex, a sharp expert developer assistant embedded directly inside VS Code.
 
 You help developers write, debug, understand, and improve code across any language or framework.
@@ -34,10 +71,17 @@ def _build_system_prompt(workspace_skeleton: str | None = None) -> str:
         "Workspace Root: provided by extension host\n\n"
         "Project Structure:\n"
         f"{workspace_skeleton}\n\n"
-        "[collapsed] folders exist but are intentionally not expanded.\n"
-        "Use list_dir(path), grep_workspace(query, filePattern?), and "
-        "read_file_paginated(path, startLine, endLine) when needed.\n\n"
+        "[collapsed] folders exist but are intentionally not expanded.\n\n"
+        "AVAILABLE TOOLS:\n"
+        "1. list_dir(path: string)\n"
+        "   Lists directory contents. Required: path\n\n"
+        "2. grep_workspace(query: string, filePattern?: string)\n"
+        "   Searches for text across files. Required: query. Optional: filePattern\n\n"
+        "3. read_file_paginated(path: string, startLine: int, endLine: int)\n"
+        "   Reads file content by line range. Required: path, startLine (1-indexed), endLine (1-indexed)\n\n"
+        "TOOL CALLING FORMAT:\n"
         "When you decide to use a tool, emit exactly one <tool>{...}</tool> block and stop. "
+        "Example: <tool>{\"name\": \"read_file_paginated\", \"tool_call_id\": \"tc_123\", \"args\": {\"path\": \"file.py\", \"startLine\": 1, \"endLine\": 50}}</tool>\n"
         "Do not emit <tool_call>, <function=...>, or <parameter=...> tags. "
         "Do not continue the answer until the tool result is returned and injected back into context."
     )
