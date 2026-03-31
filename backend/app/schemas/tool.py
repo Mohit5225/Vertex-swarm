@@ -12,8 +12,13 @@ class ToolResultSchema(BaseModel):
     session_id: str = Field(..., min_length=1)
     chat_id: str = Field(..., min_length=1)
     message_id: str = Field(..., min_length=1)
+    request_id: str | None = None
+    action: str | None = None
     status: Literal["success", "error", "timeout"]
     content: str
+    summary: str | None = None
+    data: dict[str, object] | list[object] | str | int | float | bool | None = None
+    conflict: dict[str, object] | None = None
     execution_time_ms: int = Field(..., ge=0)
     error_code: str | None = None
 

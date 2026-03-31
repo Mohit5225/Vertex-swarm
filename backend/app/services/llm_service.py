@@ -1,7 +1,6 @@
 """LLM service - OpenAI SDK against OpenRouter's API."""
 import json
 import logging
-import re
 from typing import Any, AsyncIterator, Dict, List
 from uuid import uuid4
 
@@ -10,6 +9,46 @@ from openai import AsyncOpenAI
 from app.core.config import settings
 
 logger = logging.getLogger(__name__)
+
+
+WORKSPACE_OPS_TOOL_SPEC: dict[str, Any] = {
+    "type": "function",
+    "function": {
+        "name": "workspace_ops",
+        "description": "Perform one workspace operation against the repository.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "action": {
+                    "type": "string",
+                    "enum": [
+                        "list_dir",
+                        "search_text",
+                        "read_file",
+                        "edit_file",
+                        "create_file",
+                        "delete_path",
+                        "rename_path",
+                    ],
+                },
+                "request_id": {
+                    "type": "string",
+                    "description": "Stable idempotency key for retries of the same tool call.",
+                },
+                "mode": {
+                    "type": "string",
+                    "enum": ["preview", "apply"],
+                },
+                "payload": {
+                    "type": "object",
+                    "additionalProperties": True,
+                },
+            },
+            "required": ["action", "request_id", "mode", "payload"],
+            "additionalProperties": False,
+        },
+    },
+}
 
 
 def wrap_tool_response_codeforge(
@@ -25,7 +64,7 @@ def wrap_tool_response_codeforge(
     Every tool call response MUST use this wrapper to ensure model reasoning precision.
     
     Args:
-        tool_name: e.g., "read_file_paginated", "grep_workspace"
+        tool_name: e.g., "workspace_ops"
         tool_status: "success" or "error"
         tool_content: The actual output (file content, grep results, bash output, etc.)
         error_code: Optional error identifier (e.g., "ENOENT", "RANGE_TOO_LARGE")
@@ -72,18 +111,71 @@ def _build_system_prompt(workspace_skeleton: str | None = None) -> str:
         "Project Structure:\n"
         f"{workspace_skeleton}\n\n"
         "[collapsed] folders exist but are intentionally not expanded.\n\n"
+        "════════════════════════════════════════════════════════════════════════════\n"
+        "WORKSPACE OPERATIONS PHILOSOPHY\n"
+        "════════════════════════════════════════════════════════════════════════════\n\n"
+        "workspace_ops is the single source of truth for file system mutations. It enforces\n"
+        "safety invariants because file consistency is non-negotiable:\n\n"
+        "1. READING IS YOUR PROOF OF STATE\n"
+        "   Before modifying a file, you must read it. This is not bureaucracy—it ensures\n"
+        "   you are not making decisions based on stale assumptions. The state of the file\n"
+        "   may have changed since your last observation. Reading grounds your edit in reality.\n\n"
+        "2. CONCURRENCY GUARDS ARE YOUR RESPONSIBILITY\n"
+        "   When you apply a mutation, you must include expected_hash or expected_version.\n"
+        "   This is not optional. You obtained this hash during your read. Including it\n"
+        "   during apply proves that your edit is still based on the file's actual state.\n"
+        "   If the hash does not match, the file changed—do not edit. Re-read and reconsider.\n\n"
+        "3. PREVIEW + APPLY IS YOUR VERIFICATION LOOP\n"
+        "   Mode 'preview' shows exactly what will change without committing it.\n"
+        "   Use this to verify your intent is correct BEFORE mode 'apply'.\n"
+        "   Preview is not optional for mutations—it is your last chance to catch mistakes.\n\n"
+        "4. REQUEST_ID IS YOUR IDEMPOTENCY PROMISE\n"
+        "   Every tool call has a request_id. If a network timeout occurs and your call\n"
+        "   is retried, the same request_id ensures the intent is not duplicated.\n"
+        "   Use stable request_ids (derived from the specific action, file, and change).\n"
+        "   Not a random UUID per call.\n\n"
+        "5. YOU CANNOT ASSUME CONSISTENCY\n"
+        "   Two tool calls are not atomic. Code, files, and state can change between them.\n"
+        "   Do not build sequences that depend on state remaining constant. Always re-check\n"
+        "   before writing. This is how distributed systems work.\n\n"
+        "────────────────────────────────────────────────────────────────────────────\n"
         "AVAILABLE TOOLS:\n"
-        "1. list_dir(path: string)\n"
-        "   Lists directory contents. Required: path\n\n"
-        "2. grep_workspace(query: string, filePattern?: string)\n"
-        "   Searches for text across files. Required: query. Optional: filePattern\n\n"
-        "3. read_file_paginated(path: string, startLine: int, endLine: int)\n"
-        "   Reads file content by line range. Required: path, startLine (1-indexed), endLine (1-indexed)\n\n"
+        "1. workspace_ops(args: object)\n"
+        "   Unified workspace tool with one action per call.\n"
+        "   Required args: action, request_id, mode, payload.\n"
+        "   mode: 'preview' or 'apply'.\n"
+        "   Supported actions:\n"
+        "   - list_dir: payload { path }\n"
+        "   - search_text: payload { query, filePattern? }\n"
+        "   - read_file: payload { path, startLine?, endLine? }\n"
+        "   - edit_file: payload { path, edits:[{startLine,startCol,endLine,endCol,text}] }\n"
+        "   - create_file: payload { path, content, overwrite? }\n"
+        "   - delete_path: payload { path, recursive?, useTrash? }\n"
+        "   - rename_path: payload { oldPath, newPath, overwrite? }\n\n"
+        "   MUTATING ACTIONS (edit_file, create_file, delete_path, rename_path):\n"
+        "   Always use 'preview' mode first to verify what will change. Then use 'apply' mode\n"
+        "   with expected_hash (from your read) or expected_version. This is your contract\n"
+        "   with the file system. Without it, your mutation is rejected.\n\n"
+        "   REQUEST_ID STRATEGY:\n"
+        "   Use stable request_ids: hash(action + file_path + operation_intent).\n"
+        "   Do not generate random UUIDs. The same logical change should have the same ID\n"
+        "   across retries. This enables the system to recognize and deduplicate your intent.\n\n"
+        "────────────────────────────────────────────────────────────────────────────\n"
+        "HANDLING CONFLICTS AND ERRORS:\n\n"
+        "When a mutation fails with CONFLICT (expected_hash/expected_version mismatch):\n"
+        "- The file changed since you last read it. This is not an error state—it is expected.\n"
+        "- Read the file again immediately.\n"
+        "- Analyze the new content and decide: does your edit still apply? Is it still valid?\n"
+        "- If valid, adjust your edit (line numbers may have shifted) and re-apply with the new hash.\n"
+        "- If no longer valid (changes conflict with your intent), explain to the user what changed.\n\n"
+        "When a mutation fails with MISSING_CONCURRENCY_GUARD:\n"
+        "- You forgot to include expected_hash or expected_version in your apply call.\n"
+        "- Go back to your previous tool result from the read/preview call.\n"
+        "- Extract the hash or version from that result.\n"
+        "- Re-issue the apply call with that value.\n\n"
         "TOOL CALLING FORMAT:\n"
-        "When you decide to use a tool, emit exactly one <tool>{...}</tool> block and stop. "
-        "Example: <tool>{\"name\": \"read_file_paginated\", \"tool_call_id\": \"tc_123\", \"args\": {\"path\": \"file.py\", \"startLine\": 1, \"endLine\": 50}}</tool>\n"
-        "Do not emit <tool_call>, <function=...>, or <parameter=...> tags. "
-        "Do not continue the answer until the tool result is returned and injected back into context."
+        "Use the model's structured tool-call channel for workspace_ops. Do not write tool invocation text in assistant content.\n"
+        "When a tool is needed, stop after the tool call is emitted. Resume only after the tool result is injected back into context."
     )
 
 
@@ -101,7 +193,7 @@ def _model_name(model: str | None = None) -> str:
 
 
 def _build_request_payload(
-    messages: List[Dict[str, str]],
+    messages: List[Dict[str, Any]],
     workspace_skeleton: str | None = None,
     model: str | None = None,
 ) -> Dict[str, Any]:
@@ -114,6 +206,8 @@ def _build_request_payload(
         "model": _model_name(model),
         "messages": full_messages,
         "stream": True,
+        "tools": [WORKSPACE_OPS_TOOL_SPEC],
+        "tool_choice": "auto",
     }
 
     if settings.openrouter_reasoning_enabled:
@@ -130,6 +224,12 @@ def _delta_attr(delta: Any, attr_name: str) -> Any:
     if isinstance(delta, dict):
         return delta.get(attr_name)
     return getattr(delta, attr_name, None)
+
+
+def _tool_attr(value: Any, attr_name: str) -> Any:
+    if isinstance(value, dict):
+        return value.get(attr_name)
+    return getattr(value, attr_name, None)
 
 
 def _extract_text_fragments(delta: Any) -> List[str]:
@@ -193,8 +293,95 @@ def _extract_reasoning_fragments(delta: Any) -> List[str]:
     return reasoning_fragments
 
 
+def _extract_tool_call_fragments(delta: Any) -> List[Dict[str, Any]]:
+    tool_call_fragments: List[Dict[str, Any]] = []
+    tool_calls = _delta_attr(delta, "tool_calls")
+
+    if not isinstance(tool_calls, list):
+        return tool_call_fragments
+
+    for tool_call in tool_calls:
+        function_call = _tool_attr(tool_call, "function")
+        tool_call_fragments.append(
+            {
+                "index": _tool_attr(tool_call, "index"),
+                "tool_call_id": _tool_attr(tool_call, "id"),
+                "tool_name": _tool_attr(function_call, "name"),
+                "arguments": _tool_attr(function_call, "arguments"),
+            }
+        )
+
+    return tool_call_fragments
+
+
+def _merge_tool_call_fragment(
+    pending_tool_calls: Dict[int, Dict[str, Any]],
+    fragment: Dict[str, Any],
+) -> None:
+    fragment_index = fragment.get("index")
+    tool_call_index = fragment_index if isinstance(fragment_index, int) else 0
+
+    pending_tool_call = pending_tool_calls.setdefault(
+        tool_call_index,
+        {
+            "tool_call_id": "",
+            "tool_name": "",
+            "arguments": "",
+        },
+    )
+
+    tool_call_id = fragment.get("tool_call_id")
+    if isinstance(tool_call_id, str) and tool_call_id:
+        pending_tool_call["tool_call_id"] = tool_call_id
+
+    tool_name = fragment.get("tool_name")
+    if isinstance(tool_name, str) and tool_name:
+        pending_tool_call["tool_name"] = tool_name
+
+    arguments = fragment.get("arguments")
+    if isinstance(arguments, str) and arguments:
+        pending_tool_call["arguments"] += arguments
+
+
+def _finalize_pending_tool_calls(
+    pending_tool_calls: Dict[int, Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    tool_call_events: List[Dict[str, Any]] = []
+
+    for tool_call_index in sorted(pending_tool_calls):
+        pending_tool_call = pending_tool_calls[tool_call_index]
+        tool_name = pending_tool_call.get("tool_name")
+        if not isinstance(tool_name, str) or not tool_name:
+            continue
+
+        tool_call_id = pending_tool_call.get("tool_call_id")
+        if not isinstance(tool_call_id, str) or not tool_call_id:
+            tool_call_id = f"tc_{uuid4().hex[:12]}"
+
+        arguments_text = str(pending_tool_call.get("arguments", "")).strip()
+        try:
+            arguments = json.loads(arguments_text) if arguments_text else {}
+        except json.JSONDecodeError:
+            logger.warning("Ignoring malformed structured tool call arguments: %s", arguments_text)
+            continue
+
+        if not isinstance(arguments, dict):
+            arguments = {}
+
+        tool_call_events.append(
+            {
+                "type": "tool_call",
+                "tool_call_id": tool_call_id,
+                "tool_name": tool_name,
+                "args": arguments,
+            }
+        )
+
+    return tool_call_events
+
+
 async def stream_chat_completion(
-    messages: List[Dict[str, str]],
+    messages: List[Dict[str, Any]],
     workspace_skeleton: str | None = None,
 ) -> AsyncIterator[str]:
     """
@@ -226,16 +413,15 @@ async def stream_chat_completion(
 
 
 async def stream_chat_events(
-    messages: List[Dict[str, str]],
+    messages: List[Dict[str, Any]],
     workspace_skeleton: str | None = None,
     model: str | None = None,
 ) -> AsyncIterator[Dict[str, Any]]:
     """
     Stream model output as structured events.
 
-    Supported model control block formats:
-      <tool>{"name": "grep_workspace", "tool_call_id": "tc_123", "args": {...}}</tool>
-      <tool_call><function=grep_workspace><parameter=query>foo</parameter></function></tool_call>
+    The model is expected to emit structured tool calls through the OpenAI-style
+    tool_calls channel when workspace_ops is needed.
 
     Args:
         messages: Chat messages list
@@ -251,8 +437,8 @@ async def stream_chat_events(
     stream = await client.chat.completions.create(
         **_build_request_payload(messages, workspace_skeleton, model)
     )
-    streamed_buffer = ""
-    holdback_chars = max(len("<tool>"), len("<tool_call>")) - 1
+    pending_tool_calls: Dict[int, Dict[str, Any]] = {}
+    saw_structured_tool_call = False
 
     async for chunk in stream:
         if not chunk.choices:
@@ -267,175 +453,22 @@ async def stream_chat_events(
             if reasoning_text.strip():
                 yield {"type": "thinking", "content": reasoning_text}
 
-        for token in _extract_text_fragments(delta):
-            streamed_buffer += token
-
-            for event in _drain_buffered_events(streamed_buffer, is_final=False):
-                if event["type"] == "__remaining_buffer__":
-                    streamed_buffer = str(event["content"])
-                else:
-                    yield event
-
-            if (
-                "<tool>" not in streamed_buffer
-                and "<tool_call>" not in streamed_buffer
-                and len(streamed_buffer) > holdback_chars
-            ):
-                emit_text = streamed_buffer[:-holdback_chars]
-                if emit_text:
-                    yield {"type": "token", "content": emit_text}
-                streamed_buffer = streamed_buffer[-holdback_chars:]
-
-    for event in _drain_buffered_events(streamed_buffer, is_final=True):
-        if event["type"] != "__remaining_buffer__":
-            yield event
-
-
-def _drain_buffered_events(buffer: str, is_final: bool) -> List[Dict[str, Any]]:
-    """Extract token/tool_call events from buffered model text."""
-    events: List[Dict[str, Any]] = []
-    working = buffer
-
-    while True:
-        tool_start_positions = [
-            ("json", working.find("<tool>")),
-            ("xml", working.find("<tool_call>")),
-        ]
-        valid_start_positions = [
-            (tool_type, start_index)
-            for tool_type, start_index in tool_start_positions
-            if start_index != -1
-        ]
-
-        if not valid_start_positions:
-            if is_final and working:
-                events.append({"type": "token", "content": working})
-                working = ""
-            break
-
-        tool_type, start_index = min(valid_start_positions, key=lambda item: item[1])
-
-        if start_index > 0:
-            leading_text = working[:start_index]
-            if leading_text:
-                events.append({"type": "token", "content": leading_text})
-            working = working[start_index:]
-
-        closing_tag = "</tool>" if tool_type == "json" else "</tool_call>"
-        opening_tag_length = len("<tool>") if tool_type == "json" else len("<tool_call>")
-        end_index = working.find(closing_tag)
-        if end_index == -1:
-            break
-
-        tool_block_text = working[opening_tag_length:end_index].strip()
-        working = working[end_index + len(closing_tag):]
-
-        parsed_tool_call = (
-            _parse_tool_call(tool_block_text)
-            if tool_type == "json"
-            else _parse_legacy_tool_call(tool_block_text)
-        )
-        if parsed_tool_call is None:
-            events.append({
-                "type": "token",
-                "content": (
-                    f"<tool>{tool_block_text}</tool>"
-                    if tool_type == "json"
-                    else f"<tool_call>{tool_block_text}</tool_call>"
-                ),
-            })
+        tool_call_fragments = _extract_tool_call_fragments(delta)
+        if tool_call_fragments:
+            saw_structured_tool_call = True
+            for fragment in tool_call_fragments:
+                _merge_tool_call_fragment(pending_tool_calls, fragment)
             continue
 
-        events.append(parsed_tool_call)
+        if saw_structured_tool_call:
+            continue
 
-    events.append({"type": "__remaining_buffer__", "content": working})
-    return events
-
-
-def _parse_tool_call(tool_json_text: str) -> Dict[str, Any] | None:
-    """Parse a tool call JSON object embedded in model output."""
-    try:
-        payload = json.loads(tool_json_text)
-    except json.JSONDecodeError:
-        logger.warning("Ignoring malformed tool JSON: %s", tool_json_text)
-        return None
-
-    if not isinstance(payload, dict):
-        return None
-
-    tool_name = payload.get("name") or payload.get("tool_name")
-    if not isinstance(tool_name, str) or not tool_name:
-        return None
-
-    tool_call_id = payload.get("tool_call_id")
-    if not isinstance(tool_call_id, str) or not tool_call_id:
-        tool_call_id = f"tc_{uuid4().hex[:12]}"
-
-    args = payload.get("args")
-    if not isinstance(args, dict):
-        args = {}
-
-    return {
-        "type": "tool_call",
-        "tool_call_id": tool_call_id,
-        "tool_name": tool_name,
-        "args": args,
-    }
+        for token in _extract_text_fragments(delta):
+            if token:
+                yield {"type": "token", "content": token}
 
 
-def _parse_legacy_tool_call(tool_markup_text: str) -> Dict[str, Any] | None:
-    """Parse XML-ish tool call markup emitted by some models."""
-    function_match = re.search(
-        r"<function=([^>\s]+)>\s*(.*?)\s*</function>",
-        tool_markup_text,
-        re.IGNORECASE | re.DOTALL,
-    )
-    if not function_match:
-        logger.warning("Ignoring malformed legacy tool markup: %s", tool_markup_text)
-        return None
-
-    tool_name = function_match.group(1).strip()
-    function_body = function_match.group(2)
-    raw_parameters = re.findall(
-        r"<parameter=([^>\s]+)>\s*(.*?)\s*</parameter>",
-        function_body,
-        re.IGNORECASE | re.DOTALL,
-    )
-    args = {
-        parameter_name.strip(): _coerce_tool_arg(parameter_value)
-        for parameter_name, parameter_value in raw_parameters
-        if parameter_name.strip()
-    }
-
-    return {
-        "type": "tool_call",
-        "tool_call_id": f"tc_{uuid4().hex[:12]}",
-        "tool_name": tool_name,
-        "args": args,
-    }
-
-
-def _coerce_tool_arg(raw_value: str) -> Any:
-    value = raw_value.strip()
-    if not value:
-        return ""
-
-    lowered = value.lower()
-    if lowered == "true":
-        return True
-    if lowered == "false":
-        return False
-
-    if re.fullmatch(r"-?\d+", value):
-        return int(value)
-
-    if re.fullmatch(r"-?\d+\.\d+", value):
-        return float(value)
-
-    if value.startswith("{") or value.startswith("["):
-        try:
-            return json.loads(value)
-        except json.JSONDecodeError:
-            return value
-
-    return value
+    if saw_structured_tool_call:
+        for event in _finalize_pending_tool_calls(pending_tool_calls):
+            yield event
+        return

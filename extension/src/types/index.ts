@@ -18,14 +18,44 @@ export interface ToolContext {
   message_id: string;
 }
 
+export interface RequestContextSelection {
+  startLine: number;
+  startColumn: number;
+  endLine: number;
+  endColumn: number;
+  text: string;
+}
+
+export interface RequestContextFile {
+  path: string;
+  languageId?: string;
+  selection?: RequestContextSelection;
+}
+
+export interface RequestContextTerminal {
+  name: string;
+  processId?: number | null;
+}
+
+export interface RequestContextPayload {
+  activeFile?: RequestContextFile;
+  activeTerminal?: RequestContextTerminal;
+  workspaceFolders?: string[];
+}
+
 export interface ToolResult {
   tool_name: string;
   tool_call_id: string;
   session_id: string;
   chat_id: string;
   message_id: string;
+  request_id?: string;
+  action?: string;
   status: 'success' | 'error' | 'timeout';
   content: string;
+  summary?: string;
+  data?: unknown;
+  conflict?: Record<string, unknown> | null;
   execution_time_ms: number;
   error_code?: string;
 }
@@ -77,6 +107,7 @@ export type ExtensionMessage = ExtensionToWebviewMessage | WebviewToExtensionMes
 export interface StreamStartPayload {
   message: string;
   ideContextEnabled: boolean;
+  requestContext?: RequestContextPayload;
 }
 
 export interface StreamCancelPayload {

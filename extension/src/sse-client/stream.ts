@@ -1,4 +1,4 @@
-import { SessionEvent } from '../types/index.js';
+import { SessionEvent, type RequestContextPayload } from '../types/index.js';
 
 /**
  * SSEStreamClient: Opens EventSource connection to backend
@@ -22,7 +22,8 @@ export class SSEStreamClient {
     chatId: string,
     message: string,
     workspaceSkeleton?: string,
-    ideContextEnabled?: boolean
+    ideContextEnabled?: boolean,
+    requestContext?: RequestContextPayload
   ): Promise<void> {
     try {
       const streamUrl = `${this.backendUrl}/api/v1/chats/${chatId}/messages`;
@@ -39,6 +40,7 @@ export class SSEStreamClient {
           content: message,
           ide_context_enabled: Boolean(ideContextEnabled),
           ...(workspaceSkeleton ? { workspace_skeleton: workspaceSkeleton } : {}),
+          ...(requestContext ? { request_context: requestContext } : {}),
         }),
         signal: this.abortController.signal,
       });
@@ -225,6 +227,24 @@ export class SSEStreamClient {
       eventData.args && typeof eventData.args === 'object'
         ? (eventData.args as Record<string, unknown>)
         : undefined;
+    const requestId =
+      typeof eventData.request_id === 'string'
+        ? eventData.request_id
+        : typeof eventData.requestId === 'string'
+          ? eventData.requestId
+          : undefined;
+    const action =
+      typeof eventData.action === 'string'
+        ? eventData.action
+        : undefined;
+    const summary =
+      typeof eventData.summary === 'string'
+        ? eventData.summary
+        : undefined;
+    const conflict =
+      eventData.conflict && typeof eventData.conflict === 'object'
+        ? (eventData.conflict as Record<string, unknown>)
+        : undefined;
     const metadata = {
       ...(eventData.metadata && typeof eventData.metadata === 'object'
         ? (eventData.metadata as Record<string, unknown>)
@@ -242,6 +262,11 @@ export class SSEStreamClient {
       ...(typeof eventData.error_code === 'string'
         ? { error_code: eventData.error_code }
         : {}),
+      ...(requestId ? { request_id: requestId } : {}),
+      ...(action ? { action } : {}),
+      ...(summary ? { summary } : {}),
+      ...(typeof eventData.data !== 'undefined' ? { data: eventData.data } : {}),
+      ...(conflict ? { conflict } : {}),
       ...(rawType === 'token' ? { appendMode: 'token' } : {}),
     };
     const content =

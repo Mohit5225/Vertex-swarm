@@ -25,58 +25,41 @@ export class ToolExecutor {
     let toolResult: ToolResult;
 
     try {
-      switch (message.tool_name) {
-        case 'list_dir': {
-          toolResult = await this.fileSystemService.list_dir(
-            this.requireStringArg(message.args.path, 'path'),
-            context
-          );
-          break;
-        }
-
-        case 'grep_workspace': {
-          toolResult = await this.fileSystemService.grep_workspace(
-            this.requireStringArg(message.args.query, 'query'),
-            this.optionalStringArg(message.args.filePattern),
-            context
-          );
-          break;
-        }
-
-        case 'read_file_paginated': {
-          toolResult = await this.fileSystemService.read_file_paginated(
-            this.requireStringArg(message.args.path, 'path'),
-            this.requireNumberArg(message.args.startLine, 'startLine'),
-            this.requireNumberArg(message.args.endLine, 'endLine'),
-            context
-          );
-          break;
-        }
-
-        default: {
-          toolResult = {
-            tool_name: message.tool_name,
-            tool_call_id: context.tool_call_id,
-            session_id: context.session_id,
-            chat_id: context.chat_id,
-            message_id: context.message_id,
-            status: 'error',
-            content: `Unknown tool: ${message.tool_name}`,
-            error_code: 'UNKNOWN_TOOL',
-            execution_time_ms: 0,
-          };
-          break;
-        }
+      if (message.tool_name !== 'workspace_ops') {
+        const workspaceMeta = this.extractWorkspaceMeta(message.args);
+        toolResult = {
+          tool_name: message.tool_name,
+          tool_call_id: context.tool_call_id,
+          session_id: context.session_id,
+          chat_id: context.chat_id,
+          message_id: context.message_id,
+          request_id: workspaceMeta.request_id,
+          action: workspaceMeta.action,
+          status: 'error',
+          content: `Deprecated tool: ${message.tool_name}. Use workspace_ops instead.`,
+          summary: `Deprecated tool: ${message.tool_name}.`,
+          error_code: 'DEPRECATED_TOOL',
+          execution_time_ms: 0,
+        };
+      } else {
+        toolResult = await this.fileSystemService.workspace_ops(
+          message.args,
+          context
+        );
       }
     } catch (error) {
+      const workspaceMeta = this.extractWorkspaceMeta(message.args);
       toolResult = {
         tool_name: message.tool_name,
         tool_call_id: context.tool_call_id,
         session_id: context.session_id,
         chat_id: context.chat_id,
         message_id: context.message_id,
+        request_id: workspaceMeta.request_id,
+        action: workspaceMeta.action,
         status: 'error',
         content: `Tool error: ${error instanceof Error ? error.message : String(error)}`,
+        summary: `Tool error: ${error instanceof Error ? error.message : String(error)}`,
         error_code: 'EXECUTION_ERROR',
         execution_time_ms: 0,
       };
@@ -90,6 +73,26 @@ export class ToolExecutor {
       `tool result posted name=${toolResult.tool_name} tool_call_id=${toolResult.tool_call_id} status=${toolResult.status}`
     );
     return toolResult;
+  }
+
+  private extractWorkspaceMeta(args: Record<string, unknown>): { request_id?: string; action?: string } {
+    const requestId = this.optionalStringArg(args.request_id)
+      || this.optionalStringArg(args.requestId)
+      || this.optionalStringArg((args.payload as Record<string, unknown> | undefined)?.request_id)
+      || this.optionalStringArg((args.payload as Record<string, unknown> | undefined)?.requestId);
+    const action = this.optionalStringArg(args.action)
+      || this.optionalStringArg((args.payload as Record<string, unknown> | undefined)?.action);
+
+    return { request_id: requestId, action };
+  }
+
+  private optionalStringArg(value: unknown): string | undefined {
+    if (typeof value !== 'string') {
+      return undefined;
+    }
+
+    const trimmed = value.trim();
+    return trimmed ? trimmed : undefined;
   }
 
   private async postToolResult(toolResult: ToolResult): Promise<void> {
@@ -136,27 +139,4 @@ export class ToolExecutor {
     }
   }
 
-  private requireStringArg(value: unknown, fieldName: string): string {
-    if (typeof value !== 'string' || !value.trim()) {
-      throw new Error(`Missing or invalid string arg: ${fieldName}`);
-    }
-
-    return value;
-  }
-
-  private optionalStringArg(value: unknown): string | undefined {
-    if (typeof value !== 'string') {
-      return undefined;
-    }
-
-    return value;
-  }
-
-  private requireNumberArg(value: unknown, fieldName: string): number {
-    if (typeof value !== 'number' || !Number.isFinite(value)) {
-      throw new Error(`Missing or invalid number arg: ${fieldName}`);
-    }
-
-    return value;
-  }
 }

@@ -33,6 +33,15 @@
         }
       ]
     },
+    "chatParticipants": [
+      {
+        "id": "vertex-swarm.participant",
+        "name": "vertex-swarm",
+        "fullName": "Vertex Swarm",
+        "description": "Run Vertex Swarm from Chat",
+        "isSticky": true
+      }
+    ],
     "commands": [
       {
         "command": "vertex-swarm.start",
@@ -49,6 +58,7 @@
     "dev": "vite build --watch",
     "dev:frontend": "npm --prefix frontend run dev",
     "build": "vite build",
+    "test:extension": "node --test test/workspace-ops-contract.test.mjs",
     "package": "vsce package"
   },
   "dependencies": {},

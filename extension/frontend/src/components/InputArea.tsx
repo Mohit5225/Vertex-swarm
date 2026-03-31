@@ -7,6 +7,7 @@ import {
   Paperclip,
   Plus,
   Sparkles,
+  Square,
   X,
   Zap,
 } from 'lucide-react'
@@ -30,12 +31,14 @@ const InputArea: React.FC<Props> = ({
   const [isFocused, setIsFocused] = useState(false)
   const [showQuickActions, setShowQuickActions] = useState(false)
   const [showContextDismissButton, setShowContextDismissButton] = useState(false)
+  const [isHoveringStop, setIsHoveringStop] = useState(false)
   const trimmedMessage = message.trim()
   const {
     addMessage,
     beginAssistantMessage,
     setError,
     setStreaming,
+    currentChatId,
   } = useChatStore()
   const textareaRef = useRef<HTMLTextAreaElement>(null)
   const quickActionsRef = useRef<HTMLDivElement>(null)
@@ -86,6 +89,40 @@ const InputArea: React.FC<Props> = ({
     } catch (error) {
       console.error('Failed to send message:', error)
       setError('Unable to start the agent stream. Please try again.')
+    }
+  }
+
+  const handleCancel = () => {
+    if (!disabled || !currentChatId) {
+      return
+    }
+
+    // Add a cancellation event to the conversation so the LLM knows it was stopped
+    const { addEvent } = useChatStore.getState()
+    addEvent({
+      id: `evt-cancel-${Date.now()}`,
+      type: 'status',
+      content: 'User cancelled the operation.',
+      timestamp: Date.now(),
+      metadata: {
+        phase: 'cancelled',
+        cancelledBy: 'user',
+      },
+    })
+
+    setError(null)
+    setStreaming(false)
+
+    try {
+      getVsCodeApi()?.postMessage({
+        type: 'cancel-stream',
+        payload: {
+          sessionId: currentChatId,
+        },
+      })
+    } catch (error) {
+      console.error('Failed to cancel stream:', error)
+      setError('Unable to stop the agent stream.')
     }
   }
 
@@ -312,7 +349,9 @@ const InputArea: React.FC<Props> = ({
 
           <button
             type="button"
-            onClick={handleSend}
+            onClick={disabled ? handleCancel : handleSend}
+            onMouseEnter={() => setIsHoveringStop(true)}
+            onMouseLeave={() => setIsHoveringStop(false)}
             disabled={disabled || !trimmedMessage}
             className={`inline-flex shrink-0 items-center justify-center gap-2 rounded-full px-4 py-2.5 text-sm font-medium transition ${
               disabled || !trimmedMessage
@@ -321,9 +360,15 @@ const InputArea: React.FC<Props> = ({
             }`}
           >
             <span className="max-[360px]:hidden">
-              {disabled ? 'Running' : 'Send'}
+              {disabled
+                ? isHoveringStop ? 'Stop' : 'Running'
+                : 'Send'}
             </span>
-            <ArrowUp className="h-4 w-4" />
+            {disabled && isHoveringStop ? (
+              <Square className="h-4 w-4" />
+            ) : (
+              <ArrowUp className="h-4 w-4" />
+            )}
           </button>
         </div>
       </div>

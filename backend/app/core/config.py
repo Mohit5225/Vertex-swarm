@@ -2,7 +2,7 @@
 from pathlib import Path
 
 from pydantic import ConfigDict, field_validator
-from pydantic_settings import BaseSettings
+from pydantic_settings import SettingsConfigDict,BaseSettings
 
 
 BACKEND_ROOT = Path(__file__).resolve().parents[2]
@@ -11,7 +11,7 @@ BACKEND_ROOT = Path(__file__).resolve().parents[2]
 class Settings(BaseSettings):
     """Unified application settings"""
 
-    model_config = ConfigDict(
+    model_config = SettingsConfigDict(
         env_file=BACKEND_ROOT / ".env",
         case_sensitive=False,
         extra="ignore",
@@ -85,7 +85,7 @@ class Settings(BaseSettings):
     openrouter_model: str = "openrouter/stepfun/step-3.5-flash:free"
     openrouter_fallback_model: str = "openrouter/z-ai/glm-4.5-air:free"  # Fallback on 429 rate limit
     openrouter_reasoning_enabled: bool = True
-    openrouter_reasoning_effort: str = "medium"
+    openrouter_reasoning_effort: str = "low"
 
     @property
     def database(self):
