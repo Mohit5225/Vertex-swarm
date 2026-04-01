@@ -77,12 +77,20 @@ export class OAuthHandler {
         return null;
       }
 
-      const payload = JSON.parse(responseText) as Record<string, unknown>;
-      const refreshedToken = this.extractJwtToken(payload);
+      const payload = responseText
+        ? JSON.parse(responseText) as Record<string, unknown>
+        : {};
+      const refreshedToken =
+        this.extractJwtTokenFromHeaders(response.headers)
+        ?? this.extractJwtToken(payload);
       if (refreshedToken) {
+        this.logTokenLifetime('refresh', refreshedToken);
+        const refreshedSessionToken =
+          this.extractSessionTokenFromHeaders(response.headers)
+          ?? this.extractSessionToken(payload);
         return {
           token: refreshedToken,
-          sessionToken: this.extractSessionToken(payload),
+          sessionToken: refreshedSessionToken,
         };
       }
 
@@ -109,6 +117,7 @@ export class OAuthHandler {
         email: authResult.user.email || '',
         provider: this.provider,
       }, authResult.sessionToken);
+      this.logTokenLifetime('sign-in', authResult.token);
 
       return true;
     } catch (error) {
@@ -517,14 +526,19 @@ export class OAuthHandler {
       }
 
       var jwtFromHeader = resp.headers.get('set-auth-jwt');
+      var sessionTokenFromHeader = resp.headers.get('set-auth-token');
       var data = JSON.parse(text);
-      var sessionToken = extractSessionToken(data);
+      var sessionToken = sessionTokenFromHeader || extractSessionToken(data);
       var user  = (data && data.user) || (data && data.session && data.session.user) || {};
       var token = jwtFromHeader || extractJwtToken(data) || '';
 
+      log('Session token: ' + (sessionToken ? 'captured' : 'missing'));
+
       if (!token) {
         log('JWT header missing, requesting /token...');
-        var tokenHeaders = { 'Accept': 'application/json' };
+        var tokenHeaders = {
+          'Accept': 'application/json',
+        };
         if (sessionToken) {
           tokenHeaders['Authorization'] = 'Bearer ' + sessionToken;
         }
@@ -540,8 +554,10 @@ export class OAuthHandler {
 
         if (tokenResp.ok) {
           var tokenData = JSON.parse(tokenText);
-          token = extractJwtToken(tokenData) || '';
-          sessionToken = sessionToken || extractSessionToken(tokenData);
+          var refreshedJwtFromHeader = tokenResp.headers.get('set-auth-jwt');
+          var refreshedSessionTokenFromHeader = tokenResp.headers.get('set-auth-token');
+          token = refreshedJwtFromHeader || extractJwtToken(tokenData) || '';
+          sessionToken = sessionToken || refreshedSessionTokenFromHeader || extractSessionToken(tokenData);
         }
       }
 
@@ -603,6 +619,11 @@ export class OAuthHandler {
     return candidates.find((value) => this.isJwtLike(value));
   }
 
+  private extractJwtTokenFromHeaders(headers: Headers): string | undefined {
+    const token = headers.get('set-auth-jwt');
+    return this.isJwtLike(token) ? token : undefined;
+  }
+
   private extractSessionToken(payload: Record<string, unknown>): string | undefined {
     const candidates = [
       this.readStringPath(payload, ['session', 'token']),
@@ -618,6 +639,13 @@ export class OAuthHandler {
     ];
 
     return candidates.find((value) => typeof value === 'string' && value.length > 0 && !this.isJwtLike(value));
+  }
+
+  private extractSessionTokenFromHeaders(headers: Headers): string | undefined {
+    const sessionToken = headers.get('set-auth-token');
+    return typeof sessionToken === 'string' && sessionToken.length > 0
+      ? sessionToken
+      : undefined;
   }
 
   private readStringPath(payload: Record<string, unknown>, path: string[]): string | undefined {
@@ -636,5 +664,49 @@ export class OAuthHandler {
 
   private isJwtLike(value: unknown): value is string {
     return typeof value === 'string' && value.split('.').length === 3;
+  }
+
+  private logTokenLifetime(source: 'sign-in' | 'refresh', token: string): void {
+    try {
+      const parts = token.split('.');
+      if (parts.length !== 3) {
+        console.log(`[OAuthHandler] ${source}: token is not a JWT`);
+        return;
+      }
+
+      const payload = JSON.parse(
+        Buffer.from(this.normalizeBase64(parts[1]), 'base64').toString('utf-8')
+      ) as { exp?: number | string };
+      const expSeconds =
+        typeof payload.exp === 'number' ? payload.exp : Number(payload.exp);
+
+      if (!Number.isFinite(expSeconds)) {
+        console.log(`[OAuthHandler] ${source}: JWT has no numeric exp claim`);
+        return;
+      }
+
+      const expiresAtMs = expSeconds * 1000;
+      const remainingMs = expiresAtMs - Date.now();
+      const remainingMinutes = Math.max(0, Math.floor(remainingMs / (60 * 1000)));
+      const remainingHours = Math.floor(remainingMinutes / 60);
+      const remainingMinsRemainder = remainingMinutes % 60;
+
+      console.log(
+        `[OAuthHandler] ${source}: JWT expires in ${remainingHours}h ${remainingMinsRemainder}m (at ${new Date(expiresAtMs).toISOString()})`
+      );
+    } catch (error) {
+      console.warn(`[OAuthHandler] ${source}: failed to parse JWT expiry`, error);
+    }
+  }
+
+  private normalizeBase64(value: string): string {
+    const normalized = value.replace(/-/g, '+').replace(/_/g, '/');
+    const remainder = normalized.length % 4;
+
+    if (remainder === 0) {
+      return normalized;
+    }
+
+    return `${normalized}${'='.repeat(4 - remainder)}`;
   }
 }

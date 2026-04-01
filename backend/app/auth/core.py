@@ -117,6 +117,18 @@ async def verify_neon_auth_jwt(token: str) -> dict:
             leeway=settings.jwt_token_leeway_seconds,  # Tolerance for clock skew (iat, exp)
         )
         
+        # Log JWT lifetime details
+        exp_timestamp = decoded.get('exp')
+        if exp_timestamp:
+            exp_dt = datetime.fromtimestamp(exp_timestamp, tz=timezone.utc)
+            now = datetime.now(timezone.utc)
+            remaining = exp_dt - now
+            hours = remaining.total_seconds() // 3600
+            minutes = (remaining.total_seconds() % 3600) // 60
+            logger.info(f"JWT lifetime: exp={exp_dt.isoformat()} (expires in {int(hours)}h {int(minutes)}m) | sub={decoded.get('sub')}")
+        else:
+            logger.warning(f"JWT decoded but no exp claim found: sub={decoded.get('sub')}")
+        
         logger.debug(f"Token decoded successfully: sub={decoded.get('sub')}, iat={decoded.get('iat')}, exp={decoded.get('exp')}")
         return decoded
 

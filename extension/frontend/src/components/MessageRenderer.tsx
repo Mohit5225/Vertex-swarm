@@ -49,6 +49,21 @@ const MessageRenderer: React.FC<Props> = ({ message }) => {
     !isUser && isStreaming && activeMessageId === message.id
   const traceEvents = message.events?.filter((event) => event.type !== 'output')
   const pendingLabel = describePendingMessage(message)
+  const shouldRenderProcess = !isUser && Boolean(traceEvents && traceEvents.length > 0)
+
+  const renderedAssistantContent = message.content ? (
+    isStreamingMessage ? (
+      <div className="message-streaming">
+        {normalizeAssistantContent(message.content)}
+      </div>
+    ) : (
+      <div className="message-markdown">
+        <ReactMarkdown remarkPlugins={[remarkGfm]}>
+          {normalizeAssistantContent(message.content)}
+        </ReactMarkdown>
+      </div>
+    )
+  ) : null
 
   return (
     <div
@@ -79,31 +94,24 @@ const MessageRenderer: React.FC<Props> = ({ message }) => {
         <div
           className={isUser ? 'user-bubble inline-block max-w-full' : 'agent-thread w-full min-w-0'}
         >
-          {/* Single beautiful timeline for all trace events */}
-          {!isUser && traceEvents && traceEvents.length > 0 && (
-            <AgentTimeline events={traceEvents} />
-          )}
-
-          {message.content &&
-            (isUser ? (
-              <p className="whitespace-pre-wrap break-words text-[15px] leading-7 text-[#f4f7ff]">
-                {message.content}
-              </p>
-            ) : (
-              <>
-                {isStreamingMessage ? (
-                  <div className="message-streaming">
-                    {normalizeAssistantContent(message.content)}
-                  </div>
+          {shouldRenderProcess ? (
+            <AgentTimeline
+              events={traceEvents || []}
+              isStreaming={isStreamingMessage}
+              response={renderedAssistantContent}
+            />
+          ) : (
+            <>
+              {renderedAssistantContent &&
+                (isUser ? (
+                  <p className="whitespace-pre-wrap break-words text-[15px] leading-7 text-[#f4f7ff]">
+                    {message.content}
+                  </p>
                 ) : (
-                  <div className="message-markdown">
-                    <ReactMarkdown remarkPlugins={[remarkGfm]}>
-                      {normalizeAssistantContent(message.content)}
-                    </ReactMarkdown>
-                  </div>
-                )}
-              </>
-            ))}
+                  renderedAssistantContent
+                ))}
+            </>
+          )}
 
           {!message.content && !isUser && (!traceEvents || traceEvents.length === 0) && (
             <p className="text-sm leading-6 text-[#91a0bb]">

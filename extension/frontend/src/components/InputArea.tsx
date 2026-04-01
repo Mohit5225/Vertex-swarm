@@ -33,6 +33,8 @@ const InputArea: React.FC<Props> = ({
   const [showContextDismissButton, setShowContextDismissButton] = useState(false)
   const [isHoveringStop, setIsHoveringStop] = useState(false)
   const trimmedMessage = message.trim()
+  const isRunning = disabled
+  const isSendDisabled = !isRunning && !trimmedMessage
   const {
     addMessage,
     beginAssistantMessage,
@@ -352,19 +354,22 @@ const InputArea: React.FC<Props> = ({
             onClick={disabled ? handleCancel : handleSend}
             onMouseEnter={() => setIsHoveringStop(true)}
             onMouseLeave={() => setIsHoveringStop(false)}
-            disabled={disabled || !trimmedMessage}
+            disabled={isSendDisabled}
             className={`inline-flex shrink-0 items-center justify-center gap-2 rounded-full px-4 py-2.5 text-sm font-medium transition ${
-              disabled || !trimmedMessage
-                ? 'cursor-not-allowed bg-white/[0.04] text-[#7383a1]'
+              isRunning
+                ? 'bg-[#f27d75]/12 text-[#ffbeb8] shadow-[0_14px_30px_rgba(242,125,117,0.16)] hover:-translate-y-[1px] hover:bg-[#f27d75]/20'
+                : !trimmedMessage
+                  ? 'cursor-not-allowed bg-white/[0.04] text-[#7383a1]'
                 : 'bg-[#f3f0dd] text-[#08101e] shadow-[0_14px_30px_rgba(243,240,221,0.18)] hover:-translate-y-[1px]'
             }`}
+            title={isRunning ? 'Stop the running operation' : 'Send message'}
           >
             <span className="max-[360px]:hidden">
-              {disabled
+              {isRunning
                 ? isHoveringStop ? 'Stop' : 'Running'
                 : 'Send'}
             </span>
-            {disabled && isHoveringStop ? (
+            {isRunning && isHoveringStop ? (
               <Square className="h-4 w-4" />
             ) : (
               <ArrowUp className="h-4 w-4" />

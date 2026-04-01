@@ -366,7 +366,7 @@ const ChatPanel: React.FC = () => {
               </p>
               <div className="mt-3 space-y-1 text-[12px] leading-5 text-[#95a2bd]">
                 <p>Stored locally inside the extension.</p>
-                <p>Re-auth is required when the backend JWT expires.</p>
+                <p>The backend JWT refreshes automatically while your Neon session stays valid.</p>
               </div>
               <div className="mt-4 flex flex-wrap gap-2">
                 {messages.length > 0 && (
@@ -420,7 +420,7 @@ const ChatPanel: React.FC = () => {
                   </div>
                 </div>
               ) : (
-                <div className="space-y-2 px-4 pb-4 pt-3 sm:px-5">
+                <div className="space-y-2 pb-4 pl-4 pr-2 pt-3 sm:pl-5 sm:pr-3">
                   {messages.map((message) => (
                     <MessageRenderer key={message.id} message={message} />
                   ))}

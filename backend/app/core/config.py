@@ -82,7 +82,7 @@ class Settings(BaseSettings):
     # OpenRouter / LiteLLM
     # ========================================
     openrouter_api_key: str = ""
-    openrouter_model: str = "openrouter/stepfun/step-3.5-flash:free"
+    openrouter_model: str = "qwen/qwen3.6-plus-preview:free"
     openrouter_fallback_model: str = "openrouter/z-ai/glm-4.5-air:free"  # Fallback on 429 rate limit
     openrouter_reasoning_enabled: bool = True
     openrouter_reasoning_effort: str = "low"

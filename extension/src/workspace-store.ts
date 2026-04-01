@@ -58,46 +58,58 @@ export class WorkspaceStore implements vscode.Disposable {
   }
 
   async buildWorkspaceSkeleton(): Promise<string> {
-    const rootFolder = vscode.workspace.workspaceFolders?.[0];
-    if (!rootFolder) {
+    const rootFolders = vscode.workspace.workspaceFolders;
+    if (!rootFolders || rootFolders.length === 0) {
       return '[no workspace folder opened]';
     }
 
-    const rootEntries = await vscode.workspace.fs.readDirectory(rootFolder.uri);
-    const sortedRootEntries = [...rootEntries].sort(([leftName], [rightName]) =>
-      leftName.localeCompare(rightName)
-    );
-
     const lines: string[] = [];
 
-    for (const [entryName, entryType] of sortedRootEntries) {
-      if (entryType !== vscode.FileType.Directory) {
-        lines.push(entryName);
-        continue;
-      }
+    for (const rootFolder of rootFolders) {
+      const rootFolderName = rootFolder.name || vscode.workspace.asRelativePath(rootFolder.uri, false);
+      lines.push(`${rootFolderName}/`);
 
-      if (COLLAPSED_FOLDERS.has(entryName)) {
-        lines.push(`${entryName}/ [collapsed]`);
-        continue;
-      }
-
-      lines.push(`${entryName}/`);
-
-      const subfolderUri = vscode.Uri.joinPath(rootFolder.uri, entryName);
-      let subEntries: [string, vscode.FileType][];
+      let rootEntries: [string, vscode.FileType][];
 
       try {
-        subEntries = await vscode.workspace.fs.readDirectory(subfolderUri);
+        rootEntries = await vscode.workspace.fs.readDirectory(rootFolder.uri);
       } catch {
         continue;
       }
 
-      const sortedSubEntries = [...subEntries]
-        .sort(([leftName], [rightName]) => leftName.localeCompare(rightName))
-        .slice(0, MAX_DEPTH_TWO_ITEMS);
+      const sortedRootEntries = [...rootEntries].sort(([leftName], [rightName]) =>
+        leftName.localeCompare(rightName)
+      );
 
-      for (const [subEntryName, subEntryType] of sortedSubEntries) {
-        lines.push(`  ${subEntryName}${subEntryType === vscode.FileType.Directory ? '/' : ''}`);
+      for (const [entryName, entryType] of sortedRootEntries) {
+        if (entryType !== vscode.FileType.Directory) {
+          lines.push(`  ${entryName}`);
+          continue;
+        }
+
+        if (COLLAPSED_FOLDERS.has(entryName)) {
+          lines.push(`  ${entryName}/ [collapsed]`);
+          continue;
+        }
+
+        lines.push(`  ${entryName}/`);
+
+        const subfolderUri = vscode.Uri.joinPath(rootFolder.uri, entryName);
+        let subEntries: [string, vscode.FileType][];
+
+        try {
+          subEntries = await vscode.workspace.fs.readDirectory(subfolderUri);
+        } catch {
+          continue;
+        }
+
+        const sortedSubEntries = [...subEntries]
+          .sort(([leftName], [rightName]) => leftName.localeCompare(rightName))
+          .slice(0, MAX_DEPTH_TWO_ITEMS);
+
+        for (const [subEntryName, subEntryType] of sortedSubEntries) {
+          lines.push(`    ${subEntryName}${subEntryType === vscode.FileType.Directory ? '/' : ''}`);
+        }
       }
     }
 
