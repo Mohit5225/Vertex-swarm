@@ -59,9 +59,9 @@ def wrap_tool_response_codeforge(
 ) -> str:
     """
     Wrap tool result in CodeForge-compatible format.
-    
-    Qwen3-14B was trained on 160K trajectories using this exact structure.
-    Every tool call response MUST use this wrapper to ensure model reasoning precision.
+
+    Every tool call response MUST use this wrapper to keep structured tool output
+    consistent across model backends.
     
     Args:
         tool_name: e.g., "workspace_ops"

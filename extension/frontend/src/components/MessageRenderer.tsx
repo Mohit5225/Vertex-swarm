@@ -47,9 +47,8 @@ const MessageRenderer: React.FC<Props> = ({ message }) => {
   }))
   const isStreamingMessage =
     !isUser && isStreaming && activeMessageId === message.id
-  const traceEvents = message.events?.filter((event) => event.type !== 'output')
   const pendingLabel = describePendingMessage(message)
-  const shouldRenderProcess = !isUser && Boolean(traceEvents && traceEvents.length > 0)
+  const shouldRenderProcess = !isUser && Boolean(message.events?.length)
 
   const renderedAssistantContent = message.content ? (
     isStreamingMessage ? (
@@ -96,9 +95,9 @@ const MessageRenderer: React.FC<Props> = ({ message }) => {
         >
           {shouldRenderProcess ? (
             <AgentTimeline
-              events={traceEvents || []}
+              events={message.events || []}
               isStreaming={isStreamingMessage}
-              response={renderedAssistantContent}
+              messageContent={message.content}
             />
           ) : (
             <>
@@ -113,7 +112,7 @@ const MessageRenderer: React.FC<Props> = ({ message }) => {
             </>
           )}
 
-          {!message.content && !isUser && (!traceEvents || traceEvents.length === 0) && (
+          {!message.content && !isUser && (!message.events || message.events.length === 0) && (
             <p className="text-sm leading-6 text-[#91a0bb]">
               {pendingLabel}
             </p>
