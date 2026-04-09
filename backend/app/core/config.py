@@ -79,13 +79,14 @@ class Settings(BaseSettings):
     jwt_token_leeway_seconds: int = 300  # Clock skew tolerance (iat, exp validation)
 
     # ========================================
-    # OpenRouter / LiteLLM
+    # OpenAI-compatible LLM provider
     # ========================================
-    openrouter_api_key: str = ""
-    openrouter_model: str = "z-ai/glm-4.5-air:free"
-    openrouter_fallback_model: str = "openrouter/z-ai/glm-4.5-air:free"  # Fallback on 429 rate limit
-    openrouter_reasoning_enabled: bool = True
-    openrouter_reasoning_effort: str = "low"
+    modal_base_url: str = "https://api.us-west-2.modal.direct/v1"
+    modal_api_key: str = ""
+    modal_model: str = "zai-org/GLM-5-FP8"
+    modal_fallback_model: str = "zai-org/GLM-5-FP8"
+    modal_reasoning_enabled: bool = False
+    modal_reasoning_effort: str = "low"
 
     @property
     def database(self):

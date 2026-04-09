@@ -9,9 +9,12 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   const outputChannel = vscode.window.createOutputChannel('Vertex Swarm');
   outputChannel.appendLine(`[${new Date().toISOString()}] Extension activated`);
   context.subscriptions.push(outputChannel);
+  const logToOutput = (message: string) => {
+    outputChannel.appendLine(`[${new Date().toISOString()}] ${message}`);
+  };
 
   const tokenManager = new TokenManager(context.secrets);
-  const oauthHandler = new OAuthHandler(tokenManager);
+  const oauthHandler = new OAuthHandler(tokenManager, logToOutput);
 
   const chatParticipantAdapter = new VertexSwarmChatParticipant(
     context,
@@ -62,4 +65,3 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 export function deactivate(): void {
   console.log('Vertex Swarm extension deactivated');
 }
-

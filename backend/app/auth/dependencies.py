@@ -59,7 +59,9 @@ async def get_current_user(request: Request) -> AuthenticatedUser:
         logger.debug(f"Verifying JWT token (length={len(token)}) for {request.url.path}")
         jwt_claims = await verify_neon_auth_jwt(token)
         # exp claim is already logged with lifetime in core.py
-        logger.info(f"Token verified for user_id={jwt_claims.get('sub')} at {request.url.path}")
+        logger.info(
+            f"Neon token verified for user_id={jwt_claims.get('sub')} at {request.url.path}"
+        )
     except NeonAuthVerificationError as e:
         logger.error(f"JWT verification failed for {request.url.path}: {str(e)}", exc_info=True)
         raise AuthenticationError(str(e))

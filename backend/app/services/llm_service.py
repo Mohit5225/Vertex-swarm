@@ -1,6 +1,8 @@
-"""LLM service - OpenAI SDK against OpenRouter's API."""
+"""LLM service - OpenAI SDK against an OpenAI-compatible provider."""
+import asyncio
 import json
 import logging
+import time
 from typing import Any, AsyncIterator, Dict, List
 from uuid import uuid4
 
@@ -9,6 +11,9 @@ from openai import AsyncOpenAI
 from app.core.config import settings
 
 logger = logging.getLogger(__name__)
+
+_glm_rate_limiter = asyncio.Semaphore(1)
+_glm_last_call_time = 0.0
 
 
 WORKSPACE_OPS_TOOL_SPEC: dict[str, Any] = {
@@ -89,15 +94,23 @@ def wrap_tool_response_codeforge(
 
 DEVELOPER_ASSISTANT_PERSONA = """You are Vertex, a sharp expert developer assistant embedded directly inside VS Code.
 
-You help developers write, debug, understand, and improve code across any language or framework.
+You are an AUTONOMOUS, GOAL-DRIVEN AGENT. Your purpose is not just to answer questions, but to actively accomplish the user's tasks by intelligently chaining tools together until the goal is fully achieved.
+
+CORE EXECUTION MINDSET:
+1. TASK DECONSTRUCTION: When given a task (whether it's writing code, debugging a complex issue, or exploring a new codebase), break it down into logical execution steps mentally.
+2. CONTINUOUS EXECUTION: Do not expect the user to hold your hand. If you need information, use a tool to get it. If you need to make changes, use tools to apply them.
+3. ADAPTIVE ROUTING: Evaluate every tool result immediately. 
+   - Did it succeed? Move to the next step of your plan.
+   - Did it fail or return unexpected data? Pivot your strategy, try different tools, or gather more context.
+4. RELENTLESS FORWARD MOMENTUM: Never stop in the middle of a task unless you are genuinely blocked and need user input. After EVERY tool result, you MUST take the next logical action—either executing another tool to continue your plan, or providing the final comprehensive deliverable to the user.
 
 Rules you always follow:
-- Reason step-by-step before answering
+- Reason step-by-step before answering or taking action
 - Be direct and precise - no filler, no padding
 - When given code, scan it for correctness, security issues, and efficiency first
-- When requirements are ambiguous, ask exactly one clarifying question and stop
 - Reference specific line numbers and function names when discussing code
-- Prefer showing working code over describing it"""
+- Prefer showing working code over describing it
+- NEVER return an empty or silent response. Every turn must contain a tool invocation to continue the workflow, OR your reasoning and next steps, OR the final answer."""
 
 
 def _build_system_prompt(workspace_skeleton: str | None = None) -> str:
@@ -298,23 +311,41 @@ def _build_system_prompt(workspace_skeleton: str | None = None) -> str:
         "  - Do not reuse a hash from one file for another file\n"
         "  - Do not reuse a hash from an old read for a new edit\n"
         "  - Always re-read before every edit to get the current hash\n\n"
-        "TOOL CALLING FORMAT:\n"
+        "TOOL CALLING FORMAT & EXECUTION LOOP:\n"
         "Use the model's structured tool-call channel for workspace_ops. Do not write tool invocation text in assistant content.\n"
-        "When a tool is needed, stop after the tool call is emitted. Resume only after the tool result is injected back into context."
+        "1. Identify the overarching goal from the user.\n"
+        "2. Execute the necessary tool call(s) for the current step.\n"
+        "3. When you receive the tool_result in the subsequent turn, YOU MUST NOT STOP.\n"
+        "4. Evaluate the result immediately:\n"
+        "   - If the task is incomplete, emit the next required tool call natively.\n"
+        "   - If the task is finished entirely, write your final conversational summary to the user.\n"
+        "Never output an empty turn after receiving a tool result. You are the architect of the operation; drive it to completion."
     )
 
 
 def _get_client() -> AsyncOpenAI:
+    base_url = _normalize_base_url(settings.modal_base_url)
     return AsyncOpenAI(
-        base_url="https://openrouter.ai/api/v1",
-        api_key=settings.openrouter_api_key,
+        base_url=base_url,
+        api_key=settings.modal_api_key,
     )
 
 
-# Strip the "openrouter/" prefix - OpenRouter's own API doesn't need it
+def _normalize_base_url(base_url: str) -> str:
+    normalized_base_url = base_url.strip().rstrip("/")
+
+    if not normalized_base_url:
+        return "https://api.us-west-2.modal.direct/v1"
+
+    chat_completions_suffix = "/chat/completions"
+    if normalized_base_url.endswith(chat_completions_suffix):
+        normalized_base_url = normalized_base_url[: -len(chat_completions_suffix)]
+
+    return normalized_base_url.rstrip("/")
+
+
 def _model_name(model: str | None = None) -> str:
-    model_to_use = model or settings.openrouter_model
-    return model_to_use.removeprefix("openrouter/")
+    return model or settings.modal_model
 
 
 def _build_request_payload(
@@ -335,10 +366,10 @@ def _build_request_payload(
         "tool_choice": "auto",
     }
 
-    if settings.openrouter_reasoning_enabled:
+    if settings.modal_reasoning_enabled:
         payload["extra_body"] = {
             "reasoning": {
-                "effort": settings.openrouter_reasoning_effort,
+                "effort": settings.modal_reasoning_effort,
             }
         }
 
@@ -510,7 +541,7 @@ async def stream_chat_completion(
     workspace_skeleton: str | None = None,
 ) -> AsyncIterator[str]:
     """
-    Stream a chat completion via OpenRouter using the OpenAI-compatible API.
+    Stream a chat completion via an OpenAI-compatible API.
 
     Args:
         messages: List of {"role": "user"|"assistant", "content": "..."} dicts
@@ -551,47 +582,95 @@ async def stream_chat_events(
     Args:
         messages: Chat messages list
         workspace_skeleton: Optional workspace context
-        model: Optional model override (defaults to settings.openrouter_model)
+        model: Optional model override (defaults to settings.modal_model)
 
     Yields event dicts with:
       - {"type": "token", "content": "..."}
       - {"type": "thinking", "content": "..."}
       - {"type": "tool_call", "tool_call_id": "...", "tool_name": "...", "args": {...}}
     """
+    global _glm_last_call_time
+    
     client = _get_client()
-    stream = await client.chat.completions.create(
-        **_build_request_payload(messages, workspace_skeleton, model)
+    payload = _build_request_payload(messages, workspace_skeleton, model)
+    
+    # Log request details for debugging
+    logger.info(
+        "Initiating LLM stream: model=%s messages_count=%s has_tools=%s has_reasoning=%s has_extra_body=%s",
+        payload.get("model"),
+        len(payload.get("messages", [])),
+        bool(payload.get("tools")),
+        bool(payload.get("reasoning")),
+        bool(payload.get("extra_body")),
     )
+    
+    # Log message roles to debug the conversation structure
+    msg_roles = [m.get("role") for m in payload.get("messages", [])]
+    logger.debug(
+        "Message structure: roles=%s system_prompt_len=%s",
+        msg_roles,
+        len(payload.get("messages", [{}])[0].get("content", "")) if payload.get("messages") else 0,
+    )
+    
+    try:
+        async with _glm_rate_limiter:
+            elapsed = time.monotonic() - _glm_last_call_time
+            if elapsed < 20:
+                wait_time = 20 - elapsed
+                logger.info("🔄 20-second rate limit delay started (waiting %.1f seconds)", wait_time)
+                await asyncio.sleep(wait_time)
+                logger.info("✅ 20-second rate limit delay finished, proceeding with LLM call")
+            stream = await client.chat.completions.create(**payload)
+            _glm_last_call_time = time.monotonic()
+        logger.debug("LLM stream established successfully")
+    except Exception as stream_init_exc:
+        logger.error(
+            "Failed to initiate LLM stream: %s",
+            str(stream_init_exc),
+            exc_info=True,
+        )
+        raise
+    
     pending_tool_calls: Dict[int, Dict[str, Any]] = {}
     saw_structured_tool_call = False
+    chunk_count = 0
 
-    async for chunk in stream:
-        if not chunk.choices:
-            logger.debug("Skipping streamed chunk without choices: %s", chunk)
-            continue
+    try:
+        async for chunk in stream:
+            chunk_count += 1
+            if not chunk.choices:
+                logger.debug("Skipping streamed chunk without choices: %s", chunk)
+                continue
 
-        delta = chunk.choices[0].delta
-        if not delta:
-            continue
+            delta = chunk.choices[0].delta
+            if not delta:
+                continue
 
-        for reasoning_text in _extract_reasoning_fragments(delta):
-            if reasoning_text.strip():
-                yield {"type": "thinking", "content": reasoning_text}
+            for reasoning_text in _extract_reasoning_fragments(delta):
+                if reasoning_text.strip():
+                    yield {"type": "thinking", "content": reasoning_text}
 
-        tool_call_fragments = _extract_tool_call_fragments(delta)
-        if tool_call_fragments:
-            saw_structured_tool_call = True
-            for fragment in tool_call_fragments:
-                _merge_tool_call_fragment(pending_tool_calls, fragment)
-            continue
+            tool_call_fragments = _extract_tool_call_fragments(delta)
+            if tool_call_fragments:
+                saw_structured_tool_call = True
+                for fragment in tool_call_fragments:
+                    _merge_tool_call_fragment(pending_tool_calls, fragment)
+                continue
 
-        if saw_structured_tool_call:
-            continue
+            if saw_structured_tool_call:
+                continue
 
-        for token in _extract_text_fragments(delta):
-            if token:
-                yield {"type": "token", "content": token}
-
+            for token in _extract_text_fragments(delta):
+                if token:
+                    yield {"type": "token", "content": token}
+    except Exception as stream_exc:
+        logger.error(
+            "LLM stream iteration failed after %d chunks: %s",
+            chunk_count,
+            str(stream_exc),
+            exc_info=True,
+        )
+        raise
 
     if saw_structured_tool_call:
         for event in _finalize_pending_tool_calls(pending_tool_calls):

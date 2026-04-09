@@ -37,7 +37,7 @@ export interface VertexSwarmChatRuntimeOptions {
 
 export class VertexSwarmChatRuntime {
   private static readonly MAX_PROCESSED_TOOL_CALL_IDS = 10_000;
-  private static readonly TOKEN_REFRESH_BUFFER_MS = 5 * 60 * 1000;
+  private static readonly TOKEN_REFRESH_BUFFER_MS = 12 * 60 * 1000;
 
   private readonly backendUrl: string;
   private readonly tokenManager: TokenManager;

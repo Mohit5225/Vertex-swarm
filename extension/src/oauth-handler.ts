@@ -31,8 +31,8 @@ interface RefreshedAccessToken {
  * 4. Browser follows Neon's returned init URL to Google and back.
  * 5. Neon Auth redirects to http://localhost:{port}/callback with a verifier.
  * 6. /callback exchanges the verifier for a session.
- * 7. A JWT for backend API auth + user info are POSTed back to the local server.
- * 8. Extension stores the token and completes the flow.
+ * 7. A Neon JWT + user info are POSTed back to the local server.
+ * 8. Extension stores the Neon JWT and completes the flow.
  */
 export class OAuthHandler {
   private readonly neonAuthUrl: string;
@@ -43,7 +43,10 @@ export class OAuthHandler {
   private pendingAuthResult: CallbackAuthResult | null = null;
   private pendingAuthError: string | null = null;
 
-  constructor(private readonly tokenManager: TokenManager) {
+  constructor(
+    private readonly tokenManager: TokenManager,
+    private readonly logMessage?: (message: string) => void
+  ) {
     this.neonAuthUrl = import.meta.env.VITE_NEON_AUTH_BASE_URL || 'http://localhost:8000';
   }
 
@@ -64,40 +67,24 @@ export class OAuthHandler {
 
   async refreshAccessToken(sessionToken: string): Promise<RefreshedAccessToken | null> {
     try {
-      const response = await fetch(`${this.neonAuthUrl}/token`, {
-        headers: {
-          Accept: 'application/json',
-          Authorization: `Bearer ${sessionToken}`,
-        },
-      });
-
-      const responseText = await response.text();
-      if (!response.ok) {
-        console.warn('[OAuthHandler] Silent token refresh failed:', response.status, responseText);
-        return null;
+      const tokenRefresh = await this.requestSessionTokens('/token', sessionToken, 'token');
+      if (tokenRefresh?.token) {
+        return tokenRefresh;
       }
 
-      const payload = responseText
-        ? JSON.parse(responseText) as Record<string, unknown>
-        : {};
-      const refreshedToken =
-        this.extractJwtTokenFromHeaders(response.headers)
-        ?? this.extractJwtToken(payload);
-      if (refreshedToken) {
-        this.logTokenLifetime('refresh', refreshedToken);
-        const refreshedSessionToken =
-          this.extractSessionTokenFromHeaders(response.headers)
-          ?? this.extractSessionToken(payload);
-        return {
-          token: refreshedToken,
-          sessionToken: refreshedSessionToken,
-        };
+      // Better Auth also returns the JWT on getSession via the set-auth-jwt header.
+      // Use it as a fallback when /token responds without a token payload.
+      const sessionRefresh = await this.requestSessionTokens('/get-session', sessionToken, 'get-session');
+      if (sessionRefresh?.token) {
+        return sessionRefresh;
       }
 
-      console.warn('[OAuthHandler] Silent token refresh returned no token');
+      this.warn('[OAuthHandler] Silent token refresh returned no token from /token or /get-session');
       return null;
     } catch (error) {
-      console.warn('[OAuthHandler] Silent token refresh errored:', error);
+      this.warn(
+        `[OAuthHandler] Silent token refresh errored: ${error instanceof Error ? error.message : String(error)}`
+      );
       return null;
     }
   }
@@ -117,11 +104,14 @@ export class OAuthHandler {
         email: authResult.user.email || '',
         provider: this.provider,
       }, authResult.sessionToken);
+      this.log(
+        `[OAuthHandler] sign-in completed with session token ${authResult.sessionToken ? 'present' : 'missing'}`
+      );
       this.logTokenLifetime('sign-in', authResult.token);
 
       return true;
     } catch (error) {
-      console.error('[OAuthHandler] Flow failed:', error);
+      this.warn(`[OAuthHandler] Flow failed: ${error instanceof Error ? error.message : String(error)}`);
       await vscode.window.showErrorMessage(
         `Authentication failed: ${error instanceof Error ? error.message : 'Unknown error'}`
       );
@@ -150,12 +140,12 @@ export class OAuthHandler {
           return;
         }
         this.allocatedPort = addr.port;
-        console.log(`[OAuthHandler] Listening on port ${this.allocatedPort}`);
+        this.log(`[OAuthHandler] Listening on port ${this.allocatedPort}`);
         resolve();
       });
 
       server.on('error', (err) => {
-        console.error('[OAuthHandler] Server error:', err);
+        this.warn(`[OAuthHandler] Server error: ${err instanceof Error ? err.message : String(err)}`);
         this.localServer = null;
         this.allocatedPort = null;
         reject(err);
@@ -233,7 +223,7 @@ export class OAuthHandler {
       res.writeHead(404, { ...cors, 'Content-Type': 'text/plain' });
       res.end('Not found');
     } catch (err) {
-      console.error('[OAuthHandler] Request error:', err);
+      this.warn(`[OAuthHandler] Request error: ${err instanceof Error ? err.message : String(err)}`);
       res.writeHead(500, { 'Content-Type': 'text/plain' });
       res.end('Internal server error');
     }
@@ -619,6 +609,49 @@ export class OAuthHandler {
     return candidates.find((value) => this.isJwtLike(value));
   }
 
+  private async requestSessionTokens(
+    path: '/token' | '/get-session',
+    sessionToken: string,
+    label: 'token' | 'get-session'
+  ): Promise<RefreshedAccessToken | null> {
+    const response = await fetch(`${this.neonAuthUrl}${path}`, {
+      headers: {
+        Accept: 'application/json',
+        Authorization: `Bearer ${sessionToken}`,
+      },
+    });
+
+    const responseText = await response.text();
+    if (!response.ok) {
+      this.warn(
+        `[OAuthHandler] Silent refresh ${label} request failed status=${response.status} body=${responseText.slice(0, 200)}`
+      );
+      return null;
+    }
+
+    const payload = responseText
+      ? JSON.parse(responseText) as Record<string, unknown>
+      : {};
+    const refreshedToken =
+      this.extractJwtTokenFromHeaders(response.headers)
+      ?? this.extractJwtToken(payload);
+    const refreshedSessionToken =
+      this.extractSessionTokenFromHeaders(response.headers)
+      ?? this.extractSessionToken(payload);
+
+    if (!refreshedToken) {
+      this.warn(
+        `[OAuthHandler] Silent refresh ${label} request returned no JWT hasSetAuthJwtHeader=${Boolean(response.headers.get('set-auth-jwt'))} hasSetAuthTokenHeader=${Boolean(response.headers.get('set-auth-token'))} body=${responseText.slice(0, 200)}`
+      );
+      return null;
+    }
+
+    return {
+      token: refreshedToken,
+      sessionToken: refreshedSessionToken,
+    };
+  }
+
   private extractJwtTokenFromHeaders(headers: Headers): string | undefined {
     const token = headers.get('set-auth-jwt');
     return this.isJwtLike(token) ? token : undefined;
@@ -670,7 +703,7 @@ export class OAuthHandler {
     try {
       const parts = token.split('.');
       if (parts.length !== 3) {
-        console.log(`[OAuthHandler] ${source}: token is not a JWT`);
+        this.log(`[OAuthHandler] ${source}: token is not a JWT`);
         return;
       }
 
@@ -681,7 +714,7 @@ export class OAuthHandler {
         typeof payload.exp === 'number' ? payload.exp : Number(payload.exp);
 
       if (!Number.isFinite(expSeconds)) {
-        console.log(`[OAuthHandler] ${source}: JWT has no numeric exp claim`);
+        this.log(`[OAuthHandler] ${source}: JWT has no numeric exp claim`);
         return;
       }
 
@@ -691,12 +724,24 @@ export class OAuthHandler {
       const remainingHours = Math.floor(remainingMinutes / 60);
       const remainingMinsRemainder = remainingMinutes % 60;
 
-      console.log(
+      this.log(
         `[OAuthHandler] ${source}: JWT expires in ${remainingHours}h ${remainingMinsRemainder}m (at ${new Date(expiresAtMs).toISOString()})`
       );
     } catch (error) {
-      console.warn(`[OAuthHandler] ${source}: failed to parse JWT expiry`, error);
+      this.warn(
+        `[OAuthHandler] ${source}: failed to parse JWT expiry ${error instanceof Error ? error.message : String(error)}`
+      );
     }
+  }
+
+  private log(message: string): void {
+    this.logMessage?.(message);
+    console.log(message);
+  }
+
+  private warn(message: string): void {
+    this.logMessage?.(message);
+    console.warn(message);
   }
 
   private normalizeBase64(value: string): string {

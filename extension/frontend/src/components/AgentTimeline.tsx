@@ -46,6 +46,21 @@ type ResponseDisplayItem = {
 
 type DisplayItem = EventDisplayItem | ResponseDisplayItem
 
+type EventBatchSegment = {
+  kind: 'event-batch'
+  id: string
+  items: EventDisplayItem[]
+  tucked: boolean
+}
+
+type ResponseSegment = {
+  kind: 'response'
+  id: string
+  item: ResponseDisplayItem
+}
+
+type DisplaySegment = EventBatchSegment | ResponseSegment
+
 const normalizeText = (value?: string) =>
   typeof value === 'string' ? value.replace(/\r\n/g, '\n').trim() : ''
 
@@ -166,6 +181,9 @@ const AgentTimeline: React.FC<Props> = ({
   const [expandedOverrides, setExpandedOverrides] = useState<
     Record<string, boolean>
   >({})
+  const [expandedBatches, setExpandedBatches] = useState<Record<string, boolean>>(
+    {}
+  )
 
   const displayItems = useMemo(() => {
     const items: DisplayItem[] = []
@@ -191,6 +209,15 @@ const AgentTimeline: React.FC<Props> = ({
     }
 
     events.forEach((event, index) => {
+      const isCompletedStatus =
+        event.type === 'status' &&
+        (event.metadata?.phase === 'completed' ||
+          normalizeText(event.content).toLowerCase() === 'final answer ready.')
+
+      if (isCompletedStatus) {
+        return
+      }
+
       if (event.type === 'output') {
         if (!bufferedOutputId) {
           bufferedOutputId = event.id
@@ -239,6 +266,45 @@ const AgentTimeline: React.FC<Props> = ({
     return items
   }, [events, messageContent])
 
+  const displaySegments = useMemo(() => {
+    const segments: DisplaySegment[] = []
+    let currentBatch: EventDisplayItem[] = []
+    let hasSeenResponse = false
+
+    const flushBatch = () => {
+      if (currentBatch.length === 0) {
+        return
+      }
+
+      segments.push({
+        kind: 'event-batch',
+        id: `batch-${currentBatch[0].id}-${currentBatch[currentBatch.length - 1].id}`,
+        items: currentBatch,
+        tucked: hasSeenResponse,
+      })
+      currentBatch = []
+    }
+
+    displayItems.forEach((item) => {
+      if (item.kind === 'event') {
+        currentBatch.push(item)
+        return
+      }
+
+      flushBatch()
+      segments.push({
+        kind: 'response',
+        id: item.id,
+        item,
+      })
+      hasSeenResponse = true
+    })
+
+    flushBatch()
+
+    return segments
+  }, [displayItems])
+
   useEffect(() => {
     setExpandedOverrides((current) =>
       Object.fromEntries(
@@ -247,7 +313,16 @@ const AgentTimeline: React.FC<Props> = ({
         )
       )
     )
-  }, [displayItems])
+    setExpandedBatches((current) =>
+      Object.fromEntries(
+        Object.entries(current).filter(([batchId]) =>
+          displaySegments.some(
+            (segment) => segment.kind === 'event-batch' && segment.id === batchId
+          )
+        )
+      )
+    )
+  }, [displayItems, displaySegments])
 
   const activeItemId = isStreaming
     ? displayItems[displayItems.length - 1]?.id ?? null
@@ -258,6 +333,26 @@ const AgentTimeline: React.FC<Props> = ({
       ...current,
       [itemId]: !(current[itemId] ?? false),
     }))
+  }
+
+  const toggleBatch = (batchId: string) => {
+    setExpandedBatches((current) => ({
+      ...current,
+      [batchId]: !(current[batchId] ?? false),
+    }))
+  }
+
+  const summarizeBatch = (items: EventDisplayItem[]) => {
+    const titles = Array.from(new Set(items.map((item) => item.title))).slice(0, 3)
+    const preview = titles.join(' · ')
+
+    return {
+      title:
+        items.length === 1
+          ? '1 process step tucked away'
+          : `${items.length} process steps tucked away`,
+      preview,
+    }
   }
 
   const renderCollapsedEvent = (
@@ -378,16 +473,6 @@ const AgentTimeline: React.FC<Props> = ({
     isActive: boolean
   ) => {
     const isDraft = isActive || item.hasLaterItems
-    const title = item.isPartial
-      ? 'Partial Response'
-      : isDraft
-        ? 'Drafting Response'
-        : 'Final Answer'
-    const subtitle = item.isPartial
-      ? 'Run ended before the answer finished'
-      : isDraft
-        ? 'Official text is still forming'
-        : 'Ready to read'
     const normalizedText = normalizeAssistantContent(item.text)
     const shouldRenderMarkdown = !isDraft && !item.isPartial
 
@@ -407,12 +492,7 @@ const AgentTimeline: React.FC<Props> = ({
         </div>
 
         <div className="rounded-[30px] border border-white/[0.08] bg-[linear-gradient(180deg,rgba(25,31,43,0.96),rgba(17,22,31,0.98))] px-6 py-5 shadow-[0_18px_36px_rgba(0,0,0,0.24)]">
-          <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] font-semibold uppercase tracking-[0.24em]">
-            <span className="text-[#f2f0df]">{title}</span>
-            <span className="text-[#6f7e99]">{subtitle}</span>
-          </div>
-
-          <div className="mt-4">
+          <div>
             {shouldRenderMarkdown ? (
               <div className="message-markdown">
                 <ReactMarkdown remarkPlugins={[remarkGfm]}>
@@ -428,22 +508,88 @@ const AgentTimeline: React.FC<Props> = ({
     )
   }
 
+  const renderTuckedBatch = (
+    segment: EventBatchSegment,
+    showConnector: boolean
+  ) => {
+    const isExpanded = expandedBatches[segment.id] ?? false
+    const summary = summarizeBatch(segment.items)
+
+    return (
+      <div key={segment.id} className="relative pl-[3.65rem]">
+        <div className="absolute left-0 top-0 flex h-full w-10 flex-col items-center">
+          <div className="relative z-10 flex h-9 w-9 items-center justify-center rounded-full border border-white/[0.08] bg-[#101722] text-[#eaf1ff] shadow-[0_0_0_6px_rgba(10,14,22,0.98)]">
+            <Check className="h-4 w-4" />
+          </div>
+          {showConnector ? (
+            <div className="mt-2 w-px flex-1 bg-gradient-to-b from-white/[0.08] via-white/[0.04] to-transparent" />
+          ) : null}
+        </div>
+
+        <div className="rounded-[24px] border border-white/[0.05] bg-white/[0.02] px-5 py-4">
+          <button
+            type="button"
+            onClick={() => toggleBatch(segment.id)}
+            className="flex w-full items-start justify-between gap-4 text-left"
+          >
+            <div className="min-w-0 flex-1">
+              <div className="text-[11px] font-semibold uppercase tracking-[0.24em] text-[#d8e2f4]">
+                {summary.title}
+              </div>
+              <p className="mt-2 text-[13px] leading-7 text-[#8494b3]">
+                {summary.preview || 'Open to inspect the hidden execution steps.'}
+              </p>
+            </div>
+            {renderChevron(isExpanded)}
+          </button>
+
+          {isExpanded ? (
+            <div className="mt-5 space-y-5 border-t border-white/[0.05] pt-5">
+              {segment.items.map((item, index) => {
+                const isActive = item.id === activeItemId
+                const itemExpanded =
+                  item.hasDetail && (expandedOverrides[item.id] ?? isActive)
+                const innerShowConnector = index < segment.items.length - 1
+
+                return itemExpanded
+                  ? renderExpandedEvent(item, innerShowConnector, isActive)
+                  : renderCollapsedEvent(item, innerShowConnector)
+              })}
+            </div>
+          ) : null}
+        </div>
+      </div>
+    )
+  }
+
   return (
     <div className="w-full space-y-5">
-      {displayItems.map((item, index) => {
-        const showConnector = index < displayItems.length - 1
-        const isActive = item.id === activeItemId
+      {displaySegments.map((segment, index) => {
+        const showConnector = index < displaySegments.length - 1
 
-        if (item.kind === 'response') {
-          return renderResponseItem(item, showConnector, isActive)
+        if (segment.kind === 'response') {
+          return renderResponseItem(
+            segment.item,
+            showConnector,
+            segment.item.id === activeItemId
+          )
         }
 
-        const isExpanded =
-          item.hasDetail && (expandedOverrides[item.id] ?? isActive)
+        if (segment.tucked) {
+          return renderTuckedBatch(segment, showConnector)
+        }
 
-        return isExpanded
-          ? renderExpandedEvent(item, showConnector, isActive)
-          : renderCollapsedEvent(item, showConnector)
+        return segment.items.map((item, itemIndex) => {
+          const isActive = item.id === activeItemId
+          const isExpanded =
+            item.hasDetail && (expandedOverrides[item.id] ?? isActive)
+          const innerShowConnector =
+            itemIndex < segment.items.length - 1 || showConnector
+
+          return isExpanded
+            ? renderExpandedEvent(item, innerShowConnector, isActive)
+            : renderCollapsedEvent(item, innerShowConnector)
+        })
       })}
     </div>
   )

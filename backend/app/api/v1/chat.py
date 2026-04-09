@@ -9,16 +9,17 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from sqlalchemy import desc, select
-from openai import RateLimitError
+from openai import RateLimitError, APIError
 
 from app.auth.dependencies import AuthenticatedUser, get_current_user
 from app.core.config import settings
 from app.db.postgres.connection import AsyncSessionLocal
 from app.db.postgres.models import ChatORM, MessageORM
-from app.db.redis_db import get_redis, tool_result_stream_key
+from app.db.redis_db import get_redis, retrieve_session_state, store_session_state, tool_result_stream_key
 from app.db.redis_sessions import bootstrap_chat_session, build_chat_session_id
 from app.schemas.tool import ToolResultSchema
 from app.services.llm_service import stream_chat_events, wrap_tool_response_codeforge
+from app.services.tool_memory import build_tool_memory_from_trace_events, format_tool_memory_for_prompt
 
 logger = logging.getLogger(__name__)
 
@@ -327,6 +328,11 @@ async def send_message(
         req.content,
     )
 
+    session_state = await retrieve_session_state(synthetic_session_id)
+    existing_tool_memory = None
+    if session_state is not None:
+        existing_tool_memory = session_state.persisted.working_memory.get("tool_memory")
+
     logger.info(
         "message received user_id=%s chat_id=%s session_id=%s ide_context_enabled=%s",
         user.user_id,
@@ -377,11 +383,31 @@ async def send_message(
 
         llm_messages = [{"role": m.role, "content": m.content} for m in history]
         request_context_message = _build_request_context_message(req.request_context)
+        tool_memory_message = format_tool_memory_for_prompt(existing_tool_memory)
+
+        system_context_messages: list[dict[str, str]] = []
         if request_context_message:
+            system_context_messages.append({"role": "system", "content": request_context_message})
+        if tool_memory_message:
+            system_context_messages.append({"role": "system", "content": tool_memory_message})
+
+        if system_context_messages:
             llm_messages = [
-                {"role": "system", "content": request_context_message},
+                *system_context_messages,
                 *llm_messages,
             ]
+
+        if tool_memory_message:
+            mutation_count = len(existing_tool_memory.get("completed_mutations", [])) if isinstance(existing_tool_memory, dict) else 0
+            logger.info(
+                "tool memory injected user_id=%s chat_id=%s session_id=%s message_id=%s mutation_count=%s",
+                user.user_id,
+                chat_id,
+                synthetic_session_id,
+                request_message_id,
+                mutation_count,
+            )
+
         logger.info(
             "context loaded chat_id=%s message_id=%s history_messages=%s",
             chat_id,
@@ -425,7 +451,7 @@ async def send_message(
                 stream_aborted = False
 
                 status_text = (
-                    f"Calling model {settings.openrouter_model}..."
+                    f"Calling model {settings.modal_model}..."
                     if llm_round == 1
                     else "Continuing with tool result..."
                 )
@@ -433,7 +459,6 @@ async def send_message(
                 yield emit_trace(build_status_event(status_text, status_phase))
 
                 # Try primary model, fallback to secondary on rate limit
-                model_to_use = settings.openrouter_model
                 try:
                     stream_iterator = stream_chat_events(
                         llm_messages,
@@ -446,8 +471,8 @@ async def send_message(
                         chat_id,
                         synthetic_session_id,
                         request_message_id,
-                        settings.openrouter_model,
-                        settings.openrouter_fallback_model,
+                        settings.modal_model,
+                        settings.modal_fallback_model,
                     )
                     yield emit_trace(
                         build_status_event(
@@ -455,11 +480,10 @@ async def send_message(
                             "fallback_model",
                         )
                     )
-                    model_to_use = settings.openrouter_fallback_model
                     stream_iterator = stream_chat_events(
                         llm_messages,
                         workspace_skeleton=req.workspace_skeleton,
-                        model=settings.openrouter_fallback_model,
+                        model=settings.modal_fallback_model,
                     )
 
                 async for event in stream_iterator:
@@ -641,7 +665,31 @@ async def send_message(
         except Exception as exc:
             run_failed = True
             error_details = str(exc)
-            logger.error("LLM stream error for chat %s: %s", chat_id, error_details, exc_info=True)
+            
+            # Log provider error details for debugging
+            if isinstance(exc, APIError):
+                logger.error(
+                    "LLM stream API error for chat %s: message=%s type=%s code=%s body=%s provider_request_headers=%s",
+                    chat_id,
+                    exc.message,
+                    exc.type,
+                    exc.code,
+                    json.dumps(exc.body) if exc.body else None,
+                    exc.request.headers if exc.request else None,
+                    exc_info=True,
+                )
+                # Log the request payload that was sent
+                logger.error(
+                    "Request payload for failed chat %s llm_round=%s: messages_count=%s last_message_role=%s workspace_skeleton_len=%s",
+                    chat_id,
+                    llm_round,
+                    len(llm_messages),
+                    llm_messages[-1].get("role") if llm_messages else None,
+                    len(req.workspace_skeleton) if req.workspace_skeleton else 0,
+                )
+            else:
+                logger.error("LLM stream error for chat %s: %s", chat_id, error_details, exc_info=True)
+            
             yield emit_trace(
                 _build_event(
                     "error",
@@ -681,6 +729,39 @@ async def send_message(
             len(full_response),
             _preview(full_response) if full_response else "",
         )
+
+        try:
+            latest_session_state = await retrieve_session_state(synthetic_session_id)
+            if latest_session_state is None:
+                logger.warning(
+                    "tool memory persistence skipped session missing user_id=%s chat_id=%s session_id=%s message_id=%s",
+                    user.user_id,
+                    chat_id,
+                    synthetic_session_id,
+                    request_message_id,
+                )
+            else:
+                previous_tool_memory = latest_session_state.persisted.working_memory.get("tool_memory")
+                updated_tool_memory = build_tool_memory_from_trace_events(previous_tool_memory, trace_events)
+                latest_session_state.persisted.working_memory["tool_memory"] = updated_tool_memory
+                await store_session_state(synthetic_session_id, latest_session_state)
+
+                logger.info(
+                    "tool memory persisted user_id=%s chat_id=%s session_id=%s message_id=%s mutation_count=%s",
+                    user.user_id,
+                    chat_id,
+                    synthetic_session_id,
+                    request_message_id,
+                    len(updated_tool_memory.get("completed_mutations", [])),
+                )
+        except Exception:
+            logger.exception(
+                "tool memory persistence failed user_id=%s chat_id=%s session_id=%s message_id=%s",
+                user.user_id,
+                chat_id,
+                synthetic_session_id,
+                request_message_id,
+            )
 
         yield _serialize_sse({"type": "done", "messageId": str(asst_msg.message_id)})
 
