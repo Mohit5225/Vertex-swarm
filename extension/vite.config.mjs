@@ -1,5 +1,8 @@
 import { defineConfig } from 'vite';
-import { resolve } from 'path';
+import { dirname, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+const __dirname = dirname(fileURLToPath(import.meta.url));
 
 export default defineConfig({
   build: {
@@ -10,7 +13,7 @@ export default defineConfig({
       formats: ['cjs'],
     },
     rollupOptions: {
-      external: ['vscode', 'http', 'path', 'fs'],
+      external: ['vscode', 'http', 'path', 'fs', 'child_process', 'node:child_process'],
       output: {
         globals: {
           vscode: 'vscode',

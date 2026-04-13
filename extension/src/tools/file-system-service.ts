@@ -1,4 +1,5 @@
 import * as vscode from 'vscode';
+import { execFile } from 'node:child_process';
 import type { ToolContext, ToolResult } from '../types/index';
 import {
   buildConflictResult as buildWorkspaceConflictResult,
@@ -9,10 +10,28 @@ import {
 
 const FALLBACK_EXCLUDE = '{**/node_modules/**,**/.git/**,**/dist/**,**/build/**,**/__pycache__/**,**/.venv/**,**/venv/**}';
 
+const DEFAULT_SEARCH_EXCLUDE_GLOBS = [
+  '**/node_modules/**',
+  '**/.git/**',
+  '**/dist/**',
+  '**/build/**',
+  '**/__pycache__/**',
+  '**/.venv/**',
+  '**/venv/**',
+];
+
+const SEARCH_TEXT_LIMITS = {
+  maxResults: 20,
+  maxSearchCalls: 2,
+  timeoutMs: 20_000,
+  maxSynonymTerms: 4,
+};
+
+const RG_MAX_BUFFER_BYTES = 2_000_000;
+
 const HARD_LIMITS = {
   maxFileReadBytes: 1_000_000,
   maxPaginatedRangeLines: 200,
-  maxGrepResults: 50,
   maxGrepFileScanBytes: 500_000,
   maxFindFilesBeforeFallbackExclude: 5_000,
   maxEditOperations: 500,
@@ -54,6 +73,7 @@ interface CachedWorkspaceResult {
 }
 
 interface WorkspaceResultEnvelope {
+  requestId?: string;
   request_id?: string;
   action?: string;
   summary?: string;
@@ -73,6 +93,57 @@ interface NormalizedTextEdit {
     endCol: number;
     textLength: number;
   };
+}
+
+interface SearchTextRequest {
+  query: string;
+  filePattern: string;
+  includeGlobs: string[];
+  excludeGlobs: string[];
+  caseSensitive: boolean;
+  exactMatch: boolean;
+  maxResults: number;
+  maxSearchCalls: number;
+  timeoutMs: number;
+  variantsEnabled: boolean;
+  maxSynonymTerms: number;
+  includeSearchPlan: boolean;
+}
+
+interface SearchExecutionResult {
+  toolResult: ToolResult;
+  backendUsed: 'shell_bundled' | 'shell_system' | 'manual_scan';
+  fallbackReason?: string;
+}
+
+interface RipgrepExecutionAttempt {
+  status: 'success' | 'fallback';
+  result?: ToolResult;
+  backendUsed?: 'shell_bundled' | 'shell_system';
+  reason?: string;
+}
+
+interface RipgrepCommandResolution {
+  command: string;
+  backendUsed: 'shell_bundled' | 'shell_system';
+}
+
+interface RipgrepResolutionAttempt {
+  resolution?: RipgrepCommandResolution;
+  reason?: string;
+}
+
+type ExecFileError = NodeJS.ErrnoException & {
+  code?: string | number;
+  killed?: boolean;
+  signal?: NodeJS.Signals | null;
+};
+
+interface ExecFileCommandResult {
+  stdout: string;
+  stderr: string;
+  error: ExecFileError | null;
+  timedOut: boolean;
 }
 
 export class FileSystemService {
@@ -102,36 +173,79 @@ export class FileSystemService {
   }
 
   private async grep_workspace(
-    query: string,
-    filePattern: string | undefined,
+    searchRequest: SearchTextRequest,
     context: ToolContext
-  ): Promise<ToolResult> {
+  ): Promise<SearchExecutionResult> {
     const startMs = Date.now();
 
+    const ripgrepAttempt = await this.trySearchWithRipgrep(searchRequest, context, startMs);
+    if (ripgrepAttempt.status === 'success' && ripgrepAttempt.result && ripgrepAttempt.backendUsed) {
+      return {
+        toolResult: ripgrepAttempt.result,
+        backendUsed: ripgrepAttempt.backendUsed,
+      };
+    }
+
+    const manualResult = await this.grep_workspace_manual(searchRequest, context, startMs);
+    return {
+      toolResult: manualResult,
+      backendUsed: 'manual_scan',
+      fallbackReason: ripgrepAttempt.reason,
+    };
+  }
+
+  private async grep_workspace_manual(
+    searchRequest: SearchTextRequest,
+    context: ToolContext,
+    startMs: number
+  ): Promise<ToolResult> {
     try {
-      const normalizedQuery = query.trim();
-      if (!normalizedQuery) {
-        return this.errorResult(
-          'grep_workspace',
-          context,
-          'Query cannot be empty.',
-          'GREP_ERROR',
-          startMs
-        );
+      const includePatterns = [
+        searchRequest.filePattern,
+        ...searchRequest.includeGlobs,
+      ].filter((value, index, collection) => collection.indexOf(value) === index)
+        .slice(0, searchRequest.maxSearchCalls);
+      const excludePattern = this.toBraceGlob(searchRequest.excludeGlobs);
+      const dedupedFiles = new Map<string, vscode.Uri>();
+
+      for (const includePattern of includePatterns) {
+        const foundFiles = await vscode.workspace.findFiles(includePattern, excludePattern);
+        for (const foundFile of foundFiles) {
+          dedupedFiles.set(foundFile.fsPath.toLowerCase(), foundFile);
+        }
       }
 
-      const includePattern = filePattern?.trim() || '**/*';
-      let files = await vscode.workspace.findFiles(includePattern, undefined);
-
+      let files = [...dedupedFiles.values()];
       if (files.length > HARD_LIMITS.maxFindFilesBeforeFallbackExclude) {
-        files = await vscode.workspace.findFiles(includePattern, FALLBACK_EXCLUDE);
+        const fallbackExcludePattern = this.toBraceGlob([
+          ...searchRequest.excludeGlobs,
+          ...DEFAULT_SEARCH_EXCLUDE_GLOBS,
+        ]) || FALLBACK_EXCLUDE;
+        const fallbackFiles = new Map<string, vscode.Uri>();
+
+        for (const includePattern of includePatterns) {
+          const foundFiles = await vscode.workspace.findFiles(includePattern, fallbackExcludePattern);
+          for (const foundFile of foundFiles) {
+            fallbackFiles.set(foundFile.fsPath.toLowerCase(), foundFile);
+          }
+        }
+
+        files = [...fallbackFiles.values()];
       }
 
-      const queryLower = normalizedQuery.toLowerCase();
+      const queryNeedle = searchRequest.caseSensitive
+        ? searchRequest.query
+        : searchRequest.query.toLowerCase();
       const grepResults: string[] = [];
+      const timeoutAt = startMs + searchRequest.timeoutMs;
+      let timedOut = false;
 
       for (const fileUri of files) {
-        if (grepResults.length >= HARD_LIMITS.maxGrepResults) {
+        if (grepResults.length >= searchRequest.maxResults) {
+          break;
+        }
+        if (Date.now() >= timeoutAt) {
+          timedOut = true;
           break;
         }
 
@@ -156,23 +270,32 @@ export class FileSystemService {
 
         const lines = decodedContent.split(/\r?\n/);
         for (let lineIndex = 0; lineIndex < lines.length; lineIndex += 1) {
+          if (Date.now() >= timeoutAt) {
+            timedOut = true;
+            break;
+          }
+
           const lineText = lines[lineIndex];
-          if (!lineText.toLowerCase().includes(queryLower)) {
+          if (!this.containsSearchQuery(lineText, queryNeedle, searchRequest.caseSensitive)) {
             continue;
           }
 
           const relativePath = vscode.workspace.asRelativePath(fileUri, false);
           grepResults.push(`${relativePath}:${lineIndex + 1}: ${lineText.trim().slice(0, 150)}`);
 
-          if (grepResults.length >= HARD_LIMITS.maxGrepResults) {
+          if (grepResults.length >= searchRequest.maxResults) {
             break;
           }
+        }
+
+        if (timedOut) {
+          break;
         }
       }
 
       const content = grepResults.length > 0
         ? grepResults.join('\n')
-        : `No results for "${normalizedQuery}"`;
+        : `No results for "${searchRequest.query}"${timedOut ? ` (timeout ${searchRequest.timeoutMs}ms)` : ''}`;
 
       return this.successResult('grep_workspace', context, content, startMs);
     } catch (error) {
@@ -184,6 +307,271 @@ export class FileSystemService {
         startMs
       );
     }
+  }
+
+  private async trySearchWithRipgrep(
+    searchRequest: SearchTextRequest,
+    context: ToolContext,
+    startMs: number
+  ): Promise<RipgrepExecutionAttempt> {
+    try {
+      const workspaceFolders = vscode.workspace.workspaceFolders;
+      if (!workspaceFolders || workspaceFolders.length === 0) {
+        return {
+          status: 'fallback',
+          reason: 'Ripgrep skipped because no workspace folder is open.',
+        };
+      }
+
+      const includePatterns = [
+        searchRequest.filePattern,
+        ...searchRequest.includeGlobs,
+      ].filter((value, index, collection) => collection.indexOf(value) === index)
+        .slice(0, searchRequest.maxSearchCalls);
+
+      const resolutionAttempt = await this.resolveRipgrepCommand(workspaceFolders[0].uri.fsPath);
+      if (!resolutionAttempt.resolution) {
+        return {
+          status: 'fallback',
+          reason: resolutionAttempt.reason ?? 'No usable ripgrep binary was found.',
+        };
+      }
+
+      const rgArgs = this.buildRipgrepArgs(searchRequest, includePatterns);
+      const execResult = await this.execFileCommand(
+        resolutionAttempt.resolution.command,
+        rgArgs,
+        workspaceFolders[0].uri.fsPath,
+        searchRequest.timeoutMs
+      );
+
+      const errorCode = this.execErrorCode(execResult.error);
+      if (execResult.timedOut) {
+        return {
+          status: 'fallback',
+          reason: `Ripgrep timed out after ${searchRequest.timeoutMs}ms.`,
+        };
+      }
+
+      if (typeof errorCode === 'string' && errorCode === 'ENOENT') {
+        return {
+          status: 'fallback',
+          reason: 'Ripgrep binary was not found on PATH.',
+        };
+      }
+
+      if (errorCode !== undefined && errorCode !== 1) {
+        const stderrPreview = execResult.stderr.trim();
+        return {
+          status: 'fallback',
+          reason: stderrPreview
+            ? `Ripgrep failed: ${stderrPreview}`
+            : `Ripgrep failed with code ${String(errorCode)}.`,
+        };
+      }
+
+      const hitLines = this.parseRipgrepOutput(execResult.stdout, searchRequest.maxResults);
+      const content = hitLines.length > 0
+        ? hitLines.join('\n')
+        : `No results for "${searchRequest.query}"`;
+
+      return {
+        status: 'success',
+        backendUsed: resolutionAttempt.resolution.backendUsed,
+        result: this.successResult('grep_workspace', context, content, startMs),
+      };
+    } catch (error) {
+      return {
+        status: 'fallback',
+        reason: `Ripgrep search failed: ${error instanceof Error ? error.message : String(error)}`,
+      };
+    }
+  }
+
+  private buildRipgrepArgs(searchRequest: SearchTextRequest, includePatterns: string[]): string[] {
+    const args = [
+      '--no-heading',
+      '--line-number',
+      '--color',
+      'never',
+      '--max-count',
+      String(searchRequest.maxResults),
+    ];
+
+    if (!searchRequest.caseSensitive) {
+      args.push('--ignore-case');
+    }
+
+    args.push('--fixed-strings');
+
+    for (const includePattern of includePatterns) {
+      if (includePattern && includePattern !== '**/*') {
+        args.push('--glob', includePattern);
+      }
+    }
+
+    for (const excludeGlob of searchRequest.excludeGlobs) {
+      args.push('--glob', `!${excludeGlob}`);
+    }
+
+    args.push(searchRequest.query);
+    args.push('.');
+    return args;
+  }
+
+  private async resolveRipgrepCommand(cwd: string): Promise<RipgrepResolutionAttempt> {
+    const bundledCandidates = this.getBundledRipgrepCandidates();
+
+    for (const bundledCandidate of bundledCandidates) {
+      const exists = await this.pathExists(bundledCandidate);
+      if (!exists) {
+        continue;
+      }
+
+      const bundledProbe = await this.execFileCommand(
+        bundledCandidate,
+        ['--version'],
+        cwd,
+        1_500
+      );
+
+      if (!bundledProbe.error && !bundledProbe.timedOut) {
+        return {
+          resolution: {
+            command: bundledCandidate,
+            backendUsed: 'shell_bundled',
+          },
+        };
+      }
+    }
+
+    const systemProbe = await this.execFileCommand('rg', ['--version'], cwd, 1_500);
+    if (!systemProbe.error && !systemProbe.timedOut) {
+      return {
+        resolution: {
+          command: 'rg',
+          backendUsed: 'shell_system',
+        },
+      };
+    }
+
+    return {
+      reason: bundledCandidates.length > 0
+        ? 'Bundled ripgrep binary is not available, and system rg is not installed on PATH.'
+        : 'No bundled ripgrep path candidates found, and system rg is not installed on PATH.',
+    };
+  }
+
+  private getBundledRipgrepCandidates(): string[] {
+    const extensionRoot = this.getCurrentExtensionRootPath();
+    if (!extensionRoot) {
+      return [];
+    }
+
+    const extensionUri = vscode.Uri.file(extensionRoot);
+    const executableName = process.platform === 'win32' ? 'rg.exe' : 'rg';
+    const platformArch = `${process.platform}-${process.arch}`;
+
+    const candidates = [
+      vscode.Uri.joinPath(extensionUri, 'node_modules', '@vscode', 'ripgrep', 'bin', executableName).fsPath,
+      vscode.Uri.joinPath(extensionUri, 'bin', platformArch, executableName).fsPath,
+      vscode.Uri.joinPath(extensionUri, 'bin', process.platform, executableName).fsPath,
+      vscode.Uri.joinPath(extensionUri, 'bin', executableName).fsPath,
+      vscode.Uri.joinPath(extensionUri, 'dist', 'bin', platformArch, executableName).fsPath,
+      vscode.Uri.joinPath(extensionUri, 'dist', 'bin', executableName).fsPath,
+    ];
+
+    return candidates.filter((candidate, index, collection) =>
+      collection.indexOf(candidate) === index
+    );
+  }
+
+  private getCurrentExtensionRootPath(): string | undefined {
+    const extension = vscode.extensions.all.find((entry) => {
+      const packageJson = entry.packageJSON as { name?: unknown };
+      return packageJson.name === 'vertex-swarm-extension';
+    });
+
+    return extension?.extensionUri.fsPath;
+  }
+
+  private async pathExists(filePath: string): Promise<boolean> {
+    try {
+      await vscode.workspace.fs.stat(vscode.Uri.file(filePath));
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  private async execFileCommand(
+    command: string,
+    args: string[],
+    cwd: string,
+    timeoutMs: number
+  ): Promise<ExecFileCommandResult> {
+    return new Promise((resolve) => {
+      execFile(
+        command,
+        args,
+        {
+          cwd,
+          windowsHide: true,
+          timeout: timeoutMs,
+          maxBuffer: RG_MAX_BUFFER_BYTES,
+        },
+        (error, stdout, stderr) => {
+          const execError = (error as ExecFileError | null) ?? null;
+          const timedOut = Boolean(execError?.killed) && execError?.signal === 'SIGTERM';
+          resolve({
+            stdout: stdout ?? '',
+            stderr: stderr ?? '',
+            error: execError,
+            timedOut,
+          });
+        }
+      );
+    });
+  }
+
+  private execErrorCode(error: ExecFileError | null): string | number | undefined {
+    if (!error) {
+      return undefined;
+    }
+
+    return error.code;
+  }
+
+  private parseRipgrepOutput(stdout: string, maxResults: number): string[] {
+    const parsedResults: string[] = [];
+    const seen = new Set<string>();
+
+    for (const rawLine of stdout.split(/\r?\n/)) {
+      if (!rawLine.trim()) {
+        continue;
+      }
+
+      const match = rawLine.match(/^(.*?):(\d+):(.*)$/);
+      if (!match) {
+        continue;
+      }
+
+      const path = match[1];
+      const lineNumber = match[2];
+      const snippet = match[3].trim().slice(0, 150);
+      const formatted = `${path}:${lineNumber}: ${snippet}`;
+      if (seen.has(formatted)) {
+        continue;
+      }
+
+      seen.add(formatted);
+      parsedResults.push(formatted);
+      if (parsedResults.length >= maxResults) {
+        break;
+      }
+    }
+
+    return parsedResults;
   }
 
   private async read_file_paginated(
@@ -286,16 +674,31 @@ export class FileSystemService {
         }
 
         case 'search_text': {
-          const query = this.requireStringField(request.payload, 'query');
-          const filePattern = this.optionalStringField(request.payload, 'filePattern');
-          const result = await this.grep_workspace(query, filePattern, context);
+          const searchRequest = this.parseSearchTextPayload(request.payload);
+          const searchExecution = await this.grep_workspace(searchRequest, context);
+          const result = searchExecution.toolResult;
           return this.cacheWorkspaceResult(
             request.requestId,
             this.withToolName(result, 'workspace_ops', {
               requestId: request.requestId,
               action: request.action,
-              summary: `Searched for "${query}"${filePattern ? ` in ${filePattern}` : ''}.`,
-              data: { query, filePattern: filePattern ?? null },
+              summary: `Searched for "${searchRequest.query}" in ${searchRequest.filePattern}.`,
+              data: {
+                backendUsed: searchExecution.backendUsed,
+                fallbackReason: searchExecution.fallbackReason ?? null,
+                query: searchRequest.query,
+                filePattern: searchRequest.filePattern,
+                includeGlobs: searchRequest.includeGlobs,
+                excludeGlobs: searchRequest.excludeGlobs,
+                caseSensitive: searchRequest.caseSensitive,
+                exactMatch: searchRequest.exactMatch,
+                maxResults: searchRequest.maxResults,
+                maxSearchCalls: searchRequest.maxSearchCalls,
+                timeoutMs: searchRequest.timeoutMs,
+                variantsEnabled: searchRequest.variantsEnabled,
+                maxSynonymTerms: searchRequest.maxSynonymTerms,
+                includeSearchPlan: searchRequest.includeSearchPlan,
+              },
             })
           );
         }
@@ -836,7 +1239,93 @@ export class FileSystemService {
   }
 
   private parseWorkspaceOpsRequest(rawArgs: Record<string, unknown>): WorkspaceOpsRequest {
-    return extractWorkspaceOpsRequest(rawArgs);
+    const request = extractWorkspaceOpsRequest(rawArgs);
+    return {
+      action: request.action as WorkspaceOpsAction,
+      requestId: request.requestId,
+      mode: request.mode as WorkspaceOpsMode,
+      payload: request.payload,
+      expectedHash: request.expectedHash,
+      expectedVersion: request.expectedVersion,
+    };
+  }
+
+  private parseSearchTextPayload(payload: Record<string, unknown>): SearchTextRequest {
+    const query = this.requireStringField(payload, 'query').trim();
+    if (!query) {
+      throw new Error('search_text query cannot be empty.');
+    }
+
+    const filePattern = this.optionalStringField(payload, 'filePattern')?.trim() || '**/*';
+    const includeGlobs = this.optionalStringArrayField(payload, 'includeGlobs') ?? [];
+    const excludeGlobs = this.optionalStringArrayField(payload, 'excludeGlobs')
+      ?? [...DEFAULT_SEARCH_EXCLUDE_GLOBS];
+    const caseSensitive = this.optionalBooleanField(payload, 'caseSensitive') ?? false;
+    const exactMatch = this.optionalBooleanField(payload, 'exactMatch') ?? false;
+    const requestedVariantsEnabled = this.optionalBooleanField(payload, 'variantsEnabled');
+    const variantsEnabled = exactMatch ? false : (requestedVariantsEnabled ?? true);
+    const maxResults = this.clampPositiveInteger(
+      this.optionalIntegerField(payload, 'maxResults'),
+      SEARCH_TEXT_LIMITS.maxResults,
+      SEARCH_TEXT_LIMITS.maxResults
+    );
+    const maxSearchCalls = this.clampPositiveInteger(
+      this.optionalIntegerField(payload, 'maxSearchCalls'),
+      SEARCH_TEXT_LIMITS.maxSearchCalls,
+      SEARCH_TEXT_LIMITS.maxSearchCalls
+    );
+    const timeoutMs = this.clampPositiveInteger(
+      this.optionalIntegerField(payload, 'timeoutMs'),
+      SEARCH_TEXT_LIMITS.timeoutMs,
+      SEARCH_TEXT_LIMITS.timeoutMs
+    );
+    const maxSynonymTerms = this.clampPositiveInteger(
+      this.optionalIntegerField(payload, 'maxSynonymTerms'),
+      SEARCH_TEXT_LIMITS.maxSynonymTerms,
+      SEARCH_TEXT_LIMITS.maxSynonymTerms
+    );
+    const includeSearchPlan = this.optionalBooleanField(payload, 'includeSearchPlan') ?? true;
+
+    return {
+      query,
+      filePattern,
+      includeGlobs,
+      excludeGlobs,
+      caseSensitive,
+      exactMatch,
+      maxResults,
+      maxSearchCalls,
+      timeoutMs,
+      variantsEnabled,
+      maxSynonymTerms,
+      includeSearchPlan,
+    };
+  }
+
+  private clampPositiveInteger(
+    requestedValue: number | undefined,
+    defaultValue: number,
+    maxValue: number
+  ): number {
+    const candidate = requestedValue ?? defaultValue;
+    const boundedMinimum = candidate < 1 ? 1 : candidate;
+    return boundedMinimum > maxValue ? maxValue : boundedMinimum;
+  }
+
+  private containsSearchQuery(lineText: string, queryNeedle: string, caseSensitive: boolean): boolean {
+    if (caseSensitive) {
+      return lineText.includes(queryNeedle);
+    }
+
+    return lineText.toLowerCase().includes(queryNeedle);
+  }
+
+  private toBraceGlob(patterns: string[]): string | undefined {
+    if (patterns.length === 0) {
+      return undefined;
+    }
+
+    return `{${patterns.join(',')}}`;
   }
 
   private cacheWorkspaceResult(requestId: string, result: ToolResult): ToolResult {
@@ -943,7 +1432,7 @@ export class FileSystemService {
           expected_version: expectedVersion,
           current_version: currentVersion,
         },
-      });
+      }) as ToolResult;
     }
 
     const expected = expectedHash ?? expectedVersion;
@@ -961,7 +1450,7 @@ export class FileSystemService {
             expected_version: null,
             current_version: currentVersion,
           },
-        });
+        }) as ToolResult;
       }
 
       return null;
@@ -979,7 +1468,7 @@ export class FileSystemService {
           expected_version: expected,
           current_version: currentVersion,
         },
-      });
+      }) as ToolResult;
     }
 
     return null;
@@ -1207,6 +1696,24 @@ export class FileSystemService {
     return value;
   }
 
+  private optionalStringArrayField(
+    source: Record<string, unknown>,
+    fieldName: string
+  ): string[] | undefined {
+    const value = source[fieldName];
+    if (value === undefined) {
+      return undefined;
+    }
+
+    if (!Array.isArray(value) || value.some((entry) => typeof entry !== 'string')) {
+      throw new Error(`Invalid string array field: ${fieldName}`);
+    }
+
+    return value
+      .map((entry) => entry.trim())
+      .filter((entry) => entry.length > 0);
+  }
+
   private optionalObjectArg(value: unknown): Record<string, unknown> | undefined {
     if (!value || typeof value !== 'object' || Array.isArray(value)) {
       return undefined;
@@ -1250,7 +1757,7 @@ export class FileSystemService {
     return {
       ...result,
       tool_name: toolName,
-      request_id: envelope?.requestId ?? result.request_id,
+      request_id: envelope?.requestId ?? envelope?.request_id ?? result.request_id,
       action: envelope?.action ?? result.action,
       summary: envelope?.summary ?? result.summary,
       data: envelope?.data ?? result.data,

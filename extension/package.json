@@ -61,12 +61,14 @@
     "test:extension": "node --test test/workspace-ops-contract.test.mjs",
     "package": "vsce package"
   },
-  "dependencies": {},
+  "dependencies": {
+    "@vscode/ripgrep": "^1.17.1"
+  },
   "devDependencies": {
     "@types/node": "^20.0.0",
     "@types/vscode": "^1.85.0",
+    "@vscode/vsce": "^2.22.0",
     "typescript": "~5.3.3",
-    "vite": "^5.0.0",
-    "@vscode/vsce": "^2.22.0"
+    "vite": "^8.0.8"
   }
 }
