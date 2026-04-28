@@ -18,7 +18,8 @@ const COLLAPSED_FOLDERS = new Set([
   'obj',
 ]);
 
-const MAX_DEPTH_TWO_ITEMS = 30;
+const MAX_DEPTH_TWO_ITEMS = 50;
+const MAX_DEPTH_THREE_ITEMS = 30;
 
 export class WorkspaceStore implements vscode.Disposable {
   private workspaceSkeleton: string | null = null;
@@ -109,6 +110,24 @@ export class WorkspaceStore implements vscode.Disposable {
 
         for (const [subEntryName, subEntryType] of sortedSubEntries) {
           lines.push(`    ${subEntryName}${subEntryType === vscode.FileType.Directory ? '/' : ''}`);
+
+          
+          // Add Layer 3 for deeper context injection
+          if (subEntryType === vscode.FileType.Directory && !COLLAPSED_FOLDERS.has(subEntryName)) {
+            const subSubfolderUri = vscode.Uri.joinPath(subfolderUri, subEntryName);
+            try {
+              const subSubEntries = await vscode.workspace.fs.readDirectory(subSubfolderUri);
+              const sortedSubSubEntries = [...subSubEntries]
+                .sort(([leftName], [rightName]) => leftName.localeCompare(rightName))
+                .slice(0, MAX_DEPTH_THREE_ITEMS);
+                
+              for (const [subSubEntryName, subSubEntryType] of sortedSubSubEntries) {
+                lines.push(`      ${subSubEntryName}${subSubEntryType === vscode.FileType.Directory ? '/' : ''}`);
+              }
+            } catch {
+              continue;
+            }
+          }
         }
       }
     }

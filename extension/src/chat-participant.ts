@@ -27,13 +27,15 @@ export class VertexSwarmChatParticipant {
     context: vscode.ExtensionContext,
     tokenManager: TokenManager,
     oauthHandler: OAuthHandler,
-    outputChannel: vscode.OutputChannel
+    outputChannel: vscode.OutputChannel,
+    authLog?: (message: string) => void
   ) {
     this.runtime = new VertexSwarmChatRuntime({
       tokenManager,
       oauthHandler,
       context,
       outputChannel,
+      authLog,
       postMessage: (message: object) => this.handleRuntimeMessage(message),
     });
   }
@@ -55,14 +57,18 @@ export class VertexSwarmChatParticipant {
       return;
     }
 
-    let resolveRequest: (() => void) | null = null;
+    let resolveRequest: (() => void) | undefined;
     const donePromise = new Promise<void>((resolve) => {
       resolveRequest = resolve;
     });
 
+    if (!resolveRequest) {
+      throw new Error('Failed to initialize chat participant resolver');
+    }
+
     this.activeRequest = {
       stream,
-      resolve: resolveRequest as () => void,
+      resolve: resolveRequest,
     };
 
     const cancelDisposable = token.onCancellationRequested(() => {

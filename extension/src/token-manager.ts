@@ -5,13 +5,13 @@ export type StoredSession =
       status: 'valid';
       token: string;
       userMetadata: Record<string, unknown>;
-      sessionToken?: string;
+      refreshToken?: string;
       expiresAt: number;
     }
   | {
       status: 'expired';
       userMetadata: Record<string, unknown>;
-      sessionToken?: string;
+      refreshToken?: string;
       expiresAt?: number;
     }
   | { status: 'missing' };
@@ -23,7 +23,8 @@ export type StoredSession =
 export class TokenManager {
   private static readonly TOKEN_KEY = 'vertex-swarm-auth-token';
   private static readonly USER_KEY = 'vertex-swarm-auth-user';
-  private static readonly SESSION_TOKEN_KEY = 'vertex-swarm-auth-session-token';
+  private static readonly REFRESH_TOKEN_KEY = 'vertex-swarm-auth-refresh-token';
+  private static readonly LEGACY_SESSION_TOKEN_KEY = 'vertex-swarm-auth-session-token';
   private static readonly SESSION_TTL_MS = 60 * 24 * 60 * 60 * 1000;
 
   constructor(private readonly secrets: vscode.SecretStorage) {}
@@ -34,7 +35,7 @@ export class TokenManager {
   async setToken(
     token: string,
     userMetadata: Record<string, unknown>,
-    sessionToken?: string
+    refreshToken?: string
   ): Promise<void> {
     try {
       const now = Date.now();
@@ -50,9 +51,10 @@ export class TokenManager {
         TokenManager.USER_KEY,
         JSON.stringify(storedUserMetadata)
       );
-      if (sessionToken) {
-        await this.secrets.store(TokenManager.SESSION_TOKEN_KEY, sessionToken);
+      if (refreshToken) {
+        await this.secrets.store(TokenManager.REFRESH_TOKEN_KEY, refreshToken);
       }
+      await this.secrets.delete(TokenManager.LEGACY_SESSION_TOKEN_KEY);
     } catch (error) {
       console.error('Failed to store token:', error);
       throw new Error('Could not store authentication token');
@@ -64,12 +66,15 @@ export class TokenManager {
    */
   async getSession(): Promise<StoredSession> {
     try {
-      const [token, userJson, sessionToken] = await Promise.all([
+      const [token, userJson, storedRefreshToken, legacySessionToken] = await Promise.all([
         this.secrets.get(TokenManager.TOKEN_KEY),
         this.secrets.get(TokenManager.USER_KEY),
-        this.secrets.get(TokenManager.SESSION_TOKEN_KEY),
+        this.secrets.get(TokenManager.REFRESH_TOKEN_KEY),
+        this.secrets.get(TokenManager.LEGACY_SESSION_TOKEN_KEY),
       ]);
-      if (!token && !userJson && !sessionToken) {
+      const refreshToken = storedRefreshToken || legacySessionToken;
+
+      if (!token && !userJson && !refreshToken) {
         return { status: 'missing' };
       }
 
@@ -78,11 +83,11 @@ export class TokenManager {
         : {};
 
       if (!token) {
-        if (sessionToken) {
+        if (refreshToken) {
           return {
             status: 'expired',
             userMetadata,
-            sessionToken,
+            refreshToken,
             expiresAt: this.normalizeExpiryMs(userMetadata.expiresAt),
           };
         }
@@ -116,17 +121,17 @@ export class TokenManager {
           status: 'valid',
           token,
           userMetadata: upgradedUserMetadata,
-          sessionToken: sessionToken || undefined,
+          refreshToken: refreshToken || undefined,
           expiresAt: upgradedUserMetadata.expiresAt,
         };
       }
 
       if (expiresAt <= Date.now()) {
-        if (sessionToken) {
+        if (refreshToken) {
           return {
             status: 'expired',
             userMetadata,
-            sessionToken,
+            refreshToken,
             expiresAt,
           };
         }
@@ -143,7 +148,7 @@ export class TokenManager {
         status: 'valid',
         token,
         userMetadata,
-        sessionToken: sessionToken || undefined,
+        refreshToken: refreshToken || undefined,
         expiresAt,
       };
     } catch (error) {
@@ -159,7 +164,8 @@ export class TokenManager {
     try {
       await this.secrets.delete(TokenManager.TOKEN_KEY);
       await this.secrets.delete(TokenManager.USER_KEY);
-      await this.secrets.delete(TokenManager.SESSION_TOKEN_KEY);
+      await this.secrets.delete(TokenManager.REFRESH_TOKEN_KEY);
+      await this.secrets.delete(TokenManager.LEGACY_SESSION_TOKEN_KEY);
     } catch (error) {
       console.error('Failed to clear token:', error);
     }

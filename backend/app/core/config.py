@@ -79,14 +79,86 @@ class Settings(BaseSettings):
     jwt_token_leeway_seconds: int = 300  # Clock skew tolerance (iat, exp validation)
 
     # ========================================
-    # OpenAI-compatible LLM provider
+    # Vertex extension auth broker (Phase 3)
     # ========================================
+    app_auth_secret: str = ""
+    app_auth_algorithm: str = "HS256"
+    app_auth_issuer: str = "vertex-swarm-backend"
+    app_auth_audience: str = "vertex-swarm-extension"
+
+    # Legacy env compatibility: APP_AUTH_TOKEN_TTL_SECONDS
+    app_auth_token_ttl_seconds: int = 604800
+    # Preferred explicit TTL settings (set to 0 to fall back)
+    app_auth_access_token_ttl_seconds: int = 0
+    app_auth_refresh_token_ttl_seconds: int = 0
+
+    # ========================================
+    # OpenAI-compatible LLM provider
+    # OpenRouter is the active path; Modal is retained for rollback.
+    # ========================================
+    openrouter_base_url: str = "https://openrouter.ai/api/v1"
+    openrouter_api_key: str = ""
+    openrouter_model: str = "nvidia/nemotron-3-super-120b-a12b:free"
+    openrouter_fallback_model: str = "nvidia/nemotron-3-super-120b-a12b:free"
+    openrouter_reasoning_enabled: bool = False
+    openrouter_reasoning_effort: str = "low"
+
     modal_base_url: str = "https://api.us-west-2.modal.direct/v1"
     modal_api_key: str = ""
     modal_model: str = "zai-org/GLM-5-FP8"
     modal_fallback_model: str = "zai-org/GLM-5-FP8"
     modal_reasoning_enabled: bool = False
     modal_reasoning_effort: str = "low"
+
+    @property
+    def llm_base_url(self) -> str:
+        if self.openrouter_api_key.strip():
+            return self.openrouter_base_url
+        return self.modal_base_url
+
+    @property
+    def llm_api_key(self) -> str:
+        if self.openrouter_api_key.strip():
+            return self.openrouter_api_key
+        return self.modal_api_key
+
+    @property
+    def llm_model(self) -> str:
+        if self.openrouter_api_key.strip():
+            return self.openrouter_model
+        return self.modal_model
+
+    @property
+    def llm_fallback_model(self) -> str:
+        if self.openrouter_api_key.strip():
+            return self.openrouter_fallback_model
+        return self.modal_fallback_model
+
+    @property
+    def llm_reasoning_enabled(self) -> bool:
+        if self.openrouter_api_key.strip():
+            return self.openrouter_reasoning_enabled
+        return self.modal_reasoning_enabled
+
+    @property
+    def llm_reasoning_effort(self) -> str:
+        if self.openrouter_api_key.strip():
+            return self.openrouter_reasoning_effort
+        return self.modal_reasoning_effort
+
+    @property
+    def app_auth_access_ttl_seconds(self) -> int:
+        """Effective access-token TTL (short-lived by default)."""
+        if self.app_auth_access_token_ttl_seconds > 0:
+            return self.app_auth_access_token_ttl_seconds
+        return min(self.app_auth_token_ttl_seconds, 3600)
+
+    @property
+    def app_auth_refresh_ttl_seconds(self) -> int:
+        """Effective refresh-token TTL."""
+        if self.app_auth_refresh_token_ttl_seconds > 0:
+            return self.app_auth_refresh_token_ttl_seconds
+        return self.app_auth_token_ttl_seconds
 
     @property
     def database(self):

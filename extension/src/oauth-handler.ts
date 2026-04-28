@@ -12,29 +12,19 @@ interface AuthenticatedUserPayload {
 interface CallbackAuthResult {
   token: string;
   user: AuthenticatedUserPayload;
-  sessionToken?: string;
-}
-
-interface RefreshedAccessToken {
-  token: string;
-  sessionToken?: string;
+  refreshToken?: string;
 }
 
 /**
- * OAuthHandler: Manages the full Neon Auth / Google social sign-in flow
- * for the VS Code extension.
+ * OAuthHandler owns the browser-facing Neon Auth flow for the VS Code extension.
  *
- * Flow:
- * 1. Extension starts a local HTTP server on a random port.
- * 2. Extension opens the browser to http://localhost:{port}/start.
- * 3. /start POSTs to Neon Auth /sign-in/social using browser cookies.
- * 4. Browser follows Neon's returned init URL to Google and back.
- * 5. Neon Auth redirects to http://localhost:{port}/callback with a verifier.
- * 6. /callback exchanges the verifier for a session.
- * 7. A Neon JWT + user info are POSTed back to the local server.
- * 8. Extension stores the Neon JWT and completes the flow.
+ * Account selection belongs to Google. The extension never invents a local list
+ * of accounts and only stores a token after the callback page shows the
+ * selected email and the user confirms it.
  */
 export class OAuthHandler {
+  private static readonly AUTH_TIMEOUT_MS = 5 * 60 * 1000;
+
   private readonly neonAuthUrl: string;
   private readonly provider = 'google';
 
@@ -61,51 +51,34 @@ export class OAuthHandler {
     return `http://localhost:${this.allocatedPort}/start`;
   }
 
-  getAuthUrl(): string {
-    return `${this.neonAuthUrl}/sign-in`;
-  }
-
-  async refreshAccessToken(sessionToken: string): Promise<RefreshedAccessToken | null> {
-    try {
-      const tokenRefresh = await this.requestSessionTokens('/token', sessionToken, 'token');
-      if (tokenRefresh?.token) {
-        return tokenRefresh;
-      }
-
-      // Better Auth also returns the JWT on getSession via the set-auth-jwt header.
-      // Use it as a fallback when /token responds without a token payload.
-      const sessionRefresh = await this.requestSessionTokens('/get-session', sessionToken, 'get-session');
-      if (sessionRefresh?.token) {
-        return sessionRefresh;
-      }
-
-      this.warn('[OAuthHandler] Silent token refresh returned no token from /token or /get-session');
-      return null;
-    } catch (error) {
-      this.warn(
-        `[OAuthHandler] Silent token refresh errored: ${error instanceof Error ? error.message : String(error)}`
-      );
-      return null;
-    }
-  }
-
-  async startAuthFlow(): Promise<boolean> {
+  async startAuthFlow(openBrowser: boolean = true): Promise<boolean> {
     try {
       await this.startCallbackServer();
-      await vscode.env.openExternal(vscode.Uri.parse(this.getStartUrl()));
 
-      const authResult = await this.waitForCallback(120_000);
-      if (!authResult) {
-        throw new Error('Authentication timed out after 120 seconds. Please try again.');
+      const authUrl = this.getStartUrl();
+      if (openBrowser) {
+        await vscode.env.openExternal(vscode.Uri.parse(authUrl));
+      } else {
+        await vscode.env.clipboard.writeText(authUrl);
+        await vscode.window.showInformationMessage('Vertex Swarm: sign-in link copied to clipboard');
       }
 
-      await this.tokenManager.setToken(authResult.token, {
-        id: authResult.user.id || '',
-        email: authResult.user.email || '',
-        provider: this.provider,
-      }, authResult.sessionToken);
+      const authResult = await this.waitForCallback(OAuthHandler.AUTH_TIMEOUT_MS);
+      if (!authResult) {
+        throw new Error('Authentication timed out. Please try again.');
+      }
+
+      await this.tokenManager.setToken(
+        authResult.token,
+        {
+          id: authResult.user.id || '',
+          email: authResult.user.email || '',
+          provider: this.provider,
+        },
+        authResult.refreshToken
+      );
       this.log(
-        `[OAuthHandler] sign-in completed with session token ${authResult.sessionToken ? 'present' : 'missing'}`
+        `[OAuthHandler] sign-in completed with refresh token ${authResult.refreshToken ? 'present' : 'missing'}`
       );
       this.logTokenLifetime('sign-in', authResult.token);
 
@@ -213,7 +186,7 @@ export class OAuthHandler {
 
       if (req.method === 'POST' && url.pathname === '/error') {
         const body = await this.readBody(req);
-        const data = JSON.parse(body) as { error?: string };
+        const data = JSON.parse(body || '{}') as { error?: string };
         this.pendingAuthError = data.error || 'Unknown error from browser';
         res.writeHead(200, { ...cors, 'Content-Type': 'application/json' });
         res.end('{"ok":true}');
@@ -224,8 +197,8 @@ export class OAuthHandler {
       res.end('Not found');
     } catch (err) {
       this.warn(`[OAuthHandler] Request error: ${err instanceof Error ? err.message : String(err)}`);
-      res.writeHead(500, { 'Content-Type': 'text/plain' });
-      res.end('Internal server error');
+      res.writeHead(500, { ...cors, 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: err instanceof Error ? err.message : 'Internal server error' }));
     }
   }
 
@@ -258,22 +231,22 @@ export class OAuthHandler {
   <title>Vertex Swarm - Sign In</title>
   <style>
     *{box-sizing:border-box}
-    body{margin:0;min-height:100vh;display:grid;place-items:center;background:#0f172a;color:#e2e8f0;font:14px/1.6 "Segoe UI",system-ui,sans-serif}
-    .card{width:min(480px,calc(100vw - 32px));padding:28px;border-radius:16px;background:rgba(30,41,59,.96);border:1px solid rgba(148,163,184,.18);box-shadow:0 20px 50px rgba(0,0,0,.35)}
-    h1{margin:0 0 4px;font-size:22px;font-weight:600}
-    .sub{color:#94a3b8;margin:0 0 16px}
-    #status{padding:12px;border-radius:8px;background:rgba(15,23,42,.6);font-size:13px;min-height:42px}
-    .ok{color:#34d399} .err{color:#fca5a5} .info{color:#94a3b8}
-    #log{margin-top:14px;font:11px/1.5 "Cascadia Code","Fira Code",monospace;color:#475569;max-height:180px;overflow-y:auto;white-space:pre-wrap;padding:8px;border-radius:6px;background:rgba(0,0,0,.25)}
-    .retry-btn{display:inline-block;margin-top:12px;padding:9px 22px;border:none;border-radius:8px;background:#2563eb;color:#fff;font-size:14px;cursor:pointer;text-decoration:none}
-    .retry-btn:hover{background:#1d4ed8}
+    body{margin:0;min-height:100vh;display:grid;place-items:center;background:#10151f;color:#e8eef8;font:14px/1.6 "Segoe UI",system-ui,sans-serif}
+    .card{width:min(500px,calc(100vw - 32px));padding:28px;border-radius:14px;background:#18212f;border:1px solid rgba(180,194,216,.18);box-shadow:0 22px 60px rgba(0,0,0,.35)}
+    h1{margin:0 0 6px;font-size:22px;font-weight:650}
+    .sub{color:#aab7ca;margin:0 0 16px}
+    #status{padding:12px;border-radius:8px;background:#111925;font-size:13px;min-height:42px}
+    .ok{color:#5ee0b7}.err{color:#ffb0a9}.info{color:#aab7ca}
+    #log{margin-top:14px;font:11px/1.5 "Cascadia Code","Fira Code",monospace;color:#7f8da3;max-height:180px;overflow-y:auto;white-space:pre-wrap;padding:8px;border-radius:6px;background:rgba(0,0,0,.22)}
+    .retry-btn{display:inline-block;margin-top:12px;padding:9px 22px;border:none;border-radius:8px;background:#2f6fed;color:#fff;font-size:14px;cursor:pointer;text-decoration:none}
+    .retry-btn:hover{background:#255cc8}
   </style>
 </head>
 <body>
 <div class="card">
   <h1>Vertex Swarm</h1>
-  <p class="sub">Authenticating with Google via Neon Auth</p>
-  <div id="status" class="info">Initializing...</div>
+  <p class="sub">Opening Google sign-in. You will confirm the account before VS Code stores it.</p>
+  <div id="status" class="info">Preparing Google sign-in...</div>
   <div id="log"></div>
 </div>
 <script>
@@ -286,12 +259,42 @@ export class OAuthHandler {
   function log(msg){ elLog.textContent += msg + '\\n'; }
   function setStatus(msg, cls){ elStatus.textContent = msg; elStatus.className = cls || 'info'; }
 
-  function forceGoogleAccountSelection(urlString){
+  function reportError(msg){
+    return fetch('/error',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({error:msg})}).catch(function(){});
+  }
+
+  function showFailure(msg){
+    setStatus(msg, 'err');
+    elStatus.appendChild(document.createElement('br'));
+
+    var retry = document.createElement('a');
+    retry.className = 'retry-btn';
+    retry.href = '/start';
+    retry.textContent = 'Retry';
+    elStatus.appendChild(retry);
+
+    var cancel = document.createElement('button');
+    cancel.className = 'retry-btn';
+    cancel.type = 'button';
+    cancel.style.marginLeft = '8px';
+    cancel.textContent = 'Cancel';
+    cancel.addEventListener('click', async function(){
+      await reportError(msg);
+      setStatus('Sign-in cancelled. Return to VS Code.', 'err');
+    });
+    elStatus.appendChild(cancel);
+  }
+
+  function addGooglePromptIfVisible(urlString){
     try {
       var url = new URL(urlString);
-      if (url.hostname === 'accounts.google.com' || url.hostname.endsWith('.accounts.google.com')) {
+      if (url.hostname === 'accounts.google.com') {
         url.searchParams.set('prompt', 'select_account');
+        return url.toString();
       }
+
+      // Neon Auth usually returns its own provider-init URL first. Do not wrap
+      // that URL in Google's AccountChooser; Google rejects that as malformed.
       return url.toString();
     } catch (e) {
       log('Could not rewrite OAuth URL: ' + (e && e.message ? e.message : String(e)));
@@ -299,24 +302,18 @@ export class OAuthHandler {
     }
   }
 
-  function reportError(msg){
-    return fetch('/error',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({error:msg})}).catch(function(){});
-  }
-
   async function begin(){
     log('Neon Auth: ' + AUTH_URL);
     log('Callback:  ' + CALLBACK);
-    setStatus('Clearing previous session...', 'info');
 
     try {
-      log('POST /sign-out (clearing Neon Auth session)');
+      setStatus('Starting a fresh sign-in...', 'info');
       await fetch(AUTH_URL + '/sign-out', {
         method: 'POST',
         credentials: 'include',
         headers: { 'Content-Type': 'application/json' }
       }).catch(function(e){ log('Neon Auth sign-out: ' + e.message); });
 
-      setStatus('Contacting Neon Auth...', 'info');
       log('POST /sign-in/social');
       var resp = await fetch(AUTH_URL + '/sign-in/social', {
         method: 'POST',
@@ -345,21 +342,19 @@ export class OAuthHandler {
         throw new Error('No redirect URL in response: ' + JSON.stringify(data));
       }
 
-      var redirectUrl = forceGoogleAccountSelection(data.url);
-      log('Redirecting to Google...');
-      setStatus('Redirecting to Google sign-in...', 'ok');
+      setStatus('Opening Google sign-in...', 'ok');
+      var redirectUrl = addGooglePromptIfVisible(data.url);
+      log('Redirecting to OAuth provider...');
       window.location.href = redirectUrl;
 
     } catch(err) {
       var msg = err instanceof Error ? err.message : String(err);
       log('FAILED: ' + msg);
-      setStatus(msg, 'err');
-      elStatus.innerHTML += '<br><a class="retry-btn" href="/start">Retry</a>';
-      await reportError(msg);
+      showFailure(msg);
     }
   }
 
-  begin();
+  void begin();
 })();
 </script>
 </body>
@@ -380,23 +375,40 @@ export class OAuthHandler {
 <html lang="en">
 <head>
   <meta charset="UTF-8"/>
-  <title>Vertex Swarm - Completing Sign-In</title>
+  <title>Vertex Swarm - Confirm Sign-In</title>
   <style>
     *{box-sizing:border-box}
-    body{margin:0;min-height:100vh;display:grid;place-items:center;background:#0f172a;color:#e2e8f0;font:14px/1.6 "Segoe UI",system-ui,sans-serif}
-    .card{width:min(480px,calc(100vw - 32px));padding:28px;border-radius:16px;background:rgba(30,41,59,.96);border:1px solid rgba(148,163,184,.18);box-shadow:0 20px 50px rgba(0,0,0,.35)}
-    h1{margin:0 0 4px;font-size:22px;font-weight:600}
-    .sub{color:#94a3b8;margin:0 0 16px}
-    #status{padding:12px;border-radius:8px;background:rgba(15,23,42,.6);font-size:13px;min-height:42px}
-    .ok{color:#34d399} .err{color:#fca5a5} .info{color:#94a3b8}
-    #log{margin-top:14px;font:11px/1.5 "Cascadia Code","Fira Code",monospace;color:#475569;max-height:180px;overflow-y:auto;white-space:pre-wrap;padding:8px;border-radius:6px;background:rgba(0,0,0,.25)}
+    body{margin:0;min-height:100vh;display:grid;place-items:center;background:#10151f;color:#e8eef8;font:14px/1.6 "Segoe UI",system-ui,sans-serif}
+    .card{width:min(500px,calc(100vw - 32px));padding:28px;border-radius:14px;background:#18212f;border:1px solid rgba(180,194,216,.18);box-shadow:0 22px 60px rgba(0,0,0,.35)}
+    h1{margin:0 0 6px;font-size:22px;font-weight:650}
+    .sub{color:#aab7ca;margin:0 0 16px}
+    #status{padding:12px;border-radius:8px;background:#111925;font-size:13px;min-height:42px}
+    .ok{color:#5ee0b7}.err{color:#ffb0a9}.info{color:#aab7ca}
+    #account{display:none;margin-top:16px;padding:14px;border-radius:8px;background:#111925;border:1px solid rgba(180,194,216,.16)}
+    #account-email{font-size:16px;font-weight:650;color:#fff;overflow-wrap:anywhere}
+    .actions{display:flex;gap:10px;margin-top:14px;flex-wrap:wrap}
+    button,.retry-btn{padding:9px 18px;border:none;border-radius:8px;font-size:14px;cursor:pointer;text-decoration:none}
+    #continue-btn{background:#2f6fed;color:#fff}
+    #continue-btn:hover{background:#255cc8}
+    #different-btn,.retry-btn{background:#2b3545;color:#e8eef8}
+    #different-btn:hover,.retry-btn:hover{background:#354258}
+    button:disabled{opacity:.6;cursor:not-allowed}
+    #log{margin-top:14px;font:11px/1.5 "Cascadia Code","Fira Code",monospace;color:#7f8da3;max-height:180px;overflow-y:auto;white-space:pre-wrap;padding:8px;border-radius:6px;background:rgba(0,0,0,.22)}
   </style>
 </head>
 <body>
 <div class="card">
   <h1>Vertex Swarm</h1>
-  <p class="sub">Completing sign-in...</p>
-  <div id="status" class="info">Exchanging Neon session for API JWT...</div>
+  <p class="sub">Confirm the account before VS Code stores the session.</p>
+  <div id="status" class="info">Checking selected account...</div>
+  <div id="account">
+    <div class="sub" style="margin:0 0 4px">Continue as</div>
+    <div id="account-email"></div>
+    <div class="actions">
+      <button id="continue-btn" type="button">Continue</button>
+      <button id="different-btn" type="button">Use different account</button>
+    </div>
+  </div>
   <div id="log"></div>
 </div>
 <script>
@@ -406,6 +418,11 @@ export class OAuthHandler {
   var UPSTREAM_ERROR = ${UPSTREAM_ERROR};
   var elStatus = document.getElementById('status');
   var elLog    = document.getElementById('log');
+  var elAccount = document.getElementById('account');
+  var elAccountEmail = document.getElementById('account-email');
+  var elContinue = document.getElementById('continue-btn');
+  var elDifferent = document.getElementById('different-btn');
+  var pendingResult = null;
 
   function log(msg){ elLog.textContent += msg + '\\n'; }
   function setStatus(msg, cls){ elStatus.textContent = msg; elStatus.className = cls || 'info'; }
@@ -414,8 +431,37 @@ export class OAuthHandler {
     return fetch('/error',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({error:msg})}).catch(function(){});
   }
 
-  function reportSuccess(token, user, sessionToken){
-    return fetch('/complete',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({token:token,user:user,sessionToken:sessionToken})}).catch(function(){});
+  function showFailure(msg){
+    setStatus(msg, 'err');
+    elStatus.appendChild(document.createElement('br'));
+
+    var retry = document.createElement('a');
+    retry.className = 'retry-btn';
+    retry.href = '/start';
+    retry.textContent = 'Restart sign-in';
+    elStatus.appendChild(retry);
+
+    var cancel = document.createElement('button');
+    cancel.className = 'retry-btn';
+    cancel.type = 'button';
+    cancel.style.marginLeft = '8px';
+    cancel.textContent = 'Cancel';
+    cancel.addEventListener('click', async function(){
+      await reportError(msg);
+      setStatus('Sign-in cancelled. Return to VS Code.', 'err');
+    });
+    elStatus.appendChild(cancel);
+  }
+
+  async function reportSuccess(token, user, refreshToken){
+    var resp = await fetch('/complete',{
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({token:token,user:user,refreshToken:refreshToken})
+    });
+    if (!resp.ok) {
+      throw new Error('VS Code extension rejected the completed session');
+    }
   }
 
   function isJwtLike(value){
@@ -483,8 +529,7 @@ export class OAuthHandler {
 
     if (UPSTREAM_ERROR) {
       log('Upstream error: ' + UPSTREAM_ERROR);
-      setStatus('Authentication failed: ' + UPSTREAM_ERROR, 'err');
-      await reportError('Upstream: ' + UPSTREAM_ERROR);
+      showFailure('Authentication failed: ' + UPSTREAM_ERROR);
       return;
     }
 
@@ -492,15 +537,14 @@ export class OAuthHandler {
       var msg = 'No session verifier received. The Google sign-in may not have completed.';
       log(msg);
       log('Full URL: ' + window.location.href);
-      setStatus(msg, 'err');
-      await reportError(msg);
+      showFailure(msg);
       return;
     }
 
     try {
       var sessionUrl = AUTH_URL + '/get-session?neon_auth_session_verifier=' + encodeURIComponent(VERIFIER);
       log('GET ' + sessionUrl.substring(0, 80) + '...');
-      setStatus('Exchanging verifier for session...', 'info');
+      setStatus('Reading selected account...', 'info');
 
       var resp = await fetch(sessionUrl, {
         credentials: 'include',
@@ -559,20 +603,46 @@ export class OAuthHandler {
         throw new Error('Neon Auth returned a non-JWT token for backend auth');
       }
 
+      var accountLabel = user.email || user.name || user.id || 'selected Google account';
+      pendingResult = {token: token, user: user, refreshToken: sessionToken};
       log('JWT: ' + token.substring(0, 16) + '...');
       log('User: ' + JSON.stringify(user));
-      setStatus('Signed in as ' + (user.email || user.name || user.id || 'user') + '. You can close this tab and return to VS Code.', 'ok');
-      await reportSuccess(token, user, sessionToken);
+      elAccountEmail.textContent = accountLabel;
+      elAccount.style.display = 'block';
+      setStatus('Confirm this is the account you want to use.', 'ok');
 
     } catch(err) {
       var msg = err instanceof Error ? err.message : String(err);
       log('FAILED: ' + msg);
-      setStatus(msg, 'err');
-      await reportError(msg);
+      showFailure(msg);
     }
   }
 
-  finalize();
+  elContinue.addEventListener('click', async function(){
+    if (!pendingResult) {
+      return;
+    }
+
+    try {
+      elContinue.disabled = true;
+      elDifferent.disabled = true;
+      setStatus('Signing in to VS Code...', 'info');
+      await reportSuccess(pendingResult.token, pendingResult.user, pendingResult.refreshToken);
+      setStatus('Signed in. You can close this tab and return to VS Code.', 'ok');
+    } catch (err) {
+      var msg = err instanceof Error ? err.message : String(err);
+      elContinue.disabled = false;
+      elDifferent.disabled = false;
+      log('FAILED: ' + msg);
+      setStatus(msg, 'err');
+    }
+  });
+
+  elDifferent.addEventListener('click', function(){
+    window.location.replace('/start');
+  });
+
+  void finalize();
 })();
 </script>
 </body>
@@ -595,111 +665,7 @@ export class OAuthHandler {
     });
   }
 
-  private extractJwtToken(payload: Record<string, unknown>): string | undefined {
-    const candidates = [
-      this.readStringPath(payload, ['token']),
-      this.readStringPath(payload, ['jwt']),
-      this.readStringPath(payload, ['accessToken']),
-      this.readStringPath(payload, ['access_token']),
-      this.readStringPath(payload, ['session', 'jwt']),
-      this.readStringPath(payload, ['session', 'accessToken']),
-      this.readStringPath(payload, ['session', 'access_token']),
-    ];
-
-    return candidates.find((value) => this.isJwtLike(value));
-  }
-
-  private async requestSessionTokens(
-    path: '/token' | '/get-session',
-    sessionToken: string,
-    label: 'token' | 'get-session'
-  ): Promise<RefreshedAccessToken | null> {
-    const response = await fetch(`${this.neonAuthUrl}${path}`, {
-      headers: {
-        Accept: 'application/json',
-        Authorization: `Bearer ${sessionToken}`,
-      },
-    });
-
-    const responseText = await response.text();
-    if (!response.ok) {
-      this.warn(
-        `[OAuthHandler] Silent refresh ${label} request failed status=${response.status} body=${responseText.slice(0, 200)}`
-      );
-      return null;
-    }
-
-    const payload = responseText
-      ? JSON.parse(responseText) as Record<string, unknown>
-      : {};
-    const refreshedToken =
-      this.extractJwtTokenFromHeaders(response.headers)
-      ?? this.extractJwtToken(payload);
-    const refreshedSessionToken =
-      this.extractSessionTokenFromHeaders(response.headers)
-      ?? this.extractSessionToken(payload);
-
-    if (!refreshedToken) {
-      this.warn(
-        `[OAuthHandler] Silent refresh ${label} request returned no JWT hasSetAuthJwtHeader=${Boolean(response.headers.get('set-auth-jwt'))} hasSetAuthTokenHeader=${Boolean(response.headers.get('set-auth-token'))} body=${responseText.slice(0, 200)}`
-      );
-      return null;
-    }
-
-    return {
-      token: refreshedToken,
-      sessionToken: refreshedSessionToken,
-    };
-  }
-
-  private extractJwtTokenFromHeaders(headers: Headers): string | undefined {
-    const token = headers.get('set-auth-jwt');
-    return this.isJwtLike(token) ? token : undefined;
-  }
-
-  private extractSessionToken(payload: Record<string, unknown>): string | undefined {
-    const candidates = [
-      this.readStringPath(payload, ['session', 'token']),
-      this.readStringPath(payload, ['session', 'sessionToken']),
-      this.readStringPath(payload, ['session', 'session_token']),
-      this.readStringPath(payload, ['session', 'refreshToken']),
-      this.readStringPath(payload, ['session', 'refresh_token']),
-      this.readStringPath(payload, ['sessionToken']),
-      this.readStringPath(payload, ['session_token']),
-      this.readStringPath(payload, ['refreshToken']),
-      this.readStringPath(payload, ['refresh_token']),
-      this.readStringPath(payload, ['token']),
-    ];
-
-    return candidates.find((value) => typeof value === 'string' && value.length > 0 && !this.isJwtLike(value));
-  }
-
-  private extractSessionTokenFromHeaders(headers: Headers): string | undefined {
-    const sessionToken = headers.get('set-auth-token');
-    return typeof sessionToken === 'string' && sessionToken.length > 0
-      ? sessionToken
-      : undefined;
-  }
-
-  private readStringPath(payload: Record<string, unknown>, path: string[]): string | undefined {
-    let current: unknown = payload;
-
-    for (const segment of path) {
-      if (!current || typeof current !== 'object') {
-        return undefined;
-      }
-
-      current = (current as Record<string, unknown>)[segment];
-    }
-
-    return typeof current === 'string' && current ? current : undefined;
-  }
-
-  private isJwtLike(value: unknown): value is string {
-    return typeof value === 'string' && value.split('.').length === 3;
-  }
-
-  private logTokenLifetime(source: 'sign-in' | 'refresh', token: string): void {
+  private logTokenLifetime(source: 'sign-in', token: string): void {
     try {
       const parts = token.split('.');
       if (parts.length !== 3) {

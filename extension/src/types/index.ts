@@ -99,7 +99,8 @@ export type WebviewToExtensionMessage =
   | { type: 'cancel-stream'; payload: StreamCancelPayload }
   | { type: 'tool_call'; payload: ToolCallPayload }
   | { type: 'reset-chat' }
-  | { type: 'logout' };
+  | { type: 'logout' }
+  | { type: 'log'; payload: string };
 
 // Legacy union kept for backward compat
 export type ExtensionMessage = ExtensionToWebviewMessage | WebviewToExtensionMessage;

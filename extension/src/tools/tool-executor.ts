@@ -6,7 +6,7 @@ export class ToolExecutor {
     private readonly fileSystemService: FileSystemService,
     private readonly backendUrl: string,
     private readonly getAccessToken: (
-      options?: { forceRefresh?: boolean }
+      options?: { forceRefresh?: boolean; previousToken?: string }
     ) => Promise<string | undefined>,
     private readonly log: (message: string) => void = () => undefined
   ) {}
@@ -124,8 +124,11 @@ export class ToolExecutor {
       this.log(
         `tool result received 401, attempting forced token refresh tool_call_id=${toolResult.tool_call_id}`
       );
-      const refreshedToken = await this.getAccessToken({ forceRefresh: true });
-      if (refreshedToken && refreshedToken !== accessToken) {
+      const refreshedToken = await this.getAccessToken({
+        forceRefresh: true,
+        previousToken: accessToken,
+      });
+      if (refreshedToken) {
         await this.postToolResultWithToken(toolResult, refreshedToken, false);
         return;
       }

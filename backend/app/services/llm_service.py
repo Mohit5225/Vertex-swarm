@@ -1,4 +1,4 @@
-"""LLM service - OpenAI SDK against an OpenAI-compatible provider."""
+"""LLM service - OpenAI SDK against the active OpenAI-compatible provider."""
 import asyncio
 import json
 import logging
@@ -11,9 +11,31 @@ from openai import AsyncOpenAI
 from app.core.config import settings
 
 logger = logging.getLogger(__name__)
+context_logger = logging.getLogger("app.context")
 
 _glm_rate_limiter = asyncio.Semaphore(1)
 _glm_last_call_time = 0.0
+_glm_rate_limit_seconds = 50
+_context_log_sequence = 0
+
+
+def _next_context_log_sequence() -> int:
+    global _context_log_sequence
+    _context_log_sequence += 1
+    return _context_log_sequence
+
+
+def _log_llm_context_snapshot(
+    payload: Dict[str, Any],
+    context_log_metadata: Dict[str, Any] | None = None,
+) -> None:
+    """Persist the exact LLM request context for post-run debugging."""
+    snapshot = {
+        "sequence": _next_context_log_sequence(),
+        "metadata": context_log_metadata or {},
+        "payload": payload,
+    }
+    context_logger.info("LLM_CONTEXT %s", json.dumps(snapshot, ensure_ascii=False, default=str))
 
 
 WORKSPACE_OPS_TOOL_SPEC: dict[str, Any] = {
@@ -46,6 +68,39 @@ WORKSPACE_OPS_TOOL_SPEC: dict[str, Any] = {
                 },
                 "payload": {
                     "type": "object",
+                    "description": "Arguments for the action.\n- list_dir: {'path': string} (use '.' for root)\n- search_text: {'query': string, 'filePattern'?: string, 'useRegex'?: boolean} (searches CONTENT, not filenames)\n- read_file: {'path': string, 'startLine'?: number, 'endLine'?: number}\n- edit_file: {'path': string, 'edits': array, 'expected_hash': string}\n- create_file: {'path': string, 'content': string}\n- delete_path: {'path': string}\n- rename_path: {'oldPath': string, 'newPath': string}",
+                    "properties": {
+                        "path": {
+                            "type": "string",
+                            "description": "The file or directory path. Use '.' or '/' for the root directory. Required for list_dir, read_file, edit_file, create_file, delete_path."
+                        },
+                        "query": {
+                            "type": "string",
+                            "description": "The text or regex inside file contents to search for. Required for search_text. DO NOT use this to just search for file names."
+                        },
+                        "filePattern": {
+                            "type": "string",
+                            "description": "Glob pattern to limit search_text, e.g. '**/*.py'."
+                        },
+                        "useRegex": {
+                            "type": "boolean",
+                            "description": "Whether query is a regex pattern in search_text."
+                        },
+                        "edits": {
+                            "type": "array",
+                            "description": "Array of edits. Required for edit_file."
+                        },
+                        "content": {
+                            "type": "string",
+                            "description": "File content. Required for create_file."
+                        },
+                        "oldPath": {
+                            "type": "string"
+                        },
+                        "newPath": {
+                            "type": "string"
+                        }
+                    },
                     "additionalProperties": True,
                 },
             },
@@ -106,6 +161,11 @@ CORE EXECUTION MINDSET:
 
 Rules you always follow:
 - Reason step-by-step before answering or taking action
+- NEVER GUESS TOOL SYNTAX. If you are unsure, look closely at the action requirements.
+- list_dir REQUIRES a valid path parameter (e.g. "." or "src"). DO NOT send empty strings.
+- search_text is ONLY for searching file CONTENTS (code, functions, strings). DO NOT use it to search for file names. For filenames, rely on list_dir or your injected workspace context.
+- STOP RETRYING FAILED ACTIONS: If a tool call fails or returns empty twice, DO NOT retry the same action. Pivot your strategy immediately. Treat errors as a signal to change course.
+- VERIFY WITH CALLERS: When asked to explain a file, you must first read the file, and then immediately use search_text to find where its primary classes/functions are used in the broader codebase to verify its actual context.
 - Be direct and precise - no filler, no padding
 - When given code, scan it for correctness, security issues, and efficiency first
 - Reference specific line numbers and function names when discussing code
@@ -251,25 +311,28 @@ def _build_system_prompt(workspace_skeleton: str | None = None) -> str:
         "   → Your action: read_file(path='src/config.py', startLine=1, endLine=100)\n\n"
         "2. SYMBOL LOOKUPS (User asks: 'Find function X', 'Where is class Y', 'Show me validateConcurrencyGuard')\n"
         "   → ALWAYS use search_text(query='exact_symbol_name') FIRST (costs ~20 tokens)\n"
+        "   → MANDATORY: ALWAYS generate variants for non-builtin symbols using the form:\n"
+        "     search_text(query='validateConcurrencyGuard', variants=['validateConcurrencyGuard', 'validate_concurrency_guard', 'ConcurrencyGuard'])\n"
+        "     This enables searching across naming conventions (camelCase, snake_case, abbreviated forms).\n"
         "   → Get back file:line:content format (identifies exact location)\n"
         "   → THEN use read_file on the lines returned (costs ~70 tokens)\n"
         "   → Example flow:\n"
         "       User: 'Fix the bug in validateConcurrencyGuard'\n"
-        "       Step 1: search_text(query='validateConcurrencyGuard') \n"
+        "       Step 1: search_text(query='validateConcurrencyGuard', variants=['validateConcurrencyGuard', 'validate_concurrency_guard', 'ConcurrencyGuard']) \n"
         "               → Returns: 'file-system-service.ts:860: private validateConcurrencyGuard('\n"
         "       Step 2: read_file(path='file-system-service.ts', startLine=850, endLine=920)\n"
         "               → Get full function with context\n"
         "       Total cost: ~90 tokens vs 300+ tokens (3-5 blind reads)\n\n"
         "3. BROAD FEATURE EXPLORATION (User asks: 'How does authentication work?', 'Explain the session flow')\n"
         "   → First: list_dir(path='relevant_folder') to see structure (e.g., 'app/auth')\n"
-        "   → Second: search_text with patterns (e.g., 'class.*Auth', 'def.*login') to find key files\n"
+        "   → Second: search_text with regex patterns (e.g., 'class.*Auth', 'def.*login') to find key files\n"
         "   → Third: read_file on lines 1-100 (imports, interfaces, docstrings) of key files\n"
         "   → Build mental model BEFORE deep dives\n"
         "   → Example flow:\n"
         "       User: 'How does authentication work?'\n"
         "       Step 1: list_dir(path='app/auth') → see: core.py, routes/, dependencies.py, middleware.py\n"
         "       Step 2: search_text(query='class.*Auth|def.*authenticate|jwt', useRegex=true, filePattern='app/auth/**')\n"
-        "               → see 15 key locations\n"
+        "               → see 15 key locations using regex patterns\n"
         "       Step 3: read_file(path='app/auth/core.py', startLine=1, endLine=100) +\n"
         "               read_file(path='app/auth/routes/auth.py', startLine=1, endLine=100)\n"
         "       → User understands the architecture\n\n"
@@ -303,8 +366,18 @@ def _build_system_prompt(workspace_skeleton: str | None = None) -> str:
         "   mode: 'preview' or 'apply'.\n"
         "   Supported actions:\n"
         "   - list_dir: payload { path } → Explore folder structure\n"
-        "   - search_text: payload { query, filePattern? } → DISCOVERY TOOL: Find symbols/patterns across workspace\n"
+        "   - search_text: payload { query, variants?, filePattern?, useRegex? } → DISCOVERY TOOL: Find symbols/patterns across workspace\n"
         "                  Use BEFORE read_file to locate code (grep-first protocol)\n"
+        "                  SEMANTIC SYNONYMS (MANDATORY): For ANY non-builtin symbol, ALWAYS provide variants array with:\n"
+        "                    - variants[0] = original query (e.g., 'validateConcurrencyGuard')\n"
+        "                    - variants[1] = snake_case variant (e.g., 'validate_concurrency_guard')\n"
+        "                    - variants[2] = abbreviated/related variant (e.g., 'ConcurrencyGuard' or 'concurrency_check')\n"
+        "                  The extension will automatically search naming variants (snake_case, camelCase, etc) for each.\n"
+        "                  REGEX SUPPORT: Set useRegex=true to use regex patterns instead of fixed-string matching.\n"
+        "                  Example: search_text(query='(async|await).*function', useRegex=true) finds async functions.\n"
+        "                  SEARCH RESULT TRIAGE: search_text output is grouped by PRIMARY and SYNONYM variants.\n"
+        "                  If PRIMARY has hits, read PRIMARY lines first and avoid synonym reads unless still needed.\n"
+        "                  If PRIMARY has zero hits, read SYNONYM lines and explicitly state that interpretation in your reasoning.\n"
         "   - read_file: payload { path, startLine?, endLine? } → Pull actual file content (targeted read after grep)\n"
         "   - edit_file: payload { path, edits:[{startLine,startCol,endLine,endCol,text}] } → Mutate files with hash guard\n"
         "   - create_file: payload { path, content, overwrite? } → Create new files\n"
@@ -381,10 +454,10 @@ def _build_system_prompt(workspace_skeleton: str | None = None) -> str:
 
 
 def _get_client() -> AsyncOpenAI:
-    base_url = _normalize_base_url(settings.modal_base_url)
+    base_url = _normalize_base_url(settings.llm_base_url)
     return AsyncOpenAI(
         base_url=base_url,
-        api_key=settings.modal_api_key,
+        api_key=settings.llm_api_key,
     )
 
 
@@ -402,7 +475,7 @@ def _normalize_base_url(base_url: str) -> str:
 
 
 def _model_name(model: str | None = None) -> str:
-    return model or settings.modal_model
+    return model or settings.llm_model
 
 
 def _build_request_payload(
@@ -423,10 +496,10 @@ def _build_request_payload(
         "tool_choice": "auto",
     }
 
-    if settings.modal_reasoning_enabled:
+    if settings.llm_reasoning_enabled:
         payload["extra_body"] = {
             "reasoning": {
-                "effort": settings.modal_reasoning_effort,
+                "effort": settings.llm_reasoning_effort,
             }
         }
 
@@ -629,6 +702,7 @@ async def stream_chat_events(
     messages: List[Dict[str, Any]],
     workspace_skeleton: str | None = None,
     model: str | None = None,
+    context_log_metadata: Dict[str, Any] | None = None,
 ) -> AsyncIterator[Dict[str, Any]]:
     """
     Stream model output as structured events.
@@ -639,7 +713,7 @@ async def stream_chat_events(
     Args:
         messages: Chat messages list
         workspace_skeleton: Optional workspace context
-        model: Optional model override (defaults to settings.modal_model)
+        model: Optional model override (defaults to settings.llm_model)
 
     Yields event dicts with:
       - {"type": "token", "content": "..."}
@@ -650,6 +724,7 @@ async def stream_chat_events(
     
     client = _get_client()
     payload = _build_request_payload(messages, workspace_skeleton, model)
+    _log_llm_context_snapshot(payload, context_log_metadata)
     
     # Log request details for debugging
     logger.info(
@@ -672,11 +747,11 @@ async def stream_chat_events(
     try:
         async with _glm_rate_limiter:
             elapsed = time.monotonic() - _glm_last_call_time
-            if elapsed < 20:
-                wait_time = 20 - elapsed
-                logger.info("🔄 20-second rate limit delay started (waiting %.1f seconds)", wait_time)
+            if elapsed < _glm_rate_limit_seconds:
+                wait_time = _glm_rate_limit_seconds - elapsed
+                logger.info("🔄 %s-second rate limit delay started (waiting %.1f seconds)", _glm_rate_limit_seconds, wait_time)
                 await asyncio.sleep(wait_time)
-                logger.info("✅ 20-second rate limit delay finished, proceeding with LLM call")
+                logger.info("✅ %s-second rate limit delay finished, proceeding with LLM call", _glm_rate_limit_seconds)
             stream = await client.chat.completions.create(**payload)
             _glm_last_call_time = time.monotonic()
         logger.debug("LLM stream established successfully")

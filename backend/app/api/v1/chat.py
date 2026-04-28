@@ -451,18 +451,37 @@ async def send_message(
                 stream_aborted = False
 
                 status_text = (
-                    f"Calling model {settings.modal_model}..."
+                    f"Calling model {settings.llm_model}..."
                     if llm_round == 1
                     else "Continuing with tool result..."
                 )
                 status_phase = "calling_model" if llm_round == 1 else "resuming_after_tool"
                 yield emit_trace(build_status_event(status_text, status_phase))
 
+                llm_context_log_base = {
+                    "user_id": user.user_id,
+                    "chat_id": str(chat_id),
+                    "session_id": synthetic_session_id,
+                    "message_id": request_message_id,
+                    "llm_round": llm_round,
+                    "ide_context_enabled": req.ide_context_enabled,
+                    "workspace_skeleton_included": bool(req.workspace_skeleton),
+                    "workspace_skeleton_len": len(req.workspace_skeleton) if req.workspace_skeleton else 0,
+                    "request_context_included": bool(req.request_context),
+                    "llm_message_count": len(llm_messages),
+                    "last_message_role": llm_messages[-1].get("role") if llm_messages else None,
+                }
+
                 # Try primary model, fallback to secondary on rate limit
                 try:
                     stream_iterator = stream_chat_events(
                         llm_messages,
                         workspace_skeleton=req.workspace_skeleton,
+                        context_log_metadata={
+                            **llm_context_log_base,
+                            "model": settings.llm_model,
+                            "is_fallback": False,
+                        },
                     )
                 except RateLimitError:
                     logger.warning(
@@ -471,8 +490,8 @@ async def send_message(
                         chat_id,
                         synthetic_session_id,
                         request_message_id,
-                        settings.modal_model,
-                        settings.modal_fallback_model,
+                        settings.llm_model,
+                        settings.llm_fallback_model,
                     )
                     yield emit_trace(
                         build_status_event(
@@ -483,7 +502,12 @@ async def send_message(
                     stream_iterator = stream_chat_events(
                         llm_messages,
                         workspace_skeleton=req.workspace_skeleton,
-                        model=settings.modal_fallback_model,
+                        model=settings.llm_fallback_model,
+                        context_log_metadata={
+                            **llm_context_log_base,
+                            "model": settings.llm_fallback_model,
+                            "is_fallback": True,
+                        },
                     )
 
                 async for event in stream_iterator:

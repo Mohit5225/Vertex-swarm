@@ -1,11 +1,11 @@
-"""JWT verification dependency for FastAPI routes (Phase 2)"""
+"""Backend access-token dependency for protected FastAPI routes."""
 import logging
 from typing import Optional
 
 from fastapi import Depends, Request
 
+from app.auth.app_token_service import AppTokenError, verify_extension_access_token
 from app.auth.middleware import AuthenticationError, extract_bearer_token
-from app.auth.core import NeonAuthVerificationError, verify_neon_auth_jwt
 from app.db.postgres.auth import get_user_by_id
 from app.models.auth import NeonAuthUser
 from app.db.postgres.connection import AsyncSessionLocal
@@ -37,7 +37,7 @@ class AuthenticatedUser:
 
 async def get_current_user(request: Request) -> AuthenticatedUser:
     """
-    FastAPI dependency to validate JWT and return authenticated user.
+    FastAPI dependency to validate backend access token and return user context.
     
     Usage:
         @router.get("/protected")
@@ -54,16 +54,15 @@ async def get_current_user(request: Request) -> AuthenticatedUser:
         logger.error(f"No token provided for {request.method} {request.url.path}")
         raise AuthenticationError("Missing authentication token")
 
-    # Verify JWT signature against JWKS
+    # Verify backend-issued access token
     try:
-        logger.debug(f"Verifying JWT token (length={len(token)}) for {request.url.path}")
-        jwt_claims = await verify_neon_auth_jwt(token)
-        # exp claim is already logged with lifetime in core.py
+        logger.debug(f"Verifying backend access token (length={len(token)}) for {request.url.path}")
+        jwt_claims = verify_extension_access_token(token)
         logger.info(
-            f"Neon token verified for user_id={jwt_claims.get('sub')} at {request.url.path}"
+            f"Extension token verified for user_id={jwt_claims.get('sub')} at {request.url.path}"
         )
-    except NeonAuthVerificationError as e:
-        logger.error(f"JWT verification failed for {request.url.path}: {str(e)}", exc_info=True)
+    except AppTokenError as e:
+        logger.error(f"Extension token verification failed for {request.url.path}: {str(e)}", exc_info=True)
         raise AuthenticationError(str(e))
 
     # Optionally fetch full user record from neon_auth.user

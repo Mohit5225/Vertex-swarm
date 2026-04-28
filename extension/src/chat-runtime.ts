@@ -26,11 +26,27 @@ interface ChatMessagesResponse {
   messages: ChatMessageData[];
 }
 
+interface BackendAuthUser {
+  id: string;
+  email?: string;
+  role?: string;
+}
+
+interface BackendAuthTokenResponse {
+  access_token: string;
+  refresh_token: string;
+  token_type: string;
+  expires_in: number;
+  expires_at: string;
+  user?: BackendAuthUser;
+}
+
 export interface VertexSwarmChatRuntimeOptions {
   tokenManager: TokenManager;
   oauthHandler: OAuthHandler;
   context: vscode.ExtensionContext;
   outputChannel: vscode.OutputChannel;
+  authLog?: (message: string) => void;
   postMessage: (message: object) => void;
   backendUrl?: string;
 }
@@ -38,12 +54,14 @@ export interface VertexSwarmChatRuntimeOptions {
 export class VertexSwarmChatRuntime {
   private static readonly MAX_PROCESSED_TOOL_CALL_IDS = 10_000;
   private static readonly TOKEN_REFRESH_BUFFER_MS = 12 * 60 * 1000;
+  private static readonly APP_TOKEN_ISSUER = process.env.VERTEX_APP_TOKEN_ISSUER || 'vertex-swarm-backend';
 
   private readonly backendUrl: string;
   private readonly tokenManager: TokenManager;
   private readonly oauthHandler: OAuthHandler;
   private readonly context: vscode.ExtensionContext;
   private readonly outputChannel: vscode.OutputChannel;
+  private readonly authLog?: (message: string) => void;
   private readonly postMessage: (message: object) => void;
   private readonly fileSystemService: FileSystemService;
   private readonly workspaceStore: WorkspaceStore;
@@ -61,6 +79,7 @@ export class VertexSwarmChatRuntime {
     this.oauthHandler = options.oauthHandler;
     this.context = options.context;
     this.outputChannel = options.outputChannel;
+    this.authLog = options.authLog;
     this.postMessage = options.postMessage;
     this.fileSystemService = new FileSystemService();
     this.workspaceStore = new WorkspaceStore();
@@ -74,10 +93,14 @@ export class VertexSwarmChatRuntime {
   }
 
   public async handleWebviewMessage(message: WebviewToExtensionMessage): Promise<void> {
+    if ('type' in message && message.type === 'log') {
+      this.log(`[WebView Log] ${message.payload}`);
+      return;
+    }
     switch (message.type) {
       case 'open-browser': {
         this.log('starting OAuth browser flow');
-        const success = await this.oauthHandler.startAuthFlow();
+        const success = await this.oauthHandler.startAuthFlow(true);
         if (success) {
           this.log('OAuth flow completed successfully');
           const hasValidSession = await this.syncWebviewSession();
@@ -89,9 +112,15 @@ export class VertexSwarmChatRuntime {
       }
 
       case 'copy-link': {
-        const authUrl = this.oauthHandler.getAuthUrl();
-        await vscode.env.clipboard.writeText(authUrl);
-        await vscode.window.showInformationMessage('Vertex Swarm: Neon sign-in page copied to clipboard');
+        this.log('starting OAuth clipboard flow');
+        const success = await this.oauthHandler.startAuthFlow(false);
+        if (success) {
+          this.log('OAuth flow completed successfully via clipboard');
+          const hasValidSession = await this.syncWebviewSession();
+          if (hasValidSession) {
+            await this.sendChatList();
+          }
+        }
         break;
       }
 
@@ -304,6 +333,10 @@ export class VertexSwarmChatRuntime {
     this.outputChannel.appendLine(`[${new Date().toISOString()}] ${message}`);
   }
 
+  private logAuth(message: string): void {
+    this.authLog?.(`[AuthRuntime] ${message}`);
+  }
+
   private postLoggedOut(reason?: string): void {
     this.log(`posting logged-out state${reason ? ` reason="${reason}"` : ''}`);
     this.post({
@@ -334,6 +367,7 @@ export class VertexSwarmChatRuntime {
   private async syncWebviewSession(): Promise<boolean> {
     const session = await this.getRestoredSession();
     this.log(`session lookup completed status=${session.status}`);
+    this.logAuth(`session lookup completed status=${session.status}`);
 
     if (session.status === 'expired') {
       await vscode.window.showInformationMessage(
@@ -352,7 +386,9 @@ export class VertexSwarmChatRuntime {
     return true;
   }
 
-  private async getValidToken(options: { forceRefresh?: boolean } = {}): Promise<string | undefined> {
+  private async getValidToken(
+    options: { forceRefresh?: boolean; previousToken?: string } = {}
+  ): Promise<string | undefined> {
     const session = await this.getRestoredSession(options);
 
     if (session.status === 'valid') {
@@ -374,17 +410,88 @@ export class VertexSwarmChatRuntime {
   }
 
   private async getRestoredSession(
-    options: { forceRefresh?: boolean } = {}
+    options: { forceRefresh?: boolean; previousToken?: string } = {}
   ): Promise<StoredSession> {
     const session = await this.tokenManager.getSession();
-    return this.refreshSessionIfNeeded(session, options);
+    const backendSession = await this.ensureBackendSession(session);
+    return this.refreshSessionIfNeeded(backendSession, options);
+  }
+
+  private async ensureBackendSession(session: StoredSession): Promise<StoredSession> {
+    if (session.status !== 'valid') {
+      return session;
+    }
+
+    if (this.isBackendAccessToken(session.token)) {
+      return session;
+    }
+
+    this.log('exchanging Neon JWT for backend extension session');
+    this.logAuth('exchanging Neon JWT for backend extension session');
+
+    const exchanged = await this.exchangeTokenWithBackend(session.token);
+    if (!exchanged?.access_token || !exchanged.refresh_token) {
+      await this.tokenManager.clearToken();
+      return { status: 'missing' };
+    }
+
+    const mergedUserMetadata = {
+      ...session.userMetadata,
+      id: exchanged.user?.id || (session.userMetadata.id as string) || '',
+      email: exchanged.user?.email || (session.userMetadata.email as string) || '',
+      role: exchanged.user?.role || (session.userMetadata.role as string) || 'authenticated',
+      provider: 'vertex-swarm-backend',
+    };
+
+    await this.tokenManager.setToken(
+      exchanged.access_token,
+      mergedUserMetadata,
+      exchanged.refresh_token
+    );
+
+    const restored = await this.tokenManager.getSession();
+    if (restored.status === 'valid') {
+      this.logAuth('backend session exchange completed successfully');
+      this.postAuthenticated(restored);
+    }
+
+    return restored;
+  }
+
+  private async exchangeTokenWithBackend(neonToken: string): Promise<BackendAuthTokenResponse | undefined> {
+    try {
+      const response = await fetch(`${this.backendUrl}/api/v1/auth/exchange`, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${neonToken}`,
+          Accept: 'application/json',
+        },
+      });
+
+      if (!response.ok) {
+        const errorText = await response.text();
+        this.log(`backend auth exchange failed status=${response.status} body=${errorText.slice(0, 300)}`);
+        this.logAuth(`backend auth exchange failed status=${response.status}`);
+        return undefined;
+      }
+
+      return await response.json() as BackendAuthTokenResponse;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      this.log(`backend auth exchange error: ${message}`);
+      this.logAuth(`backend auth exchange error: ${message}`);
+      return undefined;
+    }
   }
 
   private async refreshSessionIfNeeded(
     session: StoredSession,
-    options: { forceRefresh?: boolean } = {}
+    options: { forceRefresh?: boolean; previousToken?: string } = {}
   ): Promise<StoredSession> {
     if (!this.shouldRefreshSession(session, options.forceRefresh)) {
+      const reason = this.getRefreshSkipReason(session, options.forceRefresh) ?? 'not eligible for refresh';
+      this.log(`silent refresh skipped (${reason})`);
+      this.logAuth(`silent refresh skipped (${reason})`);
       return session;
     }
 
@@ -396,6 +503,7 @@ export class VertexSwarmChatRuntime {
 
     if (this.refreshInFlight) {
       this.log(`joining in-flight silent refresh (${reason})`);
+      this.logAuth(`joining in-flight silent refresh (${reason})`);
       return this.refreshInFlight;
     }
 
@@ -411,7 +519,11 @@ export class VertexSwarmChatRuntime {
     session: StoredSession,
     forceRefresh = false
   ): session is Exclude<StoredSession, { status: 'missing' }> {
-    if (session.status === 'missing' || !session.sessionToken) {
+    if (session.status === 'missing' || !session.refreshToken) {
+      return false;
+    }
+
+    if (!this.isBackendRefreshToken(session.refreshToken)) {
       return false;
     }
 
@@ -425,12 +537,45 @@ export class VertexSwarmChatRuntime {
     );
   }
 
+  private getRefreshSkipReason(
+    session: StoredSession,
+    forceRefresh = false
+  ): string | null {
+    if (session.status === 'missing') {
+      return 'no stored session';
+    }
+
+    if (!session.refreshToken) {
+      return `refresh token missing (status=${session.status})`;
+    }
+
+    if (!this.isBackendRefreshToken(session.refreshToken)) {
+      return 'stored refresh token is not a backend token';
+    }
+
+    if (forceRefresh || session.status === 'expired') {
+      return null;
+    }
+
+    if (typeof session.expiresAt !== 'number') {
+      return 'session expiration unavailable';
+    }
+
+    const remainingMs = session.expiresAt - Date.now();
+    if (remainingMs > VertexSwarmChatRuntime.TOKEN_REFRESH_BUFFER_MS) {
+      const remainingMinutes = Math.max(0, Math.floor(remainingMs / (60 * 1000)));
+      return `token still healthy for ${remainingMinutes}m`;
+    }
+
+    return null;
+  }
+
   private async refreshSessionWithStoredToken(
     session: Exclude<StoredSession, { status: 'missing' }>,
     reason: string
   ): Promise<StoredSession> {
-    const refreshedSession = await this.silentRefreshWithSessionToken(
-      session.sessionToken ?? '',
+    const refreshedSession = await this.silentRefreshWithBackendToken(
+      session.refreshToken ?? '',
       session.userMetadata,
       reason
     );
@@ -441,52 +586,155 @@ export class VertexSwarmChatRuntime {
     return refreshedSession;
   }
 
-  private async silentRefreshFromStorage(reason: string): Promise<string | undefined> {
-    const session = await this.tokenManager.getSession();
-    if (session.status === 'missing' || !session.sessionToken) {
+  private async silentRefreshFromStorage(
+    reason: string,
+    previousToken?: string
+  ): Promise<string | undefined> {
+    const storedSession = await this.tokenManager.getSession();
+    const session = await this.ensureBackendSession(storedSession);
+
+    if (session.status === 'valid' && previousToken && session.token !== previousToken) {
+      this.log(`using newer stored access token without backend refresh (${reason})`);
+      this.logAuth(`using newer stored access token without backend refresh (${reason})`);
+      return session.token;
+    }
+
+    if (session.status === 'missing' || !session.refreshToken) {
       this.log(`forced silent refresh unavailable (${reason})`);
+      this.logAuth(`forced silent refresh unavailable (${reason})`);
       return undefined;
     }
 
     const refreshedSession = await this.refreshSessionIfNeeded(session, { forceRefresh: true });
     if (refreshedSession.status !== 'valid') {
       this.log(`forced silent refresh failed (${reason}) status=${refreshedSession.status}`);
+      this.logAuth(`forced silent refresh failed (${reason}) status=${refreshedSession.status}`);
       return undefined;
     }
 
     if (session.status === 'valid' && refreshedSession.token === session.token) {
+      if (!previousToken || refreshedSession.token !== previousToken) {
+        this.log(`using stored access token after refresh attempt (${reason})`);
+        this.logAuth(`using stored access token after refresh attempt (${reason})`);
+        return refreshedSession.token;
+      }
+
       this.log(`forced silent refresh produced no replacement JWT (${reason})`);
+      this.logAuth(`forced silent refresh produced no replacement JWT (${reason})`);
       return undefined;
     }
 
     return refreshedSession.token;
   }
 
-  private async silentRefreshWithSessionToken(
-    sessionToken: string,
+  private async silentRefreshWithBackendToken(
+    refreshToken: string,
     userMetadata: Record<string, unknown>,
     reason: string
   ): Promise<StoredSession | undefined> {
-    this.log(`attempting silent JWT refresh from stored Neon session (${reason})`);
-    const refreshedToken = await this.oauthHandler.refreshAccessToken(sessionToken);
-    if (!refreshedToken) {
-      this.log(`silent refresh did not return a replacement JWT (${reason})`);
+    this.log(`attempting backend access token refresh (${reason})`);
+    this.logAuth(`attempting backend access token refresh (${reason})`);
+
+    const refreshedToken = await this.requestBackendTokenRefresh(refreshToken);
+    if (!refreshedToken?.access_token || !refreshedToken.refresh_token) {
+      this.log(`backend refresh did not return replacement tokens (${reason})`);
+      this.logAuth(`backend refresh did not return replacement tokens (${reason})`);
       return undefined;
     }
 
+    const mergedUserMetadata = {
+      ...userMetadata,
+      id: refreshedToken.user?.id || (userMetadata.id as string) || '',
+      email: refreshedToken.user?.email || (userMetadata.email as string) || '',
+      role: refreshedToken.user?.role || (userMetadata.role as string) || 'authenticated',
+      provider: 'vertex-swarm-backend',
+    };
+
     await this.tokenManager.setToken(
-      refreshedToken.token,
-      userMetadata,
-      refreshedToken.sessionToken ?? sessionToken
+      refreshedToken.access_token,
+      mergedUserMetadata,
+      refreshedToken.refresh_token
     );
 
     const refreshedSession = await this.tokenManager.getSession();
-    this.log(`silent refresh completed status=${refreshedSession.status} (${reason})`);
+    this.log(`backend refresh completed status=${refreshedSession.status} (${reason})`);
+    this.logAuth(`backend refresh completed status=${refreshedSession.status} (${reason})`);
     if (refreshedSession.status === 'valid') {
       this.postAuthenticated(refreshedSession);
     }
 
     return refreshedSession;
+  }
+
+  private async requestBackendTokenRefresh(refreshToken: string): Promise<BackendAuthTokenResponse | undefined> {
+    try {
+      const response = await fetch(`${this.backendUrl}/api/v1/auth/refresh`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Accept: 'application/json',
+        },
+        body: JSON.stringify({ refresh_token: refreshToken }),
+      });
+
+      if (!response.ok) {
+        const errorText = await response.text();
+        this.log(`backend refresh request failed status=${response.status} body=${errorText.slice(0, 300)}`);
+        this.logAuth(`backend refresh request failed status=${response.status}`);
+        return undefined;
+      }
+
+      return await response.json() as BackendAuthTokenResponse;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      this.log(`backend refresh request error: ${message}`);
+      this.logAuth(`backend refresh request error: ${message}`);
+      return undefined;
+    }
+  }
+
+  private isBackendAccessToken(token: string): boolean {
+    try {
+      const payloadPart = token.split('.')[1];
+      if (!payloadPart) {
+        return false;
+      }
+
+      const normalized = payloadPart.replace(/-/g, '+').replace(/_/g, '/');
+      const padded = normalized + '='.repeat((4 - (normalized.length % 4)) % 4);
+      const payload = JSON.parse(
+        Buffer.from(padded, 'base64').toString('utf-8')
+      ) as { iss?: string; token_type?: string };
+
+      return (
+        payload.iss === VertexSwarmChatRuntime.APP_TOKEN_ISSUER
+        && payload.token_type === 'access'
+      );
+    } catch {
+      return false;
+    }
+  }
+
+  private isBackendRefreshToken(token: string): boolean {
+    try {
+      const payloadPart = token.split('.')[1];
+      if (!payloadPart) {
+        return false;
+      }
+
+      const normalized = payloadPart.replace(/-/g, '+').replace(/_/g, '/');
+      const padded = normalized + '='.repeat((4 - (normalized.length % 4)) % 4);
+      const payload = JSON.parse(
+        Buffer.from(padded, 'base64').toString('utf-8')
+      ) as { iss?: string; token_type?: string };
+
+      return (
+        payload.iss === VertexSwarmChatRuntime.APP_TOKEN_ISSUER
+        && payload.token_type === 'refresh'
+      );
+    } catch {
+      return false;
+    }
   }
 
   private async createChat(token: string, ideContextEnabled: boolean): Promise<string | null> {
@@ -619,7 +867,10 @@ export class VertexSwarmChatRuntime {
 
     if (response.status === 401) {
       if (allowRetry) {
-        const refreshedToken = await this.silentRefreshFromStorage(`backend 401 for ${path}`);
+        const refreshedToken = await this.silentRefreshFromStorage(
+          `backend 401 for ${path}`,
+          token
+        );
         if (refreshedToken) {
           this.log(`retrying request after backend 401 path=${path}`);
           return this.requestJson<T>(path, refreshedToken, init, false);
@@ -657,6 +908,8 @@ export class VertexSwarmChatRuntime {
 
     this.authResetInProgress = true;
     this.log('backend returned 401; clearing local session');
+    this.logAuth('backend returned 401; clearing local session');
+    await this.revokeStoredRefreshToken('forced unauthorized logout');
     await this.tokenManager.clearToken();
     try {
       await vscode.window.showWarningMessage(
@@ -667,6 +920,43 @@ export class VertexSwarmChatRuntime {
       );
     } finally {
       this.authResetInProgress = false;
+    }
+  }
+
+  private async revokeStoredRefreshToken(reason: string): Promise<void> {
+    try {
+      const session = await this.tokenManager.getSession();
+      if (session.status === 'missing' || !session.refreshToken) {
+        return;
+      }
+
+      if (!this.isBackendRefreshToken(session.refreshToken)) {
+        return;
+      }
+
+      const abortController = new AbortController();
+      const timeoutHandle = setTimeout(() => abortController.abort(), 5000);
+
+      try {
+        const response = await fetch(`${this.backendUrl}/api/v1/auth/logout`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Accept: 'application/json',
+          },
+          body: JSON.stringify({ refresh_token: session.refreshToken }),
+          signal: abortController.signal,
+        });
+
+        this.log(`backend refresh revoke during ${reason} status=${response.status}`);
+        this.logAuth(`backend refresh revoke during ${reason} status=${response.status}`);
+      } finally {
+        clearTimeout(timeoutHandle);
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      this.log(`backend refresh revoke failed during ${reason}: ${message}`);
+      this.logAuth(`backend refresh revoke failed during ${reason}: ${message}`);
     }
   }
 

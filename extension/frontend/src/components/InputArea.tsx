@@ -372,7 +372,7 @@ const InputArea: React.FC<Props> = ({
             {isRunning && isHoveringStop ? (
               <Square className="h-4 w-4" />
             ) : (
-              <ArrowUp className="h-4 w-4" />
+              <ArrowUp className="h-4 w-4 text-[#ff4d4d]" />
             )}
           </button>
         </div>

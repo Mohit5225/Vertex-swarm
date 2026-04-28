@@ -19,13 +19,15 @@ export class VertexSwarmSidebarProvider implements vscode.WebviewViewProvider {
     tokenManager: TokenManager,
     oauthHandler: OAuthHandler,
     context: vscode.ExtensionContext,
-    outputChannel: vscode.OutputChannel
+    outputChannel: vscode.OutputChannel,
+    authLog?: (message: string) => void
   ) {
     this.runtime = new VertexSwarmChatRuntime({
       tokenManager,
       oauthHandler,
       context,
       outputChannel,
+      authLog,
       postMessage: (message: object) => this.post(message),
     });
     this.context = context;
@@ -92,8 +94,8 @@ export class VertexSwarmSidebarProvider implements vscode.WebviewViewProvider {
 
       if (scriptMatch) scriptFile = scriptMatch[1];
       if (styleMatch) styleFile = styleMatch[1];
-    } catch {
-      console.warn('VertexSwarm: could not read frontend dist/index.html — using defaults');
+    } catch (err: any) {
+      console.warn('VertexSwarm: could not read frontend dist/index.html — using defaults', err);
     }
 
     const scriptUri = webview.asWebviewUri(vscode.Uri.joinPath(assetsPath, scriptFile));
@@ -135,6 +137,14 @@ export class VertexSwarmSidebarProvider implements vscode.WebviewViewProvider {
   <title>Vertex Swarm</title>
 </head>
 <body style="margin:0;padding:0;overflow:hidden;background:transparent;">
+  <script nonce="${nonce}">
+    window.addEventListener('error', (event) => {
+      try {
+        const vscode = acquireVsCodeApi();
+        vscode.postMessage({ type: 'log', payload: 'WEBVIEW ERROR: ' + event.message + ' at ' + event.filename + ':' + event.lineno });
+      } catch(e) {}
+    });
+  </script>
   <div id="root" style="width:100%;height:100%;"></div>
   <script nonce="${nonce}" type="module" src="${scriptUri}"></script>
 </body>

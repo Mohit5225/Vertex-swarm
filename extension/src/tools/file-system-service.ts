@@ -24,7 +24,7 @@ const SEARCH_TEXT_LIMITS = {
   maxResults: 20,
   maxSearchCalls: 2,
   timeoutMs: 20_000,
-  maxSynonymTerms: 4,
+  maxSynonymTerms: 2,
 };
 
 const RG_MAX_BUFFER_BYTES = 2_000_000;
@@ -97,11 +97,13 @@ interface NormalizedTextEdit {
 
 interface SearchTextRequest {
   query: string;
+  variants?: string[];  // LLM-provided semantic synonyms (e.g., ["max_tokens", "token_budget"])
   filePattern: string;
   includeGlobs: string[];
   excludeGlobs: string[];
   caseSensitive: boolean;
   exactMatch: boolean;
+  useRegex: boolean;  // Enable regex pattern matching instead of fixed-string search
   maxResults: number;
   maxSearchCalls: number;
   timeoutMs: number;
@@ -131,6 +133,20 @@ interface RipgrepCommandResolution {
 interface RipgrepResolutionAttempt {
   resolution?: RipgrepCommandResolution;
   reason?: string;
+}
+
+interface SearchPassMetadata {
+  passNumber: number;
+  query: string;
+  resultCount: number;
+  timeElapsedMs: number;
+  namingForms?: string[];  // The naming convention variants tried (e.g., ["max_tokens", "maxTokens", "max tokens"])
+  timedOut?: boolean;
+}
+
+interface SearchPassResult {
+  metadata: SearchPassMetadata;
+  hits: string[];
 }
 
 type ExecFileError = NodeJS.ErrnoException & {
@@ -233,15 +249,36 @@ export class FileSystemService {
         files = [...fallbackFiles.values()];
       }
 
-      const queryNeedle = searchRequest.caseSensitive
-        ? searchRequest.query
-        : searchRequest.query.toLowerCase();
-      const grepResults: string[] = [];
+      const semanticVariants = this.buildSemanticVariants(searchRequest);
+      const searchPasses = semanticVariants.map((semanticVariant, index) => {
+        const namingForms = searchRequest.variantsEnabled
+          ? this.generateSearchVariants(semanticVariant)
+          : [semanticVariant];
+        const queryNeedles = searchRequest.caseSensitive
+          ? namingForms
+          : namingForms.map((term) => term.toLowerCase());
+
+        return {
+          metadata: {
+            passNumber: index + 1,
+            query: semanticVariant,
+            resultCount: 0,
+            timeElapsedMs: 0,
+            namingForms,
+          } as SearchPassMetadata,
+          queryNeedles,
+          hits: [] as string[],
+        };
+      });
+
       const timeoutAt = startMs + searchRequest.timeoutMs;
       let timedOut = false;
+      let totalCollectedHits = 0;
+      const globallySeenHits = new Set<string>();
+      const searchStart = Date.now();
 
       for (const fileUri of files) {
-        if (grepResults.length >= searchRequest.maxResults) {
+        if (totalCollectedHits >= searchRequest.maxResults) {
           break;
         }
         if (Date.now() >= timeoutAt) {
@@ -276,14 +313,26 @@ export class FileSystemService {
           }
 
           const lineText = lines[lineIndex];
-          if (!this.containsSearchQuery(lineText, queryNeedle, searchRequest.caseSensitive)) {
-            continue;
+          const relativePath = vscode.workspace.asRelativePath(fileUri, false);
+          const formattedHit = `${relativePath}:${lineIndex + 1}: ${lineText.trim().slice(0, 150)}`;
+          const dedupeKey = `${relativePath}:${lineIndex + 1}`;
+
+          for (const searchPass of searchPasses) {
+            if (!this.containsAnySearchQuery(lineText, searchPass.queryNeedles, searchRequest.caseSensitive)) {
+              continue;
+            }
+
+            if (globallySeenHits.has(dedupeKey)) {
+              break;
+            }
+
+            globallySeenHits.add(dedupeKey);
+            searchPass.hits.push(formattedHit);
+            totalCollectedHits += 1;
+            break;
           }
 
-          const relativePath = vscode.workspace.asRelativePath(fileUri, false);
-          grepResults.push(`${relativePath}:${lineIndex + 1}: ${lineText.trim().slice(0, 150)}`);
-
-          if (grepResults.length >= searchRequest.maxResults) {
+          if (totalCollectedHits >= searchRequest.maxResults) {
             break;
           }
         }
@@ -293,11 +342,34 @@ export class FileSystemService {
         }
       }
 
-      const content = grepResults.length > 0
-        ? grepResults.join('\n')
-        : `No results for "${searchRequest.query}"${timedOut ? ` (timeout ${searchRequest.timeoutMs}ms)` : ''}`;
+      const timeElapsed = Date.now() - searchStart;
+      const passResults: SearchPassResult[] = searchPasses.map((searchPass) => {
+        const metadata: SearchPassMetadata = {
+          ...searchPass.metadata,
+          resultCount: searchPass.hits.length,
+          timeElapsedMs: timeElapsed,
+          timedOut: timedOut || undefined,
+        };
+        return {
+          metadata,
+          hits: searchPass.hits,
+        };
+      });
 
-      return this.successResult('grep_workspace', context, content, startMs);
+      const content = this.formatSearchContent(
+        searchRequest,
+        semanticVariants,
+        passResults,
+        timedOut
+      );
+
+      const resultObj = this.successResult('grep_workspace', context, content, startMs);
+      resultObj.data = {
+        pass_count: passResults.length,
+        passes: passResults.map((passResult) => passResult.metadata),
+      };
+
+      return resultObj;
     } catch (error) {
       return this.errorResult(
         'grep_workspace',
@@ -336,49 +408,91 @@ export class FileSystemService {
           reason: resolutionAttempt.reason ?? 'No usable ripgrep binary was found.',
         };
       }
+      const resolution = resolutionAttempt.resolution;
 
-      const rgArgs = this.buildRipgrepArgs(searchRequest, includePatterns);
-      const execResult = await this.execFileCommand(
-        resolutionAttempt.resolution.command,
-        rgArgs,
-        workspaceFolders[0].uri.fsPath,
-        searchRequest.timeoutMs
+      const semanticVariants = this.buildSemanticVariants(searchRequest);
+      const timeoutAt = startMs + searchRequest.timeoutMs;
+
+      // Execute all ripgrep passes in parallel
+      const passPromises = semanticVariants.map((semanticVariant, index) =>
+        this.executeRipgrepPass(
+          semanticVariant,
+          index + 1,  // passNumber
+          searchRequest,
+          includePatterns,
+          resolution,
+          workspaceFolders[0].uri.fsPath,
+          timeoutAt
+        )
       );
 
-      const errorCode = this.execErrorCode(execResult.error);
-      if (execResult.timedOut) {
-        return {
-          status: 'fallback',
-          reason: `Ripgrep timed out after ${searchRequest.timeoutMs}ms.`,
-        };
+      const passResults = await Promise.allSettled(passPromises);
+
+      for (const passResult of passResults) {
+        if (passResult.status === 'rejected') {
+          const reason = passResult.reason instanceof Error
+            ? passResult.reason.message
+            : String(passResult.reason);
+          return {
+            status: 'fallback',
+            reason: `Ripgrep pass failed: ${reason}`,
+          };
+        }
       }
 
-      if (typeof errorCode === 'string' && errorCode === 'ENOENT') {
-        return {
-          status: 'fallback',
-          reason: 'Ripgrep binary was not found on PATH.',
-        };
+      // Collect results and metadata
+      const orderedPassResults: SearchPassResult[] = [];
+      for (const result of passResults) {
+        if (result.status !== 'fulfilled') {
+          continue;
+        }
+
+        orderedPassResults.push(result.value);
       }
 
-      if (errorCode !== undefined && errorCode !== 1) {
-        const stderrPreview = execResult.stderr.trim();
-        return {
-          status: 'fallback',
-          reason: stderrPreview
-            ? `Ripgrep failed: ${stderrPreview}`
-            : `Ripgrep failed with code ${String(errorCode)}.`,
-        };
+      orderedPassResults.sort((left, right) => left.metadata.passNumber - right.metadata.passNumber);
+
+      const dedupedLocationKeys = new Set<string>();
+      let remainingHits = searchRequest.maxResults;
+      for (const passResult of orderedPassResults) {
+        const dedupedHits: string[] = [];
+        for (const hit of passResult.hits) {
+          if (remainingHits <= 0) {
+            break;
+          }
+
+          const locationKey = hit.substring(0, hit.lastIndexOf(':'));
+          if (dedupedLocationKeys.has(locationKey)) {
+            continue;
+          }
+
+          dedupedLocationKeys.add(locationKey);
+          dedupedHits.push(hit);
+          remainingHits -= 1;
+        }
+
+        passResult.hits = dedupedHits;
+        passResult.metadata.resultCount = dedupedHits.length;
       }
 
-      const hitLines = this.parseRipgrepOutput(execResult.stdout, searchRequest.maxResults);
-      const content = hitLines.length > 0
-        ? hitLines.join('\n')
-        : `No results for "${searchRequest.query}"`;
+      const timedOut = orderedPassResults.some((passResult) => Boolean(passResult.metadata.timedOut));
+      const content = this.formatSearchContent(
+        searchRequest,
+        semanticVariants,
+        orderedPassResults,
+        timedOut
+      );
+
+      const resultObj = this.successResult('grep_workspace', context, content, startMs);
+      resultObj.data = {
+        pass_count: orderedPassResults.length,
+        passes: orderedPassResults.map((passResult) => passResult.metadata),
+      };
 
       return {
         status: 'success',
-        backendUsed: resolutionAttempt.resolution.backendUsed,
-        result: this.successResult('grep_workspace', context, content, startMs),
+        backendUsed: resolution.backendUsed,
+        result: resultObj,
       };
     } catch (error) {
       return {
@@ -388,7 +502,93 @@ export class FileSystemService {
     }
   }
 
-  private buildRipgrepArgs(searchRequest: SearchTextRequest, includePatterns: string[]): string[] {
+  private async executeRipgrepPass(
+    semanticVariant: string,
+    passNumber: number,
+    searchRequest: SearchTextRequest,
+    includePatterns: string[],
+    resolution: RipgrepCommandResolution,
+    workspaceRootPath: string,
+    timeoutAt: number
+  ): Promise<{ metadata: SearchPassMetadata; hits: string[] }> {
+    const passStart = Date.now();
+
+    // Check if already timed out
+    if (Date.now() >= timeoutAt) {
+      return {
+        metadata: {
+          passNumber,
+          query: semanticVariant,
+          resultCount: 0,
+          timeElapsedMs: 0,
+          timedOut: true,
+        },
+        hits: [],
+      };
+    }
+
+    const namingVariants = searchRequest.variantsEnabled
+      ? this.generateSearchVariants(semanticVariant)
+      : [semanticVariant];
+
+    const rgArgs = this.buildRipgrepArgs(searchRequest, includePatterns, namingVariants);
+
+    const remainingTime = Math.max(1000, timeoutAt - Date.now());
+    const execResult = await this.execFileCommand(
+      resolution.command,
+      rgArgs,
+      workspaceRootPath,
+      remainingTime
+    );
+
+    const timeElapsed = Date.now() - passStart;
+    const errorCode = this.execErrorCode(execResult.error);
+
+    if (execResult.timedOut) {
+      return {
+        metadata: {
+          passNumber,
+          query: semanticVariant,
+          resultCount: 0,
+          timeElapsedMs: timeElapsed,
+          timedOut: true,
+        },
+        hits: [],
+      };
+    }
+
+    if (typeof errorCode === 'string' && errorCode === 'ENOENT') {
+      throw new Error('Ripgrep binary was not found on PATH.');
+    }
+
+    if (errorCode !== undefined && errorCode !== 1) {
+      const stderrPreview = execResult.stderr.trim();
+      throw new Error(
+        stderrPreview
+          ? `Ripgrep failed: ${stderrPreview}`
+          : `Ripgrep failed with code ${String(errorCode)}.`
+      );
+    }
+
+    const hits = this.parseRipgrepOutput(execResult.stdout, searchRequest.maxResults);
+
+    return {
+      metadata: {
+        passNumber,
+        query: semanticVariant,
+        resultCount: hits.length,
+        timeElapsedMs: timeElapsed,
+        namingForms: namingVariants,
+      },
+      hits,
+    };
+  }
+
+  private buildRipgrepArgs(
+    searchRequest: SearchTextRequest,
+    includePatterns: string[],
+    queryTerms?: string[]
+  ): string[] {
     const args = [
       '--no-heading',
       '--line-number',
@@ -402,7 +602,10 @@ export class FileSystemService {
       args.push('--ignore-case');
     }
 
-    args.push('--fixed-strings');
+    // Disable --fixed-strings when regex mode is enabled
+    if (!searchRequest.useRegex) {
+      args.push('--fixed-strings');
+    }
 
     for (const includePattern of includePatterns) {
       if (includePattern && includePattern !== '**/*') {
@@ -414,7 +617,13 @@ export class FileSystemService {
       args.push('--glob', `!${excludeGlob}`);
     }
 
-    args.push(searchRequest.query);
+    const terms = queryTerms && queryTerms.length > 0
+      ? queryTerms
+      : [searchRequest.query];
+    for (const term of terms) {
+      args.push('-e', term);
+    }
+
     args.push('.');
     return args;
   }
@@ -540,6 +749,52 @@ export class FileSystemService {
     }
 
     return error.code;
+  }
+
+  private generateSearchVariants(baseQuery: string): string[] {
+    // Generate naming convention variants: snake_case ↔ camelCase ↔ space-separated
+    // Input: "northstar" or "north_star" or "north star"
+    // Output: all 3 forms
+    const variants: string[] = [];
+    const seen = new Set<string>();
+    
+    // Add original
+    if (!seen.has(baseQuery.toLowerCase())) {
+      variants.push(baseQuery);
+      seen.add(baseQuery.toLowerCase());
+    }
+
+    // Convert to snake_case
+    const snakeCase = baseQuery
+      .replace(/([a-z])([A-Z])/g, '$1_$2')  // camelCase to snake_case
+      .replace(/\s+/g, '_')  // spaces to underscores
+      .toLowerCase();
+    if (snakeCase !== baseQuery && !seen.has(snakeCase)) {
+      variants.push(snakeCase);
+      seen.add(snakeCase);
+    }
+
+    // Convert to camelCase
+    const camelCase = baseQuery
+      .split(/[_\s]+/)
+      .map((part, i) => i === 0 ? part.toLowerCase() : part.charAt(0).toUpperCase() + part.slice(1).toLowerCase())
+      .join('');
+    if (camelCase !== baseQuery && !seen.has(camelCase.toLowerCase())) {
+      variants.push(camelCase);
+      seen.add(camelCase.toLowerCase());
+    }
+
+    // Convert to space-separated
+    const spaceSeparated = baseQuery
+      .replace(/([a-z])([A-Z])/g, '$1 $2')  // camelCase to space
+      .replace(/_/g, ' ')  // underscores to spaces
+      .toLowerCase();
+    if (spaceSeparated !== baseQuery && !seen.has(spaceSeparated.toLowerCase())) {
+      variants.push(spaceSeparated);
+      seen.add(spaceSeparated.toLowerCase());
+    }
+
+    return variants;
   }
 
   private parseRipgrepOutput(stdout: string, maxResults: number): string[] {
@@ -677,6 +932,7 @@ export class FileSystemService {
           const searchRequest = this.parseSearchTextPayload(request.payload);
           const searchExecution = await this.grep_workspace(searchRequest, context);
           const result = searchExecution.toolResult;
+          const existingData = this.optionalObjectArg(result.data) ?? {};
           return this.cacheWorkspaceResult(
             request.requestId,
             this.withToolName(result, 'workspace_ops', {
@@ -684,6 +940,7 @@ export class FileSystemService {
               action: request.action,
               summary: `Searched for "${searchRequest.query}" in ${searchRequest.filePattern}.`,
               data: {
+                ...existingData,
                 backendUsed: searchExecution.backendUsed,
                 fallbackReason: searchExecution.fallbackReason ?? null,
                 query: searchRequest.query,
@@ -1256,12 +1513,14 @@ export class FileSystemService {
       throw new Error('search_text query cannot be empty.');
     }
 
+    const variants = this.optionalStringArrayField(payload, 'variants');
     const filePattern = this.optionalStringField(payload, 'filePattern')?.trim() || '**/*';
     const includeGlobs = this.optionalStringArrayField(payload, 'includeGlobs') ?? [];
     const excludeGlobs = this.optionalStringArrayField(payload, 'excludeGlobs')
       ?? [...DEFAULT_SEARCH_EXCLUDE_GLOBS];
     const caseSensitive = this.optionalBooleanField(payload, 'caseSensitive') ?? false;
     const exactMatch = this.optionalBooleanField(payload, 'exactMatch') ?? false;
+    const useRegex = this.optionalBooleanField(payload, 'useRegex') ?? false;
     const requestedVariantsEnabled = this.optionalBooleanField(payload, 'variantsEnabled');
     const variantsEnabled = exactMatch ? false : (requestedVariantsEnabled ?? true);
     const maxResults = this.clampPositiveInteger(
@@ -1288,11 +1547,13 @@ export class FileSystemService {
 
     return {
       query,
+      variants,
       filePattern,
       includeGlobs,
       excludeGlobs,
       caseSensitive,
       exactMatch,
+      useRegex,
       maxResults,
       maxSearchCalls,
       timeoutMs,
@@ -1312,12 +1573,105 @@ export class FileSystemService {
     return boundedMinimum > maxValue ? maxValue : boundedMinimum;
   }
 
+  private buildSemanticVariants(searchRequest: SearchTextRequest): string[] {
+    const query = searchRequest.query.trim();
+    const semanticVariants: string[] = [query];
+    if (!searchRequest.variantsEnabled) {
+      return semanticVariants;
+    }
+
+    const seen = new Set<string>([query.toLowerCase()]);
+    for (const rawVariant of searchRequest.variants ?? []) {
+      const variant = rawVariant.trim();
+      if (!variant) {
+        continue;
+      }
+
+      const normalizedVariant = variant.toLowerCase();
+      if (seen.has(normalizedVariant)) {
+        continue;
+      }
+
+      semanticVariants.push(variant);
+      seen.add(normalizedVariant);
+
+      if (semanticVariants.length >= searchRequest.maxSynonymTerms + 1) {
+        break;
+      }
+    }
+
+    return semanticVariants;
+  }
+
+  private formatSearchContent(
+    searchRequest: SearchTextRequest,
+    semanticVariants: string[],
+    passResults: SearchPassResult[],
+    timedOut: boolean
+  ): string {
+    const hasAnyHits = passResults.some((passResult) => passResult.hits.length > 0);
+    if (!hasAnyHits) {
+      return `No results for "${semanticVariants.join(', ')}"${timedOut ? ` (timeout ${searchRequest.timeoutMs}ms)` : ''}`;
+    }
+
+    if (!searchRequest.includeSearchPlan) {
+      const compactHits: string[] = [];
+      for (const passResult of passResults) {
+        for (const hit of passResult.hits) {
+          compactHits.push(hit);
+        }
+      }
+      return compactHits.join('\n');
+    }
+
+    const outputLines: string[] = [];
+    outputLines.push(`SEARCH_QUERY: ${searchRequest.query}`);
+    outputLines.push(`PRIMARY_VARIANT: ${semanticVariants[0] ?? searchRequest.query}`);
+    outputLines.push(`SEMANTIC_VARIANTS: ${semanticVariants.join(' | ')}`);
+    outputLines.push('READ_POLICY: prioritize PRIMARY_VARIANT hits first; use SYNONYM hits only when PRIMARY_VARIANT is empty or insufficient.');
+
+    for (const passResult of passResults) {
+      const passType = passResult.metadata.passNumber === 1 ? 'PRIMARY' : 'SYNONYM';
+      outputLines.push('');
+      outputLines.push(`${passType} query="${passResult.metadata.query}" hits=${passResult.hits.length}`);
+
+      if (passResult.metadata.namingForms && passResult.metadata.namingForms.length > 0) {
+        outputLines.push(`naming_forms=${passResult.metadata.namingForms.join(' | ')}`);
+      }
+
+      for (const hit of passResult.hits) {
+        outputLines.push(hit);
+      }
+    }
+
+    if (timedOut) {
+      outputLines.push('');
+      outputLines.push(`TIMEOUT: search stopped after ${searchRequest.timeoutMs}ms.`);
+    }
+
+    return outputLines.join('\n');
+  }
+
   private containsSearchQuery(lineText: string, queryNeedle: string, caseSensitive: boolean): boolean {
     if (caseSensitive) {
       return lineText.includes(queryNeedle);
     }
 
     return lineText.toLowerCase().includes(queryNeedle);
+  }
+
+  private containsAnySearchQuery(
+    lineText: string,
+    queryNeedles: string[],
+    caseSensitive: boolean
+  ): boolean {
+    for (const queryNeedle of queryNeedles) {
+      if (this.containsSearchQuery(lineText, queryNeedle, caseSensitive)) {
+        return true;
+      }
+    }
+
+    return false;
   }
 
   private toBraceGlob(patterns: string[]): string | undefined {
