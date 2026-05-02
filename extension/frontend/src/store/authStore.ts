@@ -1,6 +1,7 @@
 import { create } from 'zustand'
 import { getVsCodeApi } from '../lib/vscode'
 import { useChatStore } from './chatStore'
+import { normalizeSessionEvent } from '../lib/sessionEvents'
 
 interface User {
   id: string
@@ -102,7 +103,9 @@ const handleExtensionMessage = (event: MessageEvent) => {
       break
 
     case 'event':
-      useChatStore.getState().addEvent(message.payload)
+      useChatStore
+        .getState()
+        .addEvent(normalizeSessionEvent(message.payload))
       break
 
     case 'chat-list': {
@@ -130,29 +133,21 @@ const handleExtensionMessage = (event: MessageEvent) => {
           role: string
           content: string
           createdAt: string
-          events?: Array<{
-            id: string
-            type: 'thinking' | 'code' | 'output' | 'error' | 'status' | 'tool_call' | 'tool_result'
-            content: string
-            timestamp: number
-            metadata?: Record<string, unknown>
-          }>
+          events?: Array<Record<string, unknown>>
         }) => ({
           id: message.messageId,
-          type: message.role === 'assistant' ? 'agent' : 'user',
+          type:
+            message.role === 'assistant'
+              ? 'agent'
+              : message.role === 'system'
+                ? 'system'
+                : 'user',
           content: message.content,
           events: (Array.isArray(message.events) ? message.events : []).map((event, index) => ({
-            id:
-              typeof event.id === 'string' && event.id
-                ? event.id
-                : `${message.messageId}-evt-${index}`,
-            type: event.type,
-            content: event.content,
-            timestamp:
-              typeof event.timestamp === 'number'
-                ? event.timestamp
-                : Date.parse(message.createdAt) || Date.now(),
-            metadata: event.metadata,
+            ...normalizeSessionEvent(event, {
+              id: `${message.messageId}-evt-${index}`,
+              timestamp: Date.parse(message.createdAt) || Date.now(),
+            }),
           })),
           timestamp: Date.parse(message.createdAt) || Date.now(),
         })),

@@ -10,7 +10,7 @@ export interface SessionEvent {
 
 export interface ChatMessage {
   id: string
-  type: 'user' | 'agent'
+  type: 'user' | 'agent' | 'system'
   content: string
   events?: SessionEvent[]
   timestamp: number
@@ -64,6 +64,13 @@ const appendEventContent = (currentContent: string, event: SessionEvent): string
   if (appendMode === 'token') {
     return `${currentContent}${event.content}`
   }
+    // treat thinking like output: allow 'block' and default concatenation
+  if (event.type === 'thinking') {
+    if (appendMode === 'block') {
+      return currentContent ? `${currentContent}\n\n${event.content}` : event.content;
+    }
+    return `${currentContent}${event.content}`;
+  }
 
   if (event.type === 'output') {
     if (appendMode === 'block') {
@@ -93,7 +100,20 @@ const shouldMergeEvent = (previous: SessionEvent | undefined, next: SessionEvent
     return false
   }
 
-  return previous.type === 'thinking' && next.type === 'thinking'
+  if (previous.type === 'thinking' && next.type === 'thinking') {
+    return true
+  }
+
+  if (previous.type === 'output' && next.type === 'output') {
+    return true
+  }
+
+  // Also handle raw backend type 'token' which Stream client normalizes to 'output'
+  if (previous.type === 'token' as any && next.type === 'token' as any) {
+     return true;
+  }
+
+  return false
 }
 
 const normalizeEventComparisonContent = (content?: string) =>

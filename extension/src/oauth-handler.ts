@@ -288,13 +288,7 @@ export class OAuthHandler {
   function addGooglePromptIfVisible(urlString){
     try {
       var url = new URL(urlString);
-      if (url.hostname === 'accounts.google.com') {
-        url.searchParams.set('prompt', 'select_account');
-        return url.toString();
-      }
-
-      // Neon Auth usually returns its own provider-init URL first. Do not wrap
-      // that URL in Google's AccountChooser; Google rejects that as malformed.
+      url.searchParams.set('prompt', 'select_account');
       return url.toString();
     } catch (e) {
       log('Could not rewrite OAuth URL: ' + (e && e.message ? e.message : String(e)));
@@ -400,15 +394,7 @@ export class OAuthHandler {
 <div class="card">
   <h1>Vertex Swarm</h1>
   <p class="sub">Confirm the account before VS Code stores the session.</p>
-  <div id="status" class="info">Checking selected account...</div>
-  <div id="account">
-    <div class="sub" style="margin:0 0 4px">Continue as</div>
-    <div id="account-email"></div>
-    <div class="actions">
-      <button id="continue-btn" type="button">Continue</button>
-      <button id="different-btn" type="button">Use different account</button>
-    </div>
-  </div>
+  <div id="status" class="info">Finalizing sign-in...</div>
   <div id="log"></div>
 </div>
 <script>
@@ -418,10 +404,6 @@ export class OAuthHandler {
   var UPSTREAM_ERROR = ${UPSTREAM_ERROR};
   var elStatus = document.getElementById('status');
   var elLog    = document.getElementById('log');
-  var elAccount = document.getElementById('account');
-  var elAccountEmail = document.getElementById('account-email');
-  var elContinue = document.getElementById('continue-btn');
-  var elDifferent = document.getElementById('different-btn');
   var pendingResult = null;
 
   function log(msg){ elLog.textContent += msg + '\\n'; }
@@ -603,13 +585,13 @@ export class OAuthHandler {
         throw new Error('Neon Auth returned a non-JWT token for backend auth');
       }
 
-      var accountLabel = user.email || user.name || user.id || 'selected Google account';
       pendingResult = {token: token, user: user, refreshToken: sessionToken};
       log('JWT: ' + token.substring(0, 16) + '...');
       log('User: ' + JSON.stringify(user));
-      elAccountEmail.textContent = accountLabel;
-      elAccount.style.display = 'block';
-      setStatus('Confirm this is the account you want to use.', 'ok');
+      
+      setStatus('Signing in to VS Code...', 'info');
+      await reportSuccess(token, user, sessionToken);
+      setStatus('Signed in successfully! You can close this tab and return to VS Code.', 'ok');
 
     } catch(err) {
       var msg = err instanceof Error ? err.message : String(err);
@@ -617,30 +599,6 @@ export class OAuthHandler {
       showFailure(msg);
     }
   }
-
-  elContinue.addEventListener('click', async function(){
-    if (!pendingResult) {
-      return;
-    }
-
-    try {
-      elContinue.disabled = true;
-      elDifferent.disabled = true;
-      setStatus('Signing in to VS Code...', 'info');
-      await reportSuccess(pendingResult.token, pendingResult.user, pendingResult.refreshToken);
-      setStatus('Signed in. You can close this tab and return to VS Code.', 'ok');
-    } catch (err) {
-      var msg = err instanceof Error ? err.message : String(err);
-      elContinue.disabled = false;
-      elDifferent.disabled = false;
-      log('FAILED: ' + msg);
-      setStatus(msg, 'err');
-    }
-  });
-
-  elDifferent.addEventListener('click', function(){
-    window.location.replace('/start');
-  });
 
   void finalize();
 })();

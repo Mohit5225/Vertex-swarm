@@ -15,7 +15,7 @@ context_logger = logging.getLogger("app.context")
 
 _glm_rate_limiter = asyncio.Semaphore(1)
 _glm_last_call_time = 0.0
-_glm_rate_limit_seconds = 50
+_glm_rate_limit_seconds = 70
 _context_log_sequence = 0
 
 
@@ -766,6 +766,11 @@ async def stream_chat_events(
     pending_tool_calls: Dict[int, Dict[str, Any]] = {}
     saw_structured_tool_call = False
     chunk_count = 0
+    text_fragment_count = 0
+    thinking_fragment_count = 0
+    tool_call_fragment_count = 0
+    total_text_chars = 0
+    stream_started_at = time.monotonic()
 
     try:
         async for chunk in stream:
@@ -778,13 +783,29 @@ async def stream_chat_events(
             if not delta:
                 continue
 
-            for reasoning_text in _extract_reasoning_fragments(delta):
+            reasoning_fragments = _extract_reasoning_fragments(delta)
+            if reasoning_fragments:
+                logger.info(
+                    "LLM stream chunk #%d reasoning_fragments=%d reasoning_chars=%d",
+                    chunk_count,
+                    len(reasoning_fragments),
+                    sum(len(fragment) for fragment in reasoning_fragments),
+                )
+
+            for reasoning_text in reasoning_fragments:
                 if reasoning_text.strip():
+                    thinking_fragment_count += 1
                     yield {"type": "thinking", "content": reasoning_text}
 
             tool_call_fragments = _extract_tool_call_fragments(delta)
             if tool_call_fragments:
                 saw_structured_tool_call = True
+                tool_call_fragment_count += len(tool_call_fragments)
+                logger.info(
+                    "LLM stream chunk #%d tool_call_fragments=%d",
+                    chunk_count,
+                    len(tool_call_fragments),
+                )
                 for fragment in tool_call_fragments:
                     _merge_tool_call_fragment(pending_tool_calls, fragment)
                 continue
@@ -792,8 +813,21 @@ async def stream_chat_events(
             if saw_structured_tool_call:
                 continue
 
-            for token in _extract_text_fragments(delta):
+            text_fragments = _extract_text_fragments(delta)
+            if text_fragments:
+                fragment_chars = sum(len(fragment) for fragment in text_fragments)
+                total_text_chars += fragment_chars
+                logger.info(
+                    "LLM stream chunk #%d text_fragments=%d text_chars=%d cumulative_text_chars=%d",
+                    chunk_count,
+                    len(text_fragments),
+                    fragment_chars,
+                    total_text_chars,
+                )
+
+            for token in text_fragments:
                 if token:
+                    text_fragment_count += 1
                     yield {"type": "token", "content": token}
     except Exception as stream_exc:
         logger.error(
@@ -803,6 +837,17 @@ async def stream_chat_events(
             exc_info=True,
         )
         raise
+
+    logger.info(
+        "LLM stream summary chunks=%d text_fragments=%d thinking_fragments=%d tool_call_fragments=%d total_text_chars=%d elapsed_seconds=%.3f saw_structured_tool_call=%s",
+        chunk_count,
+        text_fragment_count,
+        thinking_fragment_count,
+        tool_call_fragment_count,
+        total_text_chars,
+        time.monotonic() - stream_started_at,
+        saw_structured_tool_call,
+    )
 
     if saw_structured_tool_call:
         for event in _finalize_pending_tool_calls(pending_tool_calls):
