@@ -35,6 +35,8 @@ export interface RequestContextFile {
 export interface RequestContextTerminal {
   name: string;
   processId?: number | null;
+  shell?: string;
+  cwd?: string;
 }
 
 export interface RequestContextPayload {

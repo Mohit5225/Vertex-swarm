@@ -110,6 +110,74 @@ WORKSPACE_OPS_TOOL_SPEC: dict[str, Any] = {
     },
 }
 
+TERMINAL_OPS_TOOL_SPEC: dict[str, Any] = {
+    "type": "function",
+    "function": {
+        "name": "terminal_ops",
+        "description": "Execute terminal commands, manage processes, and get diagnostics.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "action": {
+                    "type": "string",
+                    "enum": [
+                        "run_command",
+                        "send_input",
+                        "get_output",
+                        "get_diagnostics",
+                        "get_state",
+                        "list_processes",
+                        "kill_process",
+                        "list_terminals",
+                        "new_terminal",
+                        "kill_terminal",
+                    ],
+                    "description": "The terminal action to perform.",
+                },
+                "command": {
+                    "type": "string",
+                    "description": "The shell command to run. Required for run_command.",
+                },
+                "cwd": {
+                    "type": "string",
+                    "description": "The directory to run the command in. Defaults to workspace root. Required for run_command.",
+                },
+                "mode": {
+                    "type": "string",
+                    "enum": ["blocking", "background"],
+                    "description": "Whether to wait for completion (blocking) or run in background (returns PID). Defaults to blocking.",
+                },
+                "terminal_name": {
+                    "type": "string",
+                    "description": "Name of the terminal instance to use. Defaults to 'Vertex Worker'.",
+                },
+                "timeout_seconds": {
+                    "type": "integer",
+                    "description": "Max time to wait for a blocking command. Default 360.",
+                },
+                "input_text": {
+                    "type": "string",
+                    "description": "Raw text or control character (e.g. \\u0003 for Ctrl+C) to send. Required for send_input.",
+                },
+                "pid": {
+                    "type": "integer",
+                    "description": "Process ID to target. Required for kill_process.",
+                },
+                "wait_for_pattern": {
+                    "type": "string",
+                    "description": "Optional regex pattern. If provided, the command will run in the background, and the tool will pause until this pattern is detected in the output stream before returning.",
+                },
+                "since_command_id": {
+                    "type": "string",
+                    "description": "Filter output to only show text emitted after this command ID in get_output.",
+                },
+            },
+            "required": ["action"],
+            "additionalProperties": False,
+        },
+    },
+}
+
 
 def wrap_tool_response_codeforge(
     tool_name: str,
@@ -170,7 +238,14 @@ Rules you always follow:
 - When given code, scan it for correctness, security issues, and efficiency first
 - Reference specific line numbers and function names when discussing code
 - Prefer showing working code over describing it
-- NEVER return an empty or silent response. Every turn must contain a tool invocation to continue the workflow, OR your reasoning and next steps, OR the final answer."""
+- NEVER return an empty or silent response. Every turn must contain a tool invocation to continue the workflow, OR your reasoning and next steps, OR the final answer.
+
+TERMINAL OPERATIONS & VERIFICATION PROTOCOL:
+1. RELENTLESS VERIFICATION: After every file edit (edit_file), you MUST verify your changes by running the appropriate build or test command (e.g., 'npm test', 'pytest', 'go test', 'cargo build').
+2. NON-INTERACTIVE FLAGS: Always use non-interactive flags (e.g., '-y', '--yes', '--non-interactive') to prevent the terminal from hanging on confirmation prompts.
+3. LOCATION INJECTION: Every terminal_ops call accepts a 'cwd' parameter. The system automatically performs a 'cd' to this directory before your command. You can rely on this for monorepo operations.
+4. BACKGROUND PROCESSES: For dev servers or watchers, use mode='background'. Use 'wait_for_pattern' to pause execution until a specific regex matches the output stream before moving to the next step. Use 'list_processes' to track their PIDs and 'kill_process' to stop them surgically.
+5. SURGICAL DIAGNOSTICS: If a build fails, use 'get_diagnostics' to pull high-fidelity errors from the VS Code Problems panel instead of just reading raw shell output."""
 
 
 def _build_system_prompt(workspace_skeleton: str | None = None) -> str:
@@ -492,7 +567,7 @@ def _build_request_payload(
         "model": _model_name(model),
         "messages": full_messages,
         "stream": True,
-        "tools": [WORKSPACE_OPS_TOOL_SPEC],
+        "tools": [WORKSPACE_OPS_TOOL_SPEC, TERMINAL_OPS_TOOL_SPEC],
         "tool_choice": "auto",
     }
 

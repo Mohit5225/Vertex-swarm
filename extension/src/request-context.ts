@@ -16,7 +16,10 @@ export interface RequestContextSnapshot {
   };
   activeTerminal?: {
     name: string;
+    shell?: string;
+    cwd?: string;
   };
+  os?: string;
   workspaceFolders?: string[];
 }
 
@@ -34,6 +37,8 @@ export function createRequestContext(
   const activeTerminal = snapshot.activeTerminal
     ? {
         name: snapshot.activeTerminal.name,
+        shell: snapshot.activeTerminal.shell,
+        cwd: snapshot.activeTerminal.cwd,
       }
     : undefined;
 
@@ -46,6 +51,7 @@ export function createRequestContext(
   return {
     ...(activeFile ? { activeFile } : {}),
     ...(activeTerminal ? { activeTerminal } : {}),
+    ...(snapshot.os ? { os: snapshot.os } : {}),
     ...(workspaceFolders && workspaceFolders.length > 0 ? { workspaceFolders } : {}),
   };
 }

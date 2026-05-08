@@ -4,7 +4,7 @@
   "description": "LLM-powered agent execution in VS Code",
   "version": "0.0.1",
   "engines": {
-    "vscode": "^1.85.0"
+    "vscode": "^1.93.0"
   },
   "categories": [
     "Other"
@@ -66,7 +66,7 @@
   },
   "devDependencies": {
     "@types/node": "^20.0.0",
-    "@types/vscode": "^1.85.0",
+    "@types/vscode": "^1.93.0",
     "@vscode/vsce": "^2.22.0",
     "typescript": "~5.3.3",
     "vite": "^8.0.8"

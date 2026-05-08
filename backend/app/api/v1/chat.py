@@ -47,7 +47,7 @@ async def _wait_for_tool_result(
     chat_id: str,
     message_id: str,
     tool_call_id: str,
-    timeout_seconds: int = 120,
+    timeout_seconds: int = 360,
 ) -> ToolResultSchema | None:
     stream_key = tool_result_stream_key(session_id, chat_id, message_id, tool_call_id)
     redis_client = await get_redis()
@@ -167,9 +167,21 @@ def _build_request_context_message(request_context: dict[str, Any] | None) -> st
         if isinstance(terminal_name, str) and terminal_name:
             lines.append(f"Active terminal: {terminal_name}")
 
+        shell = active_terminal.get("shell")
+        if isinstance(shell, str) and shell:
+            lines.append(f"Terminal shell: {shell}")
+
+        cwd = active_terminal.get("cwd")
+        if isinstance(cwd, str) and cwd:
+            lines.append(f"Terminal CWD: {cwd}")
+
         process_id = active_terminal.get("processId")
         if isinstance(process_id, int):
             lines.append(f"Terminal process id: {process_id}")
+
+    os_platform = request_context.get("os")
+    if isinstance(os_platform, str) and os_platform:
+        lines.append(f"Operating System: {os_platform}")
 
     workspace_folders = request_context.get("workspaceFolders")
     if isinstance(workspace_folders, list):

@@ -219,6 +219,8 @@ export class VertexSwarmChatParticipant {
     const terminalContext = activeTerminal
       ? {
           name: activeTerminal.name,
+          shell: (activeTerminal.creationOptions as vscode.TerminalOptions).shellPath,
+          cwd: activeTerminal.shellIntegration?.cwd?.fsPath,
         }
       : undefined;
 
@@ -229,6 +231,7 @@ export class VertexSwarmChatParticipant {
     return createRequestContext({
       ...(activeFile ? { activeFile } : {}),
       ...(terminalContext ? { activeTerminal: terminalContext } : {}),
+      os: process.platform,
       ...(workspaceFolders.length > 0 ? { workspaceFolders } : {}),
     });
   }

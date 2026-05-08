@@ -5,6 +5,7 @@ import { SSEStreamClient } from './sse-client/stream';
 import { FileSystemService } from './tools/file-system-service';
 import { ToolExecutor } from './tools/tool-executor';
 import { WorkspaceStore } from './workspace-store';
+import { TerminalService } from './tools/terminal-service';
 import type {
   WebviewToExtensionMessage,
   SessionEvent,
@@ -64,6 +65,7 @@ export class VertexSwarmChatRuntime {
   private readonly authLog?: (message: string) => void;
   private readonly postMessage: (message: object) => void;
   private readonly fileSystemService: FileSystemService;
+  private readonly terminalService: TerminalService;
   private readonly workspaceStore: WorkspaceStore;
   private readonly toolExecutor: ToolExecutor;
   private readonly processedToolCallIds = new Set<string>();
@@ -82,10 +84,15 @@ export class VertexSwarmChatRuntime {
     this.authLog = options.authLog;
     this.postMessage = options.postMessage;
     this.fileSystemService = new FileSystemService();
+    this.terminalService = new TerminalService(
+      (msg) => this.log(msg),
+      (event) => this.post({ type: 'event', payload: event })
+    );
     this.workspaceStore = new WorkspaceStore();
     this.context.subscriptions.push(this.workspaceStore);
     this.toolExecutor = new ToolExecutor(
       this.fileSystemService,
+      this.terminalService,
       this.backendUrl,
       (tokenOptions) => this.getValidToken(tokenOptions),
       (message: string) => this.log(message)

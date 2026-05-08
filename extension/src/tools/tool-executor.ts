@@ -1,9 +1,11 @@
 import type { FileSystemService } from './file-system-service';
 import type { ToolCallPayload, ToolContext, ToolResult } from '../types/index';
+import type { TerminalService } from './terminal-service';
 
 export class ToolExecutor {
   constructor(
     private readonly fileSystemService: FileSystemService,
+    private readonly terminalService: TerminalService,
     private readonly backendUrl: string,
     private readonly getAccessToken: (
       options?: { forceRefresh?: boolean; previousToken?: string }
@@ -25,7 +27,8 @@ export class ToolExecutor {
     let toolResult: ToolResult;
 
     try {
-      if (message.tool_name !== 'workspace_ops') {
+      const allowedTools = ['workspace_ops', 'terminal_ops'];
+      if (!allowedTools.includes(message.tool_name)) {
         const workspaceMeta = this.extractWorkspaceMeta(message.args);
         toolResult = {
           tool_name: message.tool_name,
@@ -36,11 +39,16 @@ export class ToolExecutor {
           request_id: workspaceMeta.request_id,
           action: workspaceMeta.action,
           status: 'error',
-          content: `Deprecated tool: ${message.tool_name}. Use workspace_ops instead.`,
+          content: `Deprecated tool: ${message.tool_name}. Use workspace_ops or terminal_ops instead.`,
           summary: `Deprecated tool: ${message.tool_name}.`,
           error_code: 'DEPRECATED_TOOL',
           execution_time_ms: 0,
         };
+      } else if (message.tool_name === 'terminal_ops') {
+        toolResult = await this.terminalService.execute(
+          message.args,
+          context
+        );
       } else {
         toolResult = await this.fileSystemService.workspace_ops(
           message.args,
