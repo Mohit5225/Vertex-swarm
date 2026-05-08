@@ -20,6 +20,7 @@ from app.db.redis_sessions import bootstrap_chat_session, build_chat_session_id
 from app.schemas.tool import ToolResultSchema
 from app.services.llm_service import stream_chat_events, wrap_tool_response_codeforge
 from app.services.tool_memory import build_tool_memory_from_trace_events, format_tool_memory_for_prompt
+from app.services.prompt_loader import build_injected_guidance, load_categories, SUPPORTED_CATEGORIES
 
 logger = logging.getLogger(__name__)
 
@@ -342,8 +343,12 @@ async def send_message(
 
     session_state = await retrieve_session_state(synthetic_session_id)
     existing_tool_memory = None
+    existing_active_categories: list[str] = []
     if session_state is not None:
         existing_tool_memory = session_state.persisted.working_memory.get("tool_memory")
+        raw_cats = session_state.persisted.working_memory.get("active_tool_categories", [])
+        if isinstance(raw_cats, list):
+            existing_active_categories = [c for c in raw_cats if isinstance(c, str)]
 
     logger.info(
         "message received user_id=%s chat_id=%s session_id=%s ide_context_enabled=%s",
@@ -396,6 +401,9 @@ async def send_message(
         llm_messages = [{"role": m.role, "content": m.content} for m in history]
         request_context_message = _build_request_context_message(req.request_context)
         tool_memory_message = format_tool_memory_for_prompt(existing_tool_memory)
+
+        # Build guidance from already-loaded categories for this session
+        active_tool_guidance: str | None = build_injected_guidance(existing_active_categories) or None
 
         system_context_messages: list[dict[str, str]] = []
         if request_context_message:
@@ -494,6 +502,7 @@ async def send_message(
                             "model": settings.llm_model,
                             "is_fallback": False,
                         },
+                        active_tool_guidance=active_tool_guidance,
                     )
                 except RateLimitError:
                     logger.warning(
@@ -520,6 +529,7 @@ async def send_message(
                             "model": settings.llm_fallback_model,
                             "is_fallback": True,
                         },
+                        active_tool_guidance=active_tool_guidance,
                     )
 
                 async for event in stream_iterator:
@@ -569,6 +579,74 @@ async def send_message(
 
                         if not isinstance(tool_args, dict):
                             tool_args = {}
+
+                        # ── load_tool_context interception ──────────────────────────
+                        # This tool is handled entirely on the backend.
+                        # No round-trip to the extension needed.
+                        if tool_name == "load_tool_context":
+                            requested = tool_args.get("categories", [])
+                            if not isinstance(requested, list):
+                                requested = []
+                            valid = [c for c in requested if c in SUPPORTED_CATEGORIES]
+
+                            # Load and persist new categories into session
+                            loaded_prose = load_categories(valid)
+                            newly_loaded = list(loaded_prose.keys())
+
+                            # Merge with already-active categories
+                            merged = list(dict.fromkeys(existing_active_categories + newly_loaded))
+                            existing_active_categories = merged
+                            active_tool_guidance = build_injected_guidance(merged) or None
+
+                            # Persist to Redis immediately so next turn auto-injects
+                            try:
+                                latest_state = await retrieve_session_state(synthetic_session_id)
+                                if latest_state is not None:
+                                    latest_state.persisted.working_memory["active_tool_categories"] = merged
+                                    await store_session_state(synthetic_session_id, latest_state)
+                            except Exception:
+                                logger.exception("Failed to persist active_tool_categories session_id=%s", synthetic_session_id)
+
+                            # Emit ephemeral UI notification
+                            if newly_loaded:
+                                label = ", ".join(c.replace("_", " ").title() for c in newly_loaded)
+                                yield emit_trace(
+                                    build_status_event(
+                                        f"Loaded {label} guidance",
+                                        "tool_context_loaded",
+                                    )
+                                )
+
+                            # Build a combined prose result to give to the LLM
+                            combined_prose = "\n\n---\n\n".join(loaded_prose.values())
+                            result_content = (
+                                f"Tool guidance loaded for: {', '.join(newly_loaded)}.\n\n{combined_prose}"
+                                if newly_loaded
+                                else f"No new categories loaded. Already active: {', '.join(existing_active_categories) or 'none'}."
+                            )
+
+                            llm_messages.append(
+                                _assistant_tool_call_message(
+                                    assistant_turn_content,
+                                    tool_name,
+                                    tool_call_id,
+                                    tool_args,
+                                )
+                            )
+                            llm_messages.append(
+                                {
+                                    "role": "tool",
+                                    "tool_call_id": tool_call_id,
+                                    "content": wrap_tool_response_codeforge(
+                                        tool_name="load_tool_context",
+                                        tool_status="success",
+                                        tool_content=result_content,
+                                    ),
+                                }
+                            )
+                            tool_call_requested = True
+                            break
+                        # ── end load_tool_context ───────────────────────────────────
 
                         tool_event = _build_event(
                             "tool_call",

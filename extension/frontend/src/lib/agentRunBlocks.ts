@@ -67,7 +67,11 @@ const HIDDEN_STATUS_PHASES = new Set([
   'resuming_after_tool',
   'assistant_output',
   'completed',
+  'tool_context_loaded',
 ])
+
+/** Phases that should trigger an ephemeral toast notification in the UI. */
+export const TOAST_STATUS_PHASES = new Set(['tool_context_loaded'])
 
 const asRecord = (value: unknown): UnknownRecord | undefined =>
   value && typeof value === 'object' && !Array.isArray(value)

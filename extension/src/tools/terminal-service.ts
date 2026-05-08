@@ -18,7 +18,7 @@ export class TerminalService {
   constructor(
     private readonly log: (message: string) => void,
     private readonly postEvent: (event: SessionEvent) => void
-  ) {}
+  ) { }
 
   /**
    * Execute a terminal operation
@@ -77,9 +77,9 @@ export class TerminalService {
     this.startHeartbeat(context.tool_call_id);
 
     if (terminal.shellIntegration) {
-      return await this.runViaShellIntegration(terminal, command, cwd, context, timeout_seconds, wait_for_pattern);
+      return await this.runViaShellIntegration(terminal, command, cwd, context, timeout_seconds, wait_for_pattern, mode);
     } else {
-      return await this.runViaFallback(command, cwd, context, timeout_seconds, wait_for_pattern);
+      return await this.runViaFallback(command, cwd, context, timeout_seconds, wait_for_pattern, mode);
     }
   }
 
@@ -92,17 +92,18 @@ export class TerminalService {
     cwd: string | undefined,
     context: any,
     timeout: number,
-    waitForPattern?: string
+    waitForPattern?: string,
+    mode?: string
   ): Promise<ToolResult> {
     if (cwd) {
       const shell = vscode.env.shell.toLowerCase();
       const isPowershell = shell.includes('pwsh') || shell.includes('powershell');
       const isCmd = shell.includes('cmd.exe');
       const cdCmd = isPowershell ? `Set-Location "${cwd}"` : isCmd ? `cd /d "${cwd}"` : `cd "${cwd}"`;
-      
+
       this.log(`Terminal: Injecting location: ${cdCmd}`);
       const cdExecution = terminal.shellIntegration!.executeCommand(cdCmd);
-      
+
       const cdExitCode = await new Promise<number | undefined>((resolve) => {
         const disposable = vscode.window.onDidEndTerminalShellExecution(event => {
           if (event.execution === cdExecution) {
@@ -128,13 +129,33 @@ export class TerminalService {
     }
 
     this.log(`Terminal: Running via Shell Integration: ${command}`);
-    
+
     // Stable API: executeCommand returns a TerminalShellExecution
     const execution = terminal.shellIntegration!.executeCommand(command);
     let output = '';
 
     const startTime = Date.now();
-    const timeoutPromise = new Promise<never>((_, reject) => 
+
+    if (mode === 'background' && !waitForPattern) {
+      // Fire and forget reading to drain stream
+      (async () => {
+        for await (const chunk of execution.read()) { }
+      })();
+      this.stopHeartbeat(context.tool_call_id);
+      return {
+        tool_name: 'terminal_ops',
+        tool_call_id: context.tool_call_id,
+        session_id: context.session_id,
+        chat_id: context.chat_id,
+        message_id: context.message_id,
+        status: 'success',
+        content: `Command started in background: ${command}`,
+        data: { exit_code: 0 },
+        execution_time_ms: Date.now() - startTime,
+      };
+    }
+
+    const timeoutPromise = new Promise<never>((_, reject) =>
       setTimeout(() => reject(new Error('Terminal command timed out')), timeout * 1000)
     );
 
@@ -149,7 +170,7 @@ export class TerminalService {
             return 0; // Return early with success status
           }
         }
-        
+
         // Wait for actual completion event to get exit code
         return new Promise<number | undefined>((resolve) => {
           const disposable = vscode.window.onDidEndTerminalShellExecution(event => {
@@ -189,18 +210,39 @@ export class TerminalService {
     cwd: string | undefined,
     context: any,
     timeout: number,
-    waitForPattern?: string
+    waitForPattern?: string,
+    mode?: string
   ): Promise<ToolResult> {
     this.log(`Terminal: Running via Fallback (child_process): ${command}`);
     const startTime = Date.now();
 
     return new Promise((resolve, reject) => {
-      const proc = cp.spawn(command, { 
-        shell: true, 
-        cwd, 
+      const proc = cp.spawn(command, {
+        shell: true,
+        cwd,
         detached: true,
-        stdio: ['ignore', 'pipe', 'pipe'] 
+        stdio: ['ignore', 'pipe', 'pipe']
       });
+
+      if (proc.pid) {
+        this.backgroundProcesses.set(proc.pid, proc);
+      }
+
+      if (mode === 'background' && !waitForPattern) {
+        this.stopHeartbeat(context.tool_call_id);
+        resolve({
+          tool_name: 'terminal_ops',
+          tool_call_id: context.tool_call_id,
+          session_id: context.session_id,
+          chat_id: context.chat_id,
+          message_id: context.message_id,
+          status: 'success',
+          content: `Background process started with PID ${proc.pid}`,
+          data: { exit_code: 0, pid: proc.pid },
+          execution_time_ms: Date.now() - startTime,
+        });
+        return;
+      }
 
       let output = '';
       const timer = setTimeout(() => {

@@ -5,21 +5,23 @@ import MessageRenderer from './MessageRenderer'
 import InputArea from './InputArea'
 import ConfirmDialog from './ConfirmDialog'
 import { getVsCodeApi } from '../lib/vscode'
-import { ArrowLeft, History, LogOut, RefreshCw, Settings } from 'lucide-react'
+import { ArrowLeft, History, LogOut, RefreshCw, Settings, Package } from 'lucide-react'
 import { describeStreamState } from '../lib/trace'
+import { TOAST_STATUS_PHASES } from '../lib/agentRunBlocks'
+import { getEventPhase } from '../lib/sessionEvents'
 
 const starterPrompts = [
   {
-    label: 'Review auth',
-    prompt: 'Review the auth lifecycle and call out the biggest risks.',
+    label: 'Scaffold project',
+    prompt: 'Create a new project structure with a basic Express server and React frontend.',
   },
   {
-    label: 'Improve UX',
-    prompt: 'Inspect the workspace and propose a better agent UX.',
+    label: 'Find & fix bugs',
+    prompt: 'Scan the currently open file for any bugs or anti-patterns and propose fixes.',
   },
   {
-    label: 'Trace frontend',
-    prompt: 'Trace the frontend state flow and find the bugs.',
+    label: 'Explain architecture',
+    prompt: 'Analyze the workspace and explain how the core components interact.',
   },
 ]
 
@@ -60,6 +62,8 @@ const ChatPanel: React.FC = () => {
   const [showLogoutConfirm, setShowLogoutConfirm] = useState(false)
   const [showSessionPanel, setShowSessionPanel] = useState(false)
   const [showHistoryPanel, setShowHistoryPanel] = useState(false)
+  const [toolToast, setToolToast] = useState<string | null>(null)
+  const toolToastTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const messagesEndRef = useRef<HTMLDivElement>(null)
   const sessionPanelRef = useRef<HTMLDivElement>(null)
   const historyPanelRef = useRef<HTMLDivElement>(null)
@@ -107,6 +111,26 @@ const ChatPanel: React.FC = () => {
 
   useEffect(() => {
     getVsCodeApi()?.postMessage({ type: 'load-chat-list' })
+  }, [])
+
+  // Watch for tool_context_loaded status events and show ephemeral toast
+  useEffect(() => {
+    const lastAgentMsg = [...messages].reverse().find((m) => m.type === 'agent')
+    if (!lastAgentMsg?.events?.length) return
+    const latestEvent = lastAgentMsg.events[lastAgentMsg.events.length - 1]
+    if (!latestEvent) return
+    const phase = getEventPhase(latestEvent)
+    if (phase && TOAST_STATUS_PHASES.has(phase) && latestEvent.content) {
+      setToolToast(String(latestEvent.content))
+      if (toolToastTimerRef.current) clearTimeout(toolToastTimerRef.current)
+      toolToastTimerRef.current = setTimeout(() => setToolToast(null), 3500)
+    }
+  }, [messages])
+
+  useEffect(() => {
+    return () => {
+      if (toolToastTimerRef.current) clearTimeout(toolToastTimerRef.current)
+    }
   }, [])
 
   useEffect(() => {
@@ -193,6 +217,17 @@ const ChatPanel: React.FC = () => {
 
   return (
     <>
+      {/* Ephemeral tool-context toast */}
+      {toolToast && (
+        <div
+          className="pointer-events-none fixed bottom-[4.5rem] right-3 z-50 flex items-center gap-1.5 rounded-full border border-[#8bd7ff]/20 bg-[#0d1827]/80 px-3 py-1.5 text-[11px] font-medium text-[#8bd7ff]/70 shadow-lg backdrop-blur-md animate-fade-up"
+          aria-live="polite"
+        >
+          <Package className="h-3 w-3 shrink-0" />
+          <span>{toolToast}</span>
+        </div>
+      )}
+
       <div className="flex h-full min-h-0 flex-col overflow-hidden">
         <div className="relative border-b chat-divider px-2 pb-2 pt-3">
           <p className="text-[11px] font-semibold uppercase tracking-[0.22em] text-[#8ea0c0]">
@@ -216,13 +251,12 @@ const ChatPanel: React.FC = () => {
               <div className="min-w-0">
                 <div className="flex items-center gap-2">
                   <span
-                    className={`h-2 w-2 shrink-0 rounded-full ${
-                      isStreaming
+                    className={`h-2 w-2 shrink-0 rounded-full ${isStreaming
                         ? 'bg-[#48d2b4]'
                         : messages.length > 0
                           ? 'bg-[#8bd7ff]'
                           : 'bg-[#7f91b4]'
-                    }`}
+                      }`}
                   />
                   <h2
                     className="truncate text-[1.08rem] font-semibold tracking-[-0.01em] text-[#f4f7ff]"
@@ -324,13 +358,11 @@ const ChatPanel: React.FC = () => {
                         type="button"
                         onClick={() => handleOpenChat(chat.chatId)}
                         disabled={isStreaming}
-                        className={`w-full rounded-[16px] border px-3 py-3 text-left transition ${
-                          isActiveChat
+                        className={`w-full rounded-[16px] border px-3 py-3 text-left transition ${isActiveChat
                             ? 'border-[#8bd7ff]/30 bg-[#8bd7ff]/10'
                             : 'border-white/6 bg-white/[0.03] hover:bg-white/[0.06]'
-                        } ${
-                          isStreaming ? 'cursor-not-allowed opacity-60' : ''
-                        }`}
+                          } ${isStreaming ? 'cursor-not-allowed opacity-60' : ''
+                          }`}
                       >
                         <div className="truncate text-sm font-medium text-[#f3f6ff]">
                           {chatTitle}
