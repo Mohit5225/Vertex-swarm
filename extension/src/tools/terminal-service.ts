@@ -12,8 +12,8 @@ export class TerminalService {
   private readonly heartbeatFlushes = new Map<string, NodeJS.Timeout>();
   private readonly outputBuffers = new Map<string, string>();
 
-  // ANSI escape code regex for stripping colors/formatting
-  private readonly ansiRegex = /\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])/g;
+  // ANSI escape code regex for stripping colors/formatting and OSC sequences
+  private readonly ansiRegex = /\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~]|\][^\x07\x1B]*[\x07\x1B\\])/g;
 
   constructor(
     private readonly log: (message: string) => void,
@@ -28,30 +28,54 @@ export class TerminalService {
     const startTime = Date.now();
 
     try {
+      if (action === 'run_command') {
+        return await this.runCommand(args, context);
+      }
+
+      let result: any;
       switch (action) {
-        case 'run_command':
-          return await this.runCommand(args, context);
         case 'send_input':
-          return await this.sendInput(args);
+          result = await this.sendInput(args);
+          break;
         case 'get_output':
-          return this.getOutput(args);
+          result = this.getOutput(args);
+          break;
         case 'get_diagnostics':
-          return await this.getDiagnostics(args);
+          result = await this.getDiagnostics(args);
+          break;
         case 'get_state':
-          return this.getState();
+          result = this.getState();
+          break;
         case 'list_processes':
-          return this.listProcesses(context);
+          result = this.listProcesses(context);
+          break;
         case 'kill_process':
-          return this.killProcess(args);
+          result = this.killProcess(args);
+          break;
         case 'list_terminals':
-          return this.listTerminals();
+          result = this.listTerminals();
+          break;
         case 'new_terminal':
-          return await this.newTerminal(args);
+          result = await this.newTerminal(args);
+          break;
         case 'kill_terminal':
-          return this.killTerminal(args);
+          result = this.killTerminal(args);
+          break;
         default:
           throw new Error(`Unknown terminal action: ${action}`);
       }
+
+      return {
+        tool_name: 'terminal_ops',
+        tool_call_id: context.tool_call_id,
+        session_id: context.session_id,
+        chat_id: context.chat_id,
+        message_id: context.message_id,
+        status: result.status,
+        content: result.content,
+        data: result.data,
+        execution_time_ms: Date.now() - startTime,
+      };
     } catch (error) {
       return {
         tool_name: 'terminal_ops',
@@ -315,6 +339,14 @@ export class TerminalService {
       terminal = vscode.window.createTerminal(name);
       this.terminals.set(name, terminal);
       terminal.show(true);
+      
+      // Wait for shell integration to become available (up to 3 seconds)
+      for (let i = 0; i < 60; i++) {
+        if (terminal.shellIntegration) {
+          break;
+        }
+        await new Promise(resolve => setTimeout(resolve, 50));
+      }
     }
     return terminal;
   }

@@ -97,7 +97,7 @@ export type WebviewToExtensionMessage =
   | { type: 'load-chat-list' }
   | { type: 'start-stream'; payload: StreamStartPayload }
   | { type: 'open-chat'; payload: OpenChatPayload }
-  | { type: 'set-ide-cosntext'; payload: SetIdeContextPayload }
+  | { type: 'set-ide-context'; payload: SetIdeContextPayload }
   | { type: 'cancel-stream'; payload: StreamCancelPayload }
   | { type: 'tool_call'; payload: ToolCallPayload }
   | { type: 'reset-chat' }

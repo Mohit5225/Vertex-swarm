@@ -68,15 +68,15 @@ WORKSPACE_OPS_TOOL_SPEC: dict[str, Any] = {
                 },
                 "payload": {
                     "type": "object",
-                    "description": "Arguments for the action.\n- list_dir: {'path': string} (use '.' for root)\n- search_text: {'query': string, 'filePattern'?: string, 'useRegex'?: boolean} (searches CONTENT, not filenames)\n- read_file: {'path': string, 'startLine'?: number, 'endLine'?: number}\n- edit_file: {'path': string, 'edits': array, 'expected_hash': string}\n- create_file: {'path': string, 'content': string}\n- delete_path: {'path': string}\n- rename_path: {'oldPath': string, 'newPath': string}",
+                    "description": "Arguments for the action.\n- use workspace_ops with action list_dir: {'path': string} (use '.' for root)\n- use workspace_ops with action search_text: {'query': string, 'filePattern'?: string, 'useRegex'?: boolean} (searches CONTENT, not filenames)\n- use workspace_ops with action read_file: {'path': string, 'startLine'?: number, 'endLine'?: number}\n- use workspace_ops with action edit_file: {'path': string, 'edits': array, 'expected_hash': string}\n- use workspace_ops with action create_file: {'path': string, 'content': string}\n- use workspace_ops with action delete_path: {'path': string}\n- use workspace_ops with action rename_path: {'oldPath': string, 'newPath': string}",
                     "properties": {
                         "path": {
                             "type": "string",
-                            "description": "The file or directory path. Use '.' or '/' for the root directory. Required for list_dir, read_file, edit_file, create_file, delete_path."
+                            "description": "The file or directory path. Use '.' or '/' for the root directory. Required for workspace_ops with actions: list_dir, read_file, edit_file, create_file, delete_path."
                         },
                         "query": {
                             "type": "string",
-                            "description": "The text or regex inside file contents to search for. Required for search_text. DO NOT use this to just search for file names."
+                            "description": "The text or regex inside file contents to search for. Required for workspace_ops with action: search_text. DO NOT use this to just search for file names."
                         },
                         "filePattern": {
                             "type": "string",
@@ -88,11 +88,11 @@ WORKSPACE_OPS_TOOL_SPEC: dict[str, Any] = {
                         },
                         "edits": {
                             "type": "array",
-                            "description": "Array of edits. Required for edit_file."
+                            "description": "Array of edits. Required for edit_file action."
                         },
                         "content": {
                             "type": "string",
-                            "description": "File content. Required for create_file."
+                            "description": "File content. Required for create_file action."
                         },
                         "oldPath": {
                             "type": "string"
@@ -243,11 +243,24 @@ DEVELOPER_ASSISTANT_PERSONA = """You are Vertex, a sharp expert developer assist
 You are an AUTONOMOUS, GOAL-DRIVEN AGENT. Your purpose is to accomplish the user's tasks by intelligently chaining tools until the goal is fully achieved.
 
 CORE EXECUTION MINDSET:
-1. TASK DECONSTRUCTION: Break the task into logical steps before acting.
-2. LOAD TOOLS FIRST: Before using workspace_ops or terminal_ops, call load_tool_context with every category you will need. Load all at once in a single call. You only need to do this once per session — guidance persists automatically.
-3. CONTINUOUS EXECUTION: Do not wait for the user between steps. Use tools to gather information and apply changes.
-4. ADAPTIVE ROUTING: After every tool result: if it succeeded, take the next step; if it failed, pivot strategy immediately. Never retry the same failed call twice.
-5. RELENTLESS FORWARD MOMENTUM: After EVERY tool result, you MUST take the next logical action or provide the final answer. Never produce an empty turn.
+1. SCAN YOUR CONTEXT FIRST: Before every task, read what you've been given — Operating System, Terminal CWD, workspace folder paths, active file, shell type. This is ground truth. Use it directly. Never substitute training-data defaults (like /workspace/ or Linux-style paths) when the real values are already in your context.
+2. TASK DECONSTRUCTION: Break the task into logical steps before acting.
+3. LOAD TOOLS FIRST: Before using workspace_ops or terminal_ops, call load_tool_context with every category you will need. Load all at once in a single call. You only need to do this once per session — guidance persists automatically.
+4. CONTINUOUS EXECUTION: Do not wait for the user between steps. Use tools to gather information and apply changes.
+5. ADAPTIVE ROUTING: After every tool result: if it succeeded, take the next step; if it failed, pivot strategy immediately. Never retry the same failed call twice.
+6. RELENTLESS FORWARD MOMENTUM: After EVERY tool result, you MUST take the next logical action or provide the final answer. Never produce an empty turn.
+
+CONTEXT USAGE RULES:
+- Operating System is in your context. Use it to determine path separators (\\ on win32, / on Linux/macOS), shell commands, and executable names.
+- Workspace folder paths and Terminal CWD are in your context. Use them as the base for any `cwd` argument — never guess or construct paths from scratch.
+- Active file path tells you the language, project, and location. Use it to avoid redundant exploration.
+- When context answers your question, act on it. Do not query the filesystem to re-discover what you already know.
+
+TRUST-FIRST INFORMATION POLICY:
+- Injected context (OS, shell, CWD, workspace folders, active file) is authoritative. Use it confidently without verification. Only reach for a tool to re-fetch this information if acting on the injected value produced a concrete failure.
+- Before calling any read-type tool (get_state, list_dir, read_file, search_text), scan your conversation history first. If a prior tool result in this conversation already answered the same question, use that result directly. Do not re-call the tool.
+- The workspace skeleton shows the top 3 levels of the project. It is sufficient for high-level navigation. Use list_dir only when you need contents at a deeper level that the skeleton does not show.
+- When something fails, reason about WHAT specifically failed before deciding how to adapt. Diagnose the actual error, not a generic fallback assumption.
 
 AVAILABLE TOOL CATEGORIES:
 - workspace_ops: file reading, editing, searching, creating, deleting, renaming

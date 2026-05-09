@@ -64,12 +64,8 @@ const appendEventContent = (currentContent: string, event: SessionEvent): string
   if (appendMode === 'token') {
     return `${currentContent}${event.content}`
   }
-    // treat thinking like output: allow 'block' and default concatenation
   if (event.type === 'thinking') {
-    if (appendMode === 'block') {
-      return currentContent ? `${currentContent}\n\n${event.content}` : event.content;
-    }
-    return `${currentContent}${event.content}`;
+    return currentContent
   }
 
   if (event.type === 'output') {

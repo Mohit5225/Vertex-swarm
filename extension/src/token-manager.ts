@@ -97,14 +97,14 @@ export class TokenManager {
 
       let expiresAt = this.normalizeExpiryMs(userMetadata.expiresAt);
 
-      if (!Number.isFinite(expiresAt)) {
+      if (typeof expiresAt !== 'number' || !Number.isFinite(expiresAt)) {
         const jwtExpiryMs = this.getJwtExpiryMs(token);
         if (jwtExpiryMs) {
           expiresAt = jwtExpiryMs;
         }
       }
 
-      if (!Number.isFinite(expiresAt)) {
+      if (typeof expiresAt !== 'number' || !Number.isFinite(expiresAt)) {
         const now = Date.now();
         const upgradedUserMetadata = {
           ...userMetadata,

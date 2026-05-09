@@ -6,6 +6,7 @@ import { FileSystemService } from './tools/file-system-service';
 import { ToolExecutor } from './tools/tool-executor';
 import { WorkspaceStore } from './workspace-store';
 import { TerminalService } from './tools/terminal-service';
+import { createRequestContext } from './request-context';
 import type {
   WebviewToExtensionMessage,
   SessionEvent,
@@ -74,6 +75,7 @@ export class VertexSwarmChatRuntime {
   private currentChatId: string | undefined;
   private authResetInProgress = false;
   private refreshInFlight: Promise<StoredSession> | null = null;
+  private staticContext: { os: string; workspaceFolders: string[] } | null = null;
 
   constructor(options: VertexSwarmChatRuntimeOptions) {
     this.backendUrl = options.backendUrl || BACKEND_URL;
@@ -97,6 +99,16 @@ export class VertexSwarmChatRuntime {
       (tokenOptions) => this.getValidToken(tokenOptions),
       (message: string) => this.log(message)
     );
+  }
+
+  private getStaticContext(): { os: string; workspaceFolders: string[] } {
+    if (!this.staticContext) {
+      this.staticContext = {
+        os: process.platform,
+        workspaceFolders: vscode.workspace.workspaceFolders?.map(f => f.uri.fsPath) ?? [],
+      };
+    }
+    return this.staticContext;
   }
 
   public async handleWebviewMessage(message: WebviewToExtensionMessage): Promise<void> {
@@ -198,12 +210,38 @@ export class VertexSwarmChatRuntime {
             }
           );
 
+          const activeEditor = vscode.window.activeTextEditor;
+          const requestContext = createRequestContext({
+            ...this.getStaticContext(),
+            activeFile: activeEditor ? {
+              path: activeEditor.document.uri.fsPath,
+              languageId: activeEditor.document.languageId,
+              selection: (() => {
+                const sel = activeEditor.selection;
+                if (!sel || sel.isEmpty) { return undefined; }
+                const text = activeEditor.document.getText(sel);
+                if (!text?.trim()) { return undefined; }
+                return {
+                  startLine: sel.start.line + 1,
+                  startColumn: sel.start.character + 1,
+                  endLine: sel.end.line + 1,
+                  endColumn: sel.end.character + 1,
+                  text,
+                };
+              })(),
+            } : undefined,
+            activeTerminal: vscode.window.activeTerminal ? {
+              name: vscode.window.activeTerminal.name,
+              shell: vscode.env.shell,
+            } : undefined,
+          });
+
           await this.streamClient.openChatStream(
             chatId,
             payload.message,
             workspaceSkeleton,
             ideContextEnabled,
-            payload.requestContext
+            requestContext
           );
           if (this.currentChatId === chatId) {
             await this.sendChatList(token);

@@ -21,6 +21,7 @@ import {
 interface Props {
   block: ProcessBlock
   isStreamingMessage?: boolean
+  isActiveBlock?: boolean
 }
 
 type TimelineGroupItem = {
@@ -300,16 +301,21 @@ const GroupAccordion: React.FC<{
   )
 }
 
-const AgentTimeline: React.FC<Props> = ({ block, isStreamingMessage }) => {
+const AgentTimeline: React.FC<Props> = ({ block, isStreamingMessage, isActiveBlock = false }) => {
   const [expandedGroups, setExpandedGroups] = useState<Record<string, boolean>>({})
   const [expandedNodes, setExpandedNodes] = useState<Record<string, boolean>>({})
-  const [processExpanded, setProcessExpanded] = useState<boolean>(true)
   const items = useMemo(() => groupTimelineItems(block.steps), [block.steps])
   const scrollRef = useRef<HTMLDivElement>(null)
 
   const isRunning = block.steps.some(
     step => step.kind === 'node' && step.node.state === 'running'
-  ) || isStreamingMessage
+  ) || Boolean(isStreamingMessage && isActiveBlock)
+
+  const [processExpanded, setProcessExpanded] = useState<boolean>(isRunning)
+
+  useEffect(() => {
+    setProcessExpanded(isRunning)
+  }, [isRunning])
 
   useEffect(() => {
     if (processExpanded && isRunning && scrollRef.current) {
@@ -346,13 +352,13 @@ const AgentTimeline: React.FC<Props> = ({ block, isStreamingMessage }) => {
             if (item.kind === 'thinking') {
               const paragraphs = item.text.split(/\n{2,}/).filter(Boolean)
               return (
-                <div key={item.id} className="relative pt-2 pb-2 pl-3">
-                  <div className="absolute left-[1.1rem] top-4 bottom-0 w-px bg-[#313641]" />
-                  <div className="space-y-4">
+                <div key={item.id} className="relative py-1">
+                  <div className="absolute left-[9px] top-3 bottom-1 w-px bg-[#313641]" />
+                  <div className="space-y-3">
                     {paragraphs.map((paragraph, index) => (
                       <div key={index} className="relative pl-8">
-                        <div className="absolute left-[-0.22rem] top-[0.4rem] h-[0.45rem] w-[0.45rem] rounded-full bg-[#cccccc] ring-[3px] ring-[#1e1e1e]" />
-                        <div className="whitespace-pre-wrap text-[13px] leading-6 text-[#cccccc]">
+                        <div className="absolute left-[6px] top-[9px] z-10 h-[6px] w-[6px] rounded-full bg-[#8b9ebf] ring-[3px] ring-[#141b2a]" />
+                        <div className="whitespace-pre-wrap text-[13px] leading-6 text-[#a1b0cb]">
                           {paragraph}
                         </div>
                       </div>

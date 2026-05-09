@@ -129,7 +129,7 @@ const MessageRenderer: React.FC<Props> = ({ message }) => {
         >
           {shouldRenderProcess ? (
             <div className="space-y-4">
-              {blocks.map((block) => {
+              {blocks.map((block, index) => {
                 if (block.kind === 'narrative') {
                   return (
                     <div
@@ -163,11 +163,13 @@ const MessageRenderer: React.FC<Props> = ({ message }) => {
                 }
 
                 if (block.kind === 'process') {
+                  const isActiveBlock = index === blocks.length - 1
                   return (
                     <AgentTimeline
                       key={block.id}
                       block={block}
                       isStreamingMessage={isStreamingMessage}
+                      isActiveBlock={isActiveBlock}
                     />
                   )
                 }

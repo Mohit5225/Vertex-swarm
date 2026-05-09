@@ -10,14 +10,14 @@ Every call requires: action, request_id, mode, payload.
 Your mutations MUST include `expected_hash`. This is your contract with the file system.
 
 **STEP 1: READ THE FILE**
-- action: read_file, mode: preview, payload: { path }
+- action: read_file, request_id: "<unique-id-for-this-read>", mode: preview, payload: { path }
 - Extract and store `data.current_hash` from the response. Example: `"fnv1a-a1b2c3d4-24"`
 
 **STEP 2: PLAN YOUR EDIT**
 - Decide what to change. Keep the hash in memory.
 
 **STEP 3: APPLY THE EDIT**
-- action: edit_file, mode: apply
+- action: edit_file, request_id: "<unique-id-for-this-edit>", mode: apply
 - payload: { path, edits: [...], expected_hash: "<hash from Step 1>" }
 - NEVER omit expected_hash. NEVER fabricate a hash. NEVER reuse a stale hash.
 
@@ -33,17 +33,25 @@ Your mutations MUST include `expected_hash`. This is your contract with the file
 
 | Query Type | What To Do |
 |---|---|
-| User says "Read file X" | read_file directly — skip search |
-| Find function / class / symbol | search_text first (costs ~20 tokens), then read_file on the returned lines |
-| Broad feature exploration | list_dir → search_text with regex → read_file on key files |
-| Find all call sites | search_text(query='fn_name(', filePattern='**/*.py') |
+| User says "Read file X" | use `workspace_ops` with action: `read_file` directly — skip search |
+| Find function / class / symbol | use `workspace_ops` with action: `search_text` first (costs ~20 tokens), then action: `read_file` on the returned lines |
+| Broad feature exploration | use `workspace_ops` with action: `list_dir` → action: `search_text` with regex → action: `read_file` on key files |
+| Find all call sites | use `workspace_ops` with action: `search_text` and payload: `{query: 'fn_name(', filePattern: '**/*.py'}` |
 
 For any non-builtin symbol, ALWAYS provide variants:
-```
-search_text(query='validateConcurrencyGuard', variants=['validateConcurrencyGuard', 'validate_concurrency_guard', 'ConcurrencyGuard'])
+```json
+{
+  "action": "search_text",
+  "request_id": "<derived-from-action-and-query>",
+  "mode": "<preview-or-apply>",
+  "payload": {
+    "query": "validateConcurrencyGuard",
+    "variants": ["validateConcurrencyGuard", "validate_concurrency_guard", "ConcurrencyGuard"]
+  }
+}
 ```
 
-Token cost: search_text ~20 tokens, read_file ~70 tokens. Blind reads = 600 tokens. Always grep first.
+Token cost: `workspace_ops` action `search_text` ~20 tokens, action `read_file` ~70 tokens. Blind reads = 600 tokens. Always grep first.
 
 ---
 
@@ -70,5 +78,5 @@ The same logical change across retries must have the same request_id. This is yo
 
 - Never retry a failed action with the same arguments.
 - If HASH_CONFLICT: re-read, get new hash, retry.
-- If MISSING_CONCURRENCY_GUARD: find the hash from your last read_file response and include it.
+- If MISSING_CONCURRENCY_GUARD: find the hash from your last `read_file` action response and include it.
 - If a tool returns empty or unexpected data twice: stop and report to user. Do not loop.

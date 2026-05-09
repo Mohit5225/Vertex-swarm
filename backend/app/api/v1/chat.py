@@ -359,6 +359,7 @@ async def send_message(
     )
 
     async def event_stream():
+        nonlocal existing_active_categories
         async with AsyncSessionLocal() as db:
             logger.info(
                 "persisting user message user_id=%s chat_id=%s session_id=%s",
