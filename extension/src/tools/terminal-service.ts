@@ -25,23 +25,25 @@ export class TerminalService {
    */
   async execute(args: any, context: any): Promise<ToolResult> {
     const action = args.action || 'run_command';
+    const payload = args.payload || {};
     const startTime = Date.now();
 
     try {
       if (action === 'run_command') {
-        return await this.runCommand(args, context);
+        const mode = args.mode || 'blocking';
+        return await this.runCommand(payload, context, mode);
       }
 
       let result: any;
       switch (action) {
         case 'send_input':
-          result = await this.sendInput(args);
+          result = await this.sendInput(payload);
           break;
         case 'get_output':
-          result = this.getOutput(args);
+          result = this.getOutput(payload);
           break;
         case 'get_diagnostics':
-          result = await this.getDiagnostics(args);
+          result = await this.getDiagnostics(payload);
           break;
         case 'get_state':
           result = this.getState();
@@ -50,16 +52,16 @@ export class TerminalService {
           result = this.listProcesses(context);
           break;
         case 'kill_process':
-          result = this.killProcess(args);
+          result = this.killProcess(payload);
           break;
         case 'list_terminals':
           result = this.listTerminals();
           break;
         case 'new_terminal':
-          result = await this.newTerminal(args);
+          result = await this.newTerminal(payload);
           break;
         case 'kill_terminal':
-          result = this.killTerminal(args);
+          result = this.killTerminal(payload);
           break;
         default:
           throw new Error(`Unknown terminal action: ${action}`);
@@ -71,6 +73,8 @@ export class TerminalService {
         session_id: context.session_id,
         chat_id: context.chat_id,
         message_id: context.message_id,
+        request_id: args.request_id,
+        action: action,
         status: result.status,
         content: result.content,
         data: result.data,
@@ -93,9 +97,10 @@ export class TerminalService {
   /**
    * Run a command (Blocking or Background)
    */
-  private async runCommand(args: any, context: any): Promise<ToolResult> {
-    const { command, cwd, mode = 'blocking', timeout_seconds = 360, wait_for_pattern } = args;
-    const terminal = await this.getOrCreateTerminal(args.terminal_name || 'Vertex Worker');
+  private async runCommand(payload: any, context: any, topLevelMode?: string): Promise<ToolResult> {
+    const { command, cwd, mode: payloadMode, timeout_seconds = 360, wait_for_pattern } = payload;
+    const mode = topLevelMode || payloadMode || 'blocking';
+    const terminal = await this.getOrCreateTerminal(payload.terminal_name || 'Vertex Worker');
 
     // Start Heartbeat for live progress
     this.startHeartbeat(context.tool_call_id);
@@ -340,8 +345,8 @@ export class TerminalService {
       this.terminals.set(name, terminal);
       terminal.show(true);
       
-      // Wait for shell integration to become available (up to 3 seconds)
-      for (let i = 0; i < 60; i++) {
+      // Wait for shell integration to become available (up to 10 seconds)
+      for (let i = 0; i < 200; i++) {
         if (terminal.shellIntegration) {
           break;
         }
@@ -394,12 +399,12 @@ export class TerminalService {
 
   // --- Action Implementations ---
 
-  private async sendInput(args: any): Promise<ToolResult> {
-    const terminal = this.terminals.get(args.terminal_name || 'Vertex Worker');
+  private async sendInput(payload: any): Promise<ToolResult> {
+    const terminal = this.terminals.get(payload.terminal_name || 'Vertex Worker');
     if (!terminal) {
-      throw new Error(`Terminal not found: ${args.terminal_name}`);
+      throw new Error(`Terminal not found: ${payload.terminal_name}`);
     }
-    terminal.sendText(args.input_text || '', false);
+    terminal.sendText(payload.input_text || '', false);
     return { status: 'success', content: 'Input sent successfully' } as any;
   }
 
@@ -411,8 +416,8 @@ export class TerminalService {
     return { status: 'success', content: JSON.stringify(procs, null, 2) } as any;
   }
 
-  private killProcess(args: any): ToolResult {
-    const pid = args.pid;
+  private killProcess(payload: any): ToolResult {
+    const pid = payload.pid;
     if (!pid) throw new Error('pid is required');
     const proc = this.backgroundProcesses.get(pid);
     if (proc) {
@@ -458,14 +463,14 @@ export class TerminalService {
     return { status: 'success', content: JSON.stringify(names, null, 2) } as any;
   }
 
-  private async newTerminal(args: any): Promise<ToolResult> {
-    const name = args.terminal_name || `Terminal-${Date.now()}`;
+  private async newTerminal(payload: any): Promise<ToolResult> {
+    const name = payload.terminal_name || `Terminal-${Date.now()}`;
     await this.getOrCreateTerminal(name);
     return { status: 'success', content: `Created terminal ${name}` } as any;
   }
 
-  private killTerminal(args: any): ToolResult {
-    const name = args.terminal_name;
+  private killTerminal(payload: any): ToolResult {
+    const name = payload.terminal_name;
     const terminal = this.terminals.get(name);
     if (terminal) {
       terminal.dispose();

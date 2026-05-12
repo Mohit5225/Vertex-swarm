@@ -100,7 +100,7 @@ class Settings(BaseSettings):
     openrouter_api_key: str = ""
     openrouter_model: str = "nvidia/nemotron-3-super-120b-a12b:free"
     openrouter_fallback_model: str = "nvidia/nemotron-3-super-120b-a12b:free"
-    openrouter_reasoning_enabled: bool = False
+    openrouter_reasoning_enabled: bool = True
     openrouter_reasoning_effort: str = "low"
 
     modal_base_url: str = "https://api.us-west-2.modal.direct/v1"

@@ -84,12 +84,8 @@ export class ToolExecutor {
   }
 
   private extractWorkspaceMeta(args: Record<string, unknown>): { request_id?: string; action?: string } {
-    const requestId = this.optionalStringArg(args.request_id)
-      || this.optionalStringArg(args.requestId)
-      || this.optionalStringArg((args.payload as Record<string, unknown> | undefined)?.request_id)
-      || this.optionalStringArg((args.payload as Record<string, unknown> | undefined)?.requestId);
-    const action = this.optionalStringArg(args.action)
-      || this.optionalStringArg((args.payload as Record<string, unknown> | undefined)?.action);
+    const requestId = this.optionalStringArg(args.request_id);
+    const action = this.optionalStringArg(args.action);
 
     return { request_id: requestId, action };
   }

@@ -51,31 +51,26 @@ export function extractWorkspaceOpsRequest(rawArgs) {
     throw new Error('workspace_ops args must be an object.');
   }
 
-  const payload = isPlainObject(rawArgs.payload) ? rawArgs.payload : rawArgs;
   const action = normalizeWorkspaceOpsAction(rawArgs.action);
-  const requestId = readStringCandidate(
-    rawArgs.request_id,
-    rawArgs.requestId,
-    payload.request_id,
-    payload.requestId
-  );
+  const requestId = readStringCandidate(rawArgs.request_id);
+  const mode = parseWorkspaceOpsMode(rawArgs.mode);
+  const payload = rawArgs.payload;
 
   if (!requestId) {
     throw new Error('workspace_ops.request_id is required.');
   }
 
-  const mode = parseWorkspaceOpsMode(rawArgs.mode ?? payload.mode);
+  if (!isPlainObject(payload)) {
+    throw new Error('workspace_ops.payload must be an object.');
+  }
+
   const expectedHash = readStringCandidate(
     rawArgs.expected_hash,
-    rawArgs.expectedHash,
-    payload.expected_hash,
-    payload.expectedHash
+    payload.expected_hash
   );
   const expectedVersion = readStringCandidate(
     rawArgs.expected_version,
-    rawArgs.expectedVersion,
-    payload.expected_version,
-    payload.expectedVersion
+    payload.expected_version
   );
 
   return {

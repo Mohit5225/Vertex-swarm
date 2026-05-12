@@ -18,7 +18,7 @@ from app.db.postgres.models import ChatORM, MessageORM
 from app.db.redis_db import get_redis, retrieve_session_state, store_session_state, tool_result_stream_key
 from app.db.redis_sessions import bootstrap_chat_session, build_chat_session_id
 from app.schemas.tool import ToolResultSchema
-from app.services.llm_service import stream_chat_events, wrap_tool_response_codeforge
+from app.services.llm_service import stream_chat_events, format_tool_response
 from app.services.tool_memory import build_tool_memory_from_trace_events, format_tool_memory_for_prompt
 from app.services.prompt_loader import build_injected_guidance, load_categories, SUPPORTED_CATEGORIES
 
@@ -638,11 +638,10 @@ async def send_message(
                                 {
                                     "role": "tool",
                                     "tool_call_id": tool_call_id,
-                                    "content": wrap_tool_response_codeforge(
-                                        tool_name="load_tool_context",
-                                        tool_status="success",
-                                        tool_content=result_content,
-                                    ),
+                                    "content": format_tool_response(
+                                         tool_status="success",
+                                         tool_content=result_content,
+                                     ),
                                 }
                             )
                             tool_call_requested = True
@@ -718,19 +717,15 @@ async def send_message(
                             )
                         )
                         
-                        # Inject tool response using CodeForge format (compatible with Qwen3-14B)
-                        codeforge_response = wrap_tool_response_codeforge(
-                            tool_name=tool_name,
-                            tool_status=tool_result.status,
-                            tool_content=tool_result.content,
-                            error_code=tool_result.error_code,
-                        )
-                        
                         llm_messages.append(
                             {
                                 "role": "tool",
                                 "tool_call_id": tool_call_id,
-                                "content": codeforge_response,
+                                "content": format_tool_response(
+                                    tool_status=tool_result.status,
+                                    tool_content=tool_result.content,
+                                    error_code=tool_result.error_code,
+                                ),
                             }
                         )
 

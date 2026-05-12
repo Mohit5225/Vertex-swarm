@@ -65,40 +65,64 @@ WORKSPACE_OPS_TOOL_SPEC: dict[str, Any] = {
                 "mode": {
                     "type": "string",
                     "enum": ["preview", "apply"],
+                    "description": "Use 'preview' to see what would happen, 'apply' to execute the change."
                 },
                 "payload": {
                     "type": "object",
-                    "description": "Arguments for the action.\n- use workspace_ops with action list_dir: {'path': string} (use '.' for root)\n- use workspace_ops with action search_text: {'query': string, 'filePattern'?: string, 'useRegex'?: boolean} (searches CONTENT, not filenames)\n- use workspace_ops with action read_file: {'path': string, 'startLine'?: number, 'endLine'?: number}\n- use workspace_ops with action edit_file: {'path': string, 'edits': array, 'expected_hash': string}\n- use workspace_ops with action create_file: {'path': string, 'content': string}\n- use workspace_ops with action delete_path: {'path': string}\n- use workspace_ops with action rename_path: {'oldPath': string, 'newPath': string}",
+                    "description": "Arguments for the action.",
                     "properties": {
                         "path": {
                             "type": "string",
-                            "description": "The file or directory path. Use '.' or '/' for the root directory. Required for workspace_ops with actions: list_dir, read_file, edit_file, create_file, delete_path."
+                            "description": "The file or directory path. Use '.' or '/' for the root directory."
                         },
                         "query": {
                             "type": "string",
-                            "description": "The text or regex inside file contents to search for. Required for workspace_ops with action: search_text. DO NOT use this to just search for file names."
+                            "description": "The text or regex inside file contents to search for. Required for search_text."
+                        },
+                        "variants": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": "Semantic synonyms to improve search coverage (e.g. ['max_tokens', 'token_limit'])."
                         },
                         "filePattern": {
                             "type": "string",
-                            "description": "Glob pattern to limit search_text, e.g. '**/*.py'."
+                            "description": "Glob pattern to limit search, e.g. '**/*.py'."
                         },
                         "useRegex": {
                             "type": "boolean",
-                            "description": "Whether query is a regex pattern in search_text."
+                            "description": "Whether query is a regex pattern."
                         },
                         "edits": {
                             "type": "array",
-                            "description": "Array of edits. Required for edit_file action."
+                            "description": "Array of {startLine, startCol, endLine, endCol, text} objects. Required for edit_file."
+                        },
+                        "expected_hash": {
+                            "type": "string",
+                            "description": "The hash of the file content before the edit. Required for edit_file."
                         },
                         "content": {
                             "type": "string",
-                            "description": "File content. Required for create_file action."
+                            "description": "Full file content. Required for create_file."
+                        },
+                        "overwrite": {
+                            "type": "boolean",
+                            "description": "Whether to overwrite existing files. Used in create_file and rename_path."
+                        },
+                        "recursive": {
+                            "type": "boolean",
+                            "description": "Whether to perform operation recursively. Required for delete_path on directories."
+                        },
+                        "useTrash": {
+                            "type": "boolean",
+                            "description": "Whether to move deleted path to trash instead of permanent deletion."
                         },
                         "oldPath": {
-                            "type": "string"
+                            "type": "string",
+                            "description": "Source path for rename_path."
                         },
                         "newPath": {
-                            "type": "string"
+                            "type": "string",
+                            "description": "Destination path for rename_path."
                         }
                     },
                     "additionalProperties": True,
@@ -134,45 +158,56 @@ TERMINAL_OPS_TOOL_SPEC: dict[str, Any] = {
                     ],
                     "description": "The terminal action to perform.",
                 },
-                "command": {
+                "request_id": {
                     "type": "string",
-                    "description": "The shell command to run. Required for run_command.",
-                },
-                "cwd": {
-                    "type": "string",
-                    "description": "The directory to run the command in. Defaults to workspace root. Required for run_command.",
+                    "description": "Stable idempotency key for retries of the same tool call.",
                 },
                 "mode": {
                     "type": "string",
                     "enum": ["blocking", "background"],
-                    "description": "Whether to wait for completion (blocking) or run in background (returns PID). Defaults to blocking.",
+                    "description": "Whether to wait for completion (blocking) or run in background (background). Defaults to blocking.",
                 },
-                "terminal_name": {
-                    "type": "string",
-                    "description": "Name of the terminal instance to use. Defaults to 'Vertex Worker'.",
-                },
-                "timeout_seconds": {
-                    "type": "integer",
-                    "description": "Max time to wait for a blocking command. Default 360.",
-                },
-                "input_text": {
-                    "type": "string",
-                    "description": "Raw text or control character (e.g. \\u0003 for Ctrl+C) to send. Required for send_input.",
-                },
-                "pid": {
-                    "type": "integer",
-                    "description": "Process ID to target. Required for kill_process.",
-                },
-                "wait_for_pattern": {
-                    "type": "string",
-                    "description": "Optional regex pattern. If provided, the command will run in the background, and the tool will pause until this pattern is detected in the output stream before returning.",
-                },
-                "since_command_id": {
-                    "type": "string",
-                    "description": "Filter output to only show text emitted after this command ID in get_output.",
+                "payload": {
+                    "type": "object",
+                    "description": "Arguments for the action.",
+                    "properties": {
+                        "command": {
+                            "type": "string",
+                            "description": "The shell command to run. Required for run_command.",
+                        },
+                        "cwd": {
+                            "type": "string",
+                            "description": "The directory to run the command in. Defaults to workspace root. Required for run_command.",
+                        },
+                        "terminal_name": {
+                            "type": "string",
+                            "description": "Name of the terminal instance to use. Defaults to 'Vertex Worker'.",
+                        },
+                        "timeout_seconds": {
+                            "type": "integer",
+                            "description": "Max time to wait for a blocking command. Default 360.",
+                        },
+                        "input_text": {
+                            "type": "string",
+                            "description": "Raw text or control character (e.g. \\u0003 for Ctrl+C) to send. Required for send_input.",
+                        },
+                        "pid": {
+                            "type": "integer",
+                            "description": "Process ID to target. Required for kill_process.",
+                        },
+                        "wait_for_pattern": {
+                            "type": "string",
+                            "description": "Optional regex pattern. If provided, the command will run in the background, and the tool will pause until this pattern is detected in the output stream before returning.",
+                        },
+                        "since_command_id": {
+                            "type": "string",
+                            "description": "Filter output to only show text emitted after this command ID in get_output.",
+                        },
+                    },
+                    "additionalProperties": True,
                 },
             },
-            "required": ["action"],
+            "required": ["action", "request_id", "mode", "payload"],
             "additionalProperties": False,
         },
     },
@@ -202,79 +237,69 @@ LOAD_TOOL_CONTEXT_TOOL_SPEC: dict[str, Any] = {
 }
 
 
-def wrap_tool_response_codeforge(
-    tool_name: str,
+def format_tool_response(
     tool_status: str,
     tool_content: str,
     error_code: str | None = None
 ) -> str:
     """
-    Wrap tool result in CodeForge-compatible format.
-
-    Every tool call response MUST use this wrapper to keep structured tool output
-    consistent across model backends.
-    
-    Args:
-        tool_name: e.g., "workspace_ops"
-        tool_status: "success" or "error"
-        tool_content: The actual output (file content, grep results, bash output, etc.)
-        error_code: Optional error identifier (e.g., "ENOENT", "RANGE_TOO_LARGE")
-    
-    Returns:
-        XML-wrapped response matching CodeForge training format
+    Format tool result as a standard JSON string.
     """
     response_data = {
-        "output": tool_content,
-        "exit_code": 0 if tool_status == "success" else 1,
+        "status": tool_status,
+        "content": tool_content,
     }
     
     if error_code:
         response_data["error_code"] = error_code
     
-    return (
-        f"<tool_response>\n"
-        f"{json.dumps(response_data)}\n"
-        f"</tool_response>"
-    )
+    return json.dumps(response_data, ensure_ascii=False)
 
 
 DEVELOPER_ASSISTANT_PERSONA = """You are Vertex, a sharp expert developer assistant embedded directly inside VS Code.
 
-You are an AUTONOMOUS, GOAL-DRIVEN AGENT. Your purpose is to accomplish the user's tasks by intelligently chaining tools until the goal is fully achieved.
+Your purpose is to accomplish the user's tasks by intelligently chaining tools until the goal is fully achieved.
 
 CORE EXECUTION MINDSET:
 1. SCAN YOUR CONTEXT FIRST: Before every task, read what you've been given — Operating System, Terminal CWD, workspace folder paths, active file, shell type. This is ground truth. Use it directly. Never substitute training-data defaults (like /workspace/ or Linux-style paths) when the real values are already in your context.
 2. TASK DECONSTRUCTION: Break the task into logical steps before acting.
-3. LOAD TOOLS FIRST: Before using workspace_ops or terminal_ops, call load_tool_context with every category you will need. Load all at once in a single call. You only need to do this once per session — guidance persists automatically.
+3. CRITICAL: LOAD TOOL INSTRUCTIONS FIRST: You MUST call `load_tool_context` BEFORE using `workspace_ops` or `terminal_ops`. The base JSON schemas are intentionally nested and complex. If you guess the syntax without loading the instructions via `load_tool_context`, you WILL fail and crash the system. Load ALL categories you anticipate needing (e.g. `["workspace_ops", "terminal_ops"]`) immediately in your very first step.
 4. CONTINUOUS EXECUTION: Do not wait for the user between steps. Use tools to gather information and apply changes.
 5. ADAPTIVE ROUTING: After every tool result: if it succeeded, take the next step; if it failed, pivot strategy immediately. Never retry the same failed call twice.
 6. RELENTLESS FORWARD MOMENTUM: After EVERY tool result, you MUST take the next logical action or provide the final answer. Never produce an empty turn.
+7. CIRCUIT BREAKER: If a tool returns empty or unexpected data twice, or if you encounter the same error code twice, STOP and ask the user for clarification. Do not keep looping with alternative tools or "creative" path guesses.
 
 CONTEXT USAGE RULES:
-- Operating System is in your context. Use it to determine path separators (\\ on win32, / on Linux/macOS), shell commands, and executable names.
+- Operating System is in your context. Use it to determine path separators (\ on win32, / on Linux/macOS), shell commands, and executable names.
 - Workspace folder paths and Terminal CWD are in your context. Use them as the base for any `cwd` argument — never guess or construct paths from scratch.
 - Active file path tells you the language, project, and location. Use it to avoid redundant exploration.
 - When context answers your question, act on it. Do not query the filesystem to re-discover what you already know.
+- VERIFICATION IS FAILURE: Never call get_state or pwd to "verify" the context you've already been given. Trust the injected block implicitly.
 
 TRUST-FIRST INFORMATION POLICY:
 - Injected context (OS, shell, CWD, workspace folders, active file) is authoritative. Use it confidently without verification. Only reach for a tool to re-fetch this information if acting on the injected value produced a concrete failure.
 - Before calling any read-type tool (get_state, list_dir, read_file, search_text), scan your conversation history first. If a prior tool result in this conversation already answered the same question, use that result directly. Do not re-call the tool.
-- The workspace skeleton shows the top 3 levels of the project. It is sufficient for high-level navigation. Use list_dir only when you need contents at a deeper level that the skeleton does not show.
+- The workspace skeleton shows the top 4 levels of the project. It is sufficient for high-level navigation and architectural awareness. Use list_dir from workspace tools only when you need contents at a deeper level that the skeleton does not show.
 - When something fails, reason about WHAT specifically failed before deciding how to adapt. Diagnose the actual error, not a generic fallback assumption.
 
+think what the task requires.
+focus on what context already provides.
+if something is clearly ambigious you can ask user about what is confusion and ask for clarifcation before proceeding.
+but if issue is something which you can solve yourself with your intelligence , context , tools you may try to solve the confusion coming from lack of context ,that does not mean fix the issues of codebase on your own or make changes in codebase without explicit approval , just reason about what could be source of confusion
 AVAILABLE TOOL CATEGORIES:
 - workspace_ops: file reading, editing, searching, creating, deleting, renaming
 - terminal_ops: shell commands, process management, diagnostics
 
 Rules you always follow:
 - Reason step-by-step before acting
-- NEVER GUESS TOOL SYNTAX. Call load_tool_context first to get exact instructions.
+- NEVER GUESS TOOL SYNTAX. The tool schemas are nested. You MUST call `load_tool_context` first to get the exact rules and examples, otherwise your tool calls will crash.
 - Be direct and precise — no filler, no padding
 - Reference specific line numbers and function names when discussing code
 - Prefer showing working code over describing it
-- NEVER return an empty or silent response"""
+- NEVER return an empty or silent response
+- devotedly follow the correct tool related rules so tools can be executed do not hallucinate tool schemas and tool rules
 
-
+"""
 def _build_system_prompt(
     workspace_skeleton: str | None = None,
     active_tool_guidance: str | None = None,
