@@ -584,7 +584,8 @@ async def send_message(
                         # ── load_tool_context interception ──────────────────────────
                         # This tool is handled entirely on the backend.
                         # No round-trip to the extension needed.
-                        if tool_name == "load_tool_context":
+                        # Some models hallucinate a dotted variant; normalise it here.
+                        if tool_name in ("load_tool_context", "workspace_ops.load_tool_context"):
                             requested = tool_args.get("categories", [])
                             if not isinstance(requested, list):
                                 requested = []
@@ -725,6 +726,8 @@ async def send_message(
                                     tool_status=tool_result.status,
                                     tool_content=tool_result.content,
                                     error_code=tool_result.error_code,
+                                    tool_data=tool_result.data,
+                                    tool_conflict=tool_result.conflict,
                                 ),
                             }
                         )

@@ -142,6 +142,7 @@ const summarizeToolExecution = ({
   const newPath = stringValue(payload?.newPath, payload?.new_path, data?.newPath)
   const startLine = numberValue(payload?.startLine, data?.startLine)
   const endLine = numberValue(payload?.endLine, data?.endLine)
+  const paths = Array.isArray(payload?.paths) ? payload.paths as string[] : undefined
 
   if (state === 'timeout') {
     if (action === 'search_text' && query) {
@@ -159,6 +160,8 @@ const summarizeToolExecution = ({
         return query ? `Search failed for "${query}"` : 'Search failed'
       case 'read_file':
         return path ? `Read failed for ${path}` : 'Read failed'
+      case 'bulk_files_read':
+        return paths ? `Bulk read failed for ${paths.length} files` : 'Bulk read failed'
       case 'edit_file':
         return path ? `Edit failed for ${path}` : 'Edit failed'
       case 'create_file':
@@ -196,6 +199,14 @@ const summarizeToolExecution = ({
           : `Read ${path}${lines}`
       }
       return state === 'running' ? 'Reading file' : 'Read file'
+
+    case 'bulk_files_read':
+      if (paths && paths.length > 0) {
+        return state === 'running'
+          ? `Reading ${paths.length} files`
+          : `Read ${paths.length} files`
+      }
+      return state === 'running' ? 'Reading multiple files' : 'Read multiple files'
 
     case 'edit_file':
       return path

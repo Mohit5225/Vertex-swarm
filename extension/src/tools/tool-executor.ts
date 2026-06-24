@@ -11,7 +11,7 @@ export class ToolExecutor {
       options?: { forceRefresh?: boolean; previousToken?: string }
     ) => Promise<string | undefined>,
     private readonly log: (message: string) => void = () => undefined
-  ) {}
+  ) { }
 
   async handle(message: ToolCallPayload): Promise<ToolResult> {
     this.log(
@@ -28,7 +28,44 @@ export class ToolExecutor {
 
     try {
       const allowedTools = ['workspace_ops', 'terminal_ops'];
-      if (!allowedTools.includes(message.tool_name)) {
+
+      // Resolve dotted-name hallucinations: e.g. "workspace_ops.run_json", "workspace_ops.list_dir"
+      // The model sometimes wraps a valid workspace_ops call inside a fake sub-tool name.
+      const dottedMatch = message.tool_name.match(/^(workspace_ops|terminal_ops)\.(.+)$/);
+      let resolvedToolName: string = message.tool_name;
+      let resolvedArgs: Record<string, unknown> = message.args;
+
+      if (dottedMatch) {
+        const baseTool = dottedMatch[1];
+        const inferredAction = dottedMatch[2];
+        const nested = message.args;
+
+        // Case A: args already carry a complete workspace_ops call structure (e.g. workspace_ops.run_json).
+        // The model put the right args inside but used the wrong outer tool name — just unwrap.
+        const hasValidStructure =
+          typeof nested.action === 'string' &&
+          typeof nested.request_id === 'string' &&
+          typeof nested.mode === 'string' &&
+          nested.payload !== undefined;
+
+        if (hasValidStructure) {
+          resolvedToolName = baseTool;
+          resolvedArgs = nested;
+        } else {
+          // Case B: args are flat (e.g. workspace_ops.list_dir with path/request_id at top level).
+          // Best-effort: inject the inferred action and wrap payload.
+          const hasPayload = typeof nested.payload === 'object' && nested.payload !== null;
+          resolvedToolName = baseTool;
+          resolvedArgs = {
+            action: nested.action ?? inferredAction,
+            request_id: nested.request_id,
+            mode: nested.mode ?? 'preview',
+            payload: hasPayload ? nested.payload : { ...nested },
+          };
+        }
+      }
+
+      if (!allowedTools.includes(resolvedToolName)) {
         const workspaceMeta = this.extractWorkspaceMeta(message.args);
         toolResult = {
           tool_name: message.tool_name,
@@ -39,21 +76,15 @@ export class ToolExecutor {
           request_id: workspaceMeta.request_id,
           action: workspaceMeta.action,
           status: 'error',
-          content: `Deprecated tool: ${message.tool_name}. Use workspace_ops or terminal_ops instead.`,
-          summary: `Deprecated tool: ${message.tool_name}.`,
-          error_code: 'DEPRECATED_TOOL',
+          content: `Unknown tool "${message.tool_name}". Available tools: workspace_ops, terminal_ops, load_tool_context.`,
+          summary: `Unknown tool: ${message.tool_name}.`,
+          error_code: 'UNKNOWN_TOOL',
           execution_time_ms: 0,
         };
-      } else if (message.tool_name === 'terminal_ops') {
-        toolResult = await this.terminalService.execute(
-          message.args,
-          context
-        );
+      } else if (resolvedToolName === 'terminal_ops') {
+        toolResult = await this.terminalService.execute(resolvedArgs, context);
       } else {
-        toolResult = await this.fileSystemService.workspace_ops(
-          message.args,
-          context
-        );
+        toolResult = await this.fileSystemService.workspace_ops(resolvedArgs, context);
       }
     } catch (error) {
       const workspaceMeta = this.extractWorkspaceMeta(message.args);

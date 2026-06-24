@@ -2,6 +2,7 @@ const SUPPORTED_ACTIONS = new Set([
   'list_dir',
   'search_text',
   'read_file',
+  'bulk_files_read',
   'edit_file',
   'create_file',
   'delete_path',

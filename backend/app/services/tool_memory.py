@@ -10,6 +10,7 @@ RESULT_TRIM_LIMIT = 400
 TOOL_MEMORY_POLICY: dict[str, str] = {
     # Ephemeral/read operations
     "read_file": "ephemeral",
+    "bulk_files_read": "ephemeral",
     "list_dir": "ephemeral",
     "git_status": "ephemeral",
     "git_diff": "ephemeral",

@@ -12,8 +12,10 @@ export class TerminalService {
   private readonly heartbeatFlushes = new Map<string, NodeJS.Timeout>();
   private readonly outputBuffers = new Map<string, string>();
 
-  // ANSI escape code regex for stripping colors/formatting and OSC sequences
-  private readonly ansiRegex = /\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~]|\][^\x07\x1B]*[\x07\x1B\\])/g;
+  // ANSI escape code regex — used only for pattern matching against output stream,
+  // NOT for constructing content returned to the LLM.
+  private readonly ansiRegex = /\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~]|\][^\x07\x1B\r\n]*(?:[\x07\x1B\\]|$))/gm;
+
 
   constructor(
     private readonly log: (message: string) => void,
@@ -100,15 +102,16 @@ export class TerminalService {
   private async runCommand(payload: any, context: any, topLevelMode?: string): Promise<ToolResult> {
     const { command, cwd, mode: payloadMode, timeout_seconds = 360, wait_for_pattern } = payload;
     const mode = topLevelMode || payloadMode || 'blocking';
-    const terminal = await this.getOrCreateTerminal(payload.terminal_name || 'Vertex Worker');
+    const terminalName = payload.terminal_name || 'Vertex Worker';
+    const terminal = await this.getOrCreateTerminal(terminalName);
 
     // Start Heartbeat for live progress
     this.startHeartbeat(context.tool_call_id);
 
     if (terminal.shellIntegration) {
-      return await this.runViaShellIntegration(terminal, command, cwd, context, timeout_seconds, wait_for_pattern, mode);
+      return await this.runViaShellIntegration(terminal, command, cwd, context, timeout_seconds, wait_for_pattern, mode, terminalName);
     } else {
-      return await this.runViaFallback(command, cwd, context, timeout_seconds, wait_for_pattern, mode);
+      return await this.runViaFallback(command, cwd, context, timeout_seconds, wait_for_pattern, mode, terminalName);
     }
   }
 
@@ -122,7 +125,8 @@ export class TerminalService {
     context: any,
     timeout: number,
     waitForPattern?: string,
-    mode?: string
+    mode?: string,
+    terminalName: string = 'Vertex Worker'
   ): Promise<ToolResult> {
     if (cwd) {
       const shell = vscode.env.shell.toLowerCase();
@@ -191,9 +195,10 @@ export class TerminalService {
     try {
       const executionPromise = (async () => {
         for await (const chunk of execution.read()) {
-          const sanitized = chunk.replace(this.ansiRegex, '');
-          output += sanitized;
-          this.appendToBuffer(context.tool_call_id, sanitized);
+          // Strip escape sequences only for pattern matching — output is never sent to LLM
+          const stripped = chunk.replace(this.ansiRegex, '').replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+          output += stripped;
+          this.appendToBuffer(context.tool_call_id, stripped);
 
           if (waitForPattern && new RegExp(waitForPattern, 'i').test(output)) {
             return 0; // Return early with success status
@@ -221,8 +226,15 @@ export class TerminalService {
         chat_id: context.chat_id,
         message_id: context.message_id,
         status: exitCode === 0 ? 'success' : 'error',
-        content: output,
-        data: { exit_code: exitCode },
+        // Content is a terse summary for the LLM — raw output stays in the terminal panel
+        content: exitCode === 0
+          ? `Command succeeded: ${command}`
+          : `Command failed (exit ${exitCode ?? 'unknown'}): ${command}`,
+        data: {
+          exit_code: exitCode,
+          terminal_name: terminalName,
+          command,
+        },
         execution_time_ms: Date.now() - startTime,
       };
     } catch (err) {
@@ -240,7 +252,8 @@ export class TerminalService {
     context: any,
     timeout: number,
     waitForPattern?: string,
-    mode?: string
+    mode?: string,
+    terminalName: string = 'Vertex Worker'
   ): Promise<ToolResult> {
     this.log(`Terminal: Running via Fallback (child_process): ${command}`);
     const startTime = Date.now();
@@ -298,16 +311,16 @@ export class TerminalService {
       };
 
       proc.stdout?.on('data', (data) => {
-        const sanitized = data.toString().replace(this.ansiRegex, '');
-        output += sanitized;
-        this.appendToBuffer(context.tool_call_id, sanitized);
+        const stripped = data.toString().replace(this.ansiRegex, '').replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+        output += stripped;
+        this.appendToBuffer(context.tool_call_id, stripped);
         checkPattern();
       });
 
       proc.stderr?.on('data', (data) => {
-        const sanitized = data.toString().replace(this.ansiRegex, '');
-        output += sanitized;
-        this.appendToBuffer(context.tool_call_id, sanitized);
+        const stripped = data.toString().replace(this.ansiRegex, '').replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+        output += stripped;
+        this.appendToBuffer(context.tool_call_id, stripped);
         checkPattern();
       });
 
@@ -321,8 +334,15 @@ export class TerminalService {
           chat_id: context.chat_id,
           message_id: context.message_id,
           status: code === 0 ? 'success' : 'error',
-          content: output,
-          data: { exit_code: code },
+          // Terse summary for LLM — raw output stays in the terminal panel
+          content: code === 0
+            ? `Command succeeded: ${command}`
+            : `Command failed (exit ${code ?? 'unknown'}): ${command}`,
+          data: {
+            exit_code: code,
+            terminal_name: terminalName,
+            command,
+          },
           execution_time_ms: Date.now() - startTime,
         });
       });
@@ -357,20 +377,16 @@ export class TerminalService {
   }
 
   /**
-   * Heartbeat: Flush buffer to UI every 200ms
+   * Heartbeat: previously flushed raw output to the UI as 'output' events.
+   * Now a no-op interval — we keep the timer structure intact so stopHeartbeat
+   * still works, but we never post raw terminal chunks to the chat.
+   * Raw output lives in the terminal panel; the chat only sees the final summary.
    */
   private startHeartbeat(toolCallId: string) {
+    // Buffer is maintained for wait_for_pattern matching only.
+    // No events are emitted — raw output must not appear as chat text.
     const interval = setInterval(() => {
-      const buffer = this.outputBuffers.get(toolCallId) || '';
-      if (buffer.length > 0) {
-        this.postEvent({
-          id: vscode.Uri.parse(`temp:${Date.now()}`).toString(),
-          type: 'output',
-          content: buffer,
-          timestamp: Date.now()
-        });
-        this.outputBuffers.set(toolCallId, ''); // Clear buffer after flush
-      }
+      // intentionally empty: do not flush buffer to UI
     }, 200);
     this.heartbeatFlushes.set(toolCallId, interval);
   }

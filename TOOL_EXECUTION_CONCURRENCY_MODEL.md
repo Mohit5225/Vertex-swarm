@@ -1,3 +1,8 @@
+> ⚠️ **DEPRECATED REFERENCE** — Tool names in this document (`grep_workspace`,
+> `read_file_paginated`, `list_dir`) refer to the old flat tool architecture. The current system
+> uses only `workspace_ops` and `terminal_ops`. This document is kept for concurrency model
+> reference only — do not use the tool names or schemas shown here.
+
 # Tool Execution Concurrency Model
 
 ## Problem Statement
@@ -31,7 +36,7 @@ Every tool returns a **structured ToolResult object** carrying full execution co
 ```typescript
 export interface ToolResult {
   // Identity
-  tool_name: string;                 // 'grep_workspace', 'read_file_paginated', 'list_dir'
+  tool_name: string;                 // 'workspace_ops' or 'terminal_ops'
   tool_call_id: string;              // unique per invocation (UUID)
   
   // Isolation

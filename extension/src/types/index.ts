@@ -100,6 +100,7 @@ export type WebviewToExtensionMessage =
   | { type: 'set-ide-context'; payload: SetIdeContextPayload }
   | { type: 'cancel-stream'; payload: StreamCancelPayload }
   | { type: 'tool_call'; payload: ToolCallPayload }
+  | { type: 'show-terminal'; payload: { terminalName: string } }
   | { type: 'reset-chat' }
   | { type: 'logout' }
   | { type: 'log'; payload: string };

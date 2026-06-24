@@ -353,6 +353,17 @@ export class VertexSwarmChatRuntime {
         break;
       }
 
+      case 'show-terminal': {
+        const terminalName = (message.payload as { terminalName: string }).terminalName;
+        const target = vscode.window.terminals.find(t => t.name === terminalName);
+        if (target) {
+          target.show();
+        } else {
+          this.log(`show-terminal: terminal "${terminalName}" not found`);
+        }
+        break;
+      }
+
       default: {
         console.warn('VertexSwarm: unknown message type from webview');
       }

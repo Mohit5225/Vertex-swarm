@@ -42,7 +42,7 @@ WORKSPACE_OPS_TOOL_SPEC: dict[str, Any] = {
     "type": "function",
     "function": {
         "name": "workspace_ops",
-        "description": "Perform one workspace operation against the repository.",
+        "description": "Single unified tool that dispatches all file system operations via an 'action' field. Set action to one of: list_dir, search_text, read_file, bulk_files_read, edit_file, create_file, delete_path, rename_path. Every call requires action, request_id, mode, and payload.",
         "parameters": {
             "type": "object",
             "properties": {
@@ -52,6 +52,7 @@ WORKSPACE_OPS_TOOL_SPEC: dict[str, Any] = {
                         "list_dir",
                         "search_text",
                         "read_file",
+                        "bulk_files_read",
                         "edit_file",
                         "create_file",
                         "delete_path",
@@ -75,6 +76,11 @@ WORKSPACE_OPS_TOOL_SPEC: dict[str, Any] = {
                             "type": "string",
                             "description": "The file or directory path. Use '.' or '/' for the root directory."
                         },
+                        "paths": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": "Array of file paths to read. Required for bulk_files_read."
+                        },
                         "query": {
                             "type": "string",
                             "description": "The text or regex inside file contents to search for. Required for search_text."
@@ -94,7 +100,15 @@ WORKSPACE_OPS_TOOL_SPEC: dict[str, Any] = {
                         },
                         "edits": {
                             "type": "array",
-                            "description": "Array of {startLine, startCol, endLine, endCol, text} objects. Required for edit_file."
+                            "description": (
+                                "Array of edit objects. Required for edit_file. "
+                                "Each object: {startLine, startCol, endLine, endCol, text}. "
+                                "ALL coordinates are 1-indexed — the first character of the first line is startLine:1, startCol:1. "
+                                "startCol:0 or endCol:0 are INVALID and will always be rejected. "
+                                "To insert text before existing content on a line, use startCol:1, endCol:1. "
+                                "To append a new block after the last line (lineCount=N), set startLine:N+1, startCol:1, endLine:N+1, endCol:1. "
+                                "To replace a whole line (e.g. line 5 in a CRLF file), set startCol:1, endCol equal to the line length+1."
+                            )
                         },
                         "expected_hash": {
                             "type": "string",
@@ -217,7 +231,7 @@ LOAD_TOOL_CONTEXT_TOOL_SPEC: dict[str, Any] = {
     "type": "function",
     "function": {
         "name": "load_tool_context",
-        "description": "Load detailed usage guidance for one or more tool categories into your context before using them. Call this FIRST, before using workspace_ops or terminal_ops, to get the full instructions for each tool suite you need. Load all required categories in a single call.",
+        "description": "Loads detailed usage guidance for tool categories into your context. Call this first, before workspace_ops or terminal_ops, to receive the full usage instructions. Load all required categories in one call.",
         "parameters": {
             "type": "object",
             "properties": {
@@ -240,7 +254,9 @@ LOAD_TOOL_CONTEXT_TOOL_SPEC: dict[str, Any] = {
 def format_tool_response(
     tool_status: str,
     tool_content: str,
-    error_code: str | None = None
+    error_code: str | None = None,
+    tool_data: dict | list | str | int | float | bool | None = None,
+    tool_conflict: dict | None = None
 ) -> str:
     """
     Format tool result as a standard JSON string.
@@ -252,6 +268,10 @@ def format_tool_response(
     
     if error_code:
         response_data["error_code"] = error_code
+    if tool_data is not None:
+        response_data["data"] = tool_data
+    if tool_conflict is not None:
+        response_data["conflict"] = tool_conflict
     
     return json.dumps(response_data, ensure_ascii=False)
 
@@ -263,7 +283,7 @@ Your purpose is to accomplish the user's tasks by intelligently chaining tools u
 CORE EXECUTION MINDSET:
 1. SCAN YOUR CONTEXT FIRST: Before every task, read what you've been given — Operating System, Terminal CWD, workspace folder paths, active file, shell type. This is ground truth. Use it directly. Never substitute training-data defaults (like /workspace/ or Linux-style paths) when the real values are already in your context.
 2. TASK DECONSTRUCTION: Break the task into logical steps before acting.
-3. CRITICAL: LOAD TOOL INSTRUCTIONS FIRST: You MUST call `load_tool_context` BEFORE using `workspace_ops` or `terminal_ops`. The base JSON schemas are intentionally nested and complex. If you guess the syntax without loading the instructions via `load_tool_context`, you WILL fail and crash the system. Load ALL categories you anticipate needing (e.g. `["workspace_ops", "terminal_ops"]`) immediately in your very first step.
+3. CRITICAL: LOAD TOOL INSTRUCTIONS FIRST: Your very first action must always be to call `load_tool_context` with all categories you need. Without it, the tool schemas are too complex to use correctly and your calls will fail.
 4. CONTINUOUS EXECUTION: Do not wait for the user between steps. Use tools to gather information and apply changes.
 5. ADAPTIVE ROUTING: After every tool result: if it succeeded, take the next step; if it failed, pivot strategy immediately. Never retry the same failed call twice.
 6. RELENTLESS FORWARD MOMENTUM: After EVERY tool result, you MUST take the next logical action or provide the final answer. Never produce an empty turn.
@@ -278,7 +298,7 @@ CONTEXT USAGE RULES:
 
 TRUST-FIRST INFORMATION POLICY:
 - Injected context (OS, shell, CWD, workspace folders, active file) is authoritative. Use it confidently without verification. Only reach for a tool to re-fetch this information if acting on the injected value produced a concrete failure.
-- Before calling any read-type tool (get_state, list_dir, read_file, search_text), scan your conversation history first. If a prior tool result in this conversation already answered the same question, use that result directly. Do not re-call the tool.
+- Before running any read action (e.g., terminal_ops get_state, or workspace_ops search/read/list actions), scan your conversation history first. If a prior result in this conversation already answered the same question, use that result directly. Do not re-run the action.
 - The workspace skeleton shows the top 4 levels of the project. It is sufficient for high-level navigation and architectural awareness. Use list_dir from workspace tools only when you need contents at a deeper level that the skeleton does not show.
 - When something fails, reason about WHAT specifically failed before deciding how to adapt. Diagnose the actual error, not a generic fallback assumption.
 

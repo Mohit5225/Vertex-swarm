@@ -37,12 +37,15 @@ const HARD_LIMITS = {
   maxEditOperations: 500,
   maxWriteFileBytes: 1_000_000,
   maxWorkspaceRequestCache: 1_000,
+  maxBulkReadFiles: 5,
+  maxBulkReadBytes: 100_000,
 };
 
 type WorkspaceOpsAction =
   | 'list_dir'
   | 'search_text'
   | 'read_file'
+  | 'bulk_files_read'
   | 'edit_file'
   | 'create_file'
   | 'delete_path'
@@ -834,7 +837,7 @@ export class FileSystemService {
     startLine: number,
     endLine: number,
     context: ToolContext
-  ): Promise<ToolResult> {
+  ): Promise<ToolResult & { current_hash?: string; total_lines?: number }> {
     const startMs = Date.now();
 
     try {
@@ -882,18 +885,102 @@ export class FileSystemService {
         );
       }
 
-      const fileBytes = await vscode.workspace.fs.readFile(fileUri);
-      const fileLines = new TextDecoder().decode(fileBytes).split(/\r?\n/);
+      const document = await vscode.workspace.openTextDocument(fileUri);
+      const fullContent = document.getText();
+      const fileLines = fullContent.split(/\r?\n/);
       const sliceStart = Math.max(0, startLine - 1);
       const sliceEnd = Math.min(endLine, fileLines.length);
       const content = fileLines.slice(sliceStart, sliceEnd).join('\n');
 
-      return this.successResult('read_file_paginated', context, content, startMs);
+      // Compute hash over the FULL file content so the LLM can use it as
+      // expected_hash in a subsequent edit_file call.
+      const currentHash = this.computeContentHash(fullContent);
+
+      return {
+        ...this.successResult('read_file_paginated', context, content, startMs),
+        current_hash: currentHash,
+        total_lines: fileLines.length,
+      };
     } catch (error) {
       return this.errorResult(
         'read_file_paginated',
         context,
         `Read failed: ${error instanceof Error ? error.message : String(error)}`,
+        'READ_ERROR',
+        startMs
+      );
+    }
+  }
+
+  private async read_files_bulk(
+    paths: string[],
+    context: ToolContext
+  ): Promise<ToolResult & { files?: any[]; truncated?: boolean }> {
+    const startMs = Date.now();
+    try {
+      if (!Array.isArray(paths)) {
+        return this.errorResult(
+          'read_files_bulk',
+          context,
+          'paths must be an array of strings.',
+          'INVALID_PATHS',
+          startMs
+        );
+      }
+      if (paths.length > HARD_LIMITS.maxBulkReadFiles) {
+        return this.errorResult(
+          'read_files_bulk',
+          context,
+          `Requested ${paths.length} files exceeds ${HARD_LIMITS.maxBulkReadFiles} limit.`,
+          'TOO_MANY_FILES',
+          startMs
+        );
+      }
+
+      let totalBytes = 0;
+      let truncated = false;
+      const files: any[] = [];
+
+      for (const path of paths) {
+        if (typeof path !== 'string') continue;
+        const fileUri = this.resolveWorkspacePath(path);
+        try {
+          const stat = await vscode.workspace.fs.stat(fileUri);
+          if (stat.type !== vscode.FileType.File) {
+            files.push({ path, status: 'error', error: 'Not a file' });
+            continue;
+          }
+          if (totalBytes + stat.size > HARD_LIMITS.maxBulkReadBytes) {
+            truncated = true;
+            files.push({ path, status: 'error', error: `Skipped due to ${HARD_LIMITS.maxBulkReadBytes} bytes limit.` });
+            continue;
+          }
+          const document = await vscode.workspace.openTextDocument(fileUri);
+          const content = document.getText();
+          totalBytes += stat.size;
+
+          files.push({
+            path,
+            content,
+            current_hash: this.computeContentHash(content),
+            total_lines: content.split(/\r?\n/).length,
+            status: 'success'
+          });
+        } catch (e) {
+          files.push({ path, status: 'error', error: e instanceof Error ? e.message : String(e) });
+        }
+      }
+
+      return {
+        ...this.successResult('read_files_bulk', context, JSON.stringify({ files, truncated }), startMs),
+        files,
+        truncated
+      };
+    } catch (error) {
+      return this.errorResult(
+        'read_files_bulk',
+        context,
+        `Read files failed: ${error instanceof Error ? error.message : String(error)}`,
         'READ_ERROR',
         startMs
       );
@@ -972,7 +1059,32 @@ export class FileSystemService {
               requestId: request.requestId,
               action: request.action,
               summary: `Read ${path} lines ${startLine}-${endLine}.`,
-              data: { path, startLine, endLine },
+              // current_hash MUST be included here so the LLM can pass it as
+              // expected_hash in a subsequent edit_file call.
+              data: {
+                path,
+                startLine,
+                endLine,
+                total_lines: result.total_lines ?? null,
+                current_hash: result.current_hash ?? null,
+              },
+            })
+          );
+        }
+
+        case 'bulk_files_read': {
+          const paths = this.requireArrayField(request.payload, 'paths');
+          const result = await this.read_files_bulk(paths as string[], context);
+          return this.cacheWorkspaceResult(
+            request.requestId,
+            this.withToolName(result, 'workspace_ops', {
+              requestId: request.requestId,
+              action: request.action,
+              summary: `Read ${paths.length} files.`,
+              data: {
+                files: result.files ?? [],
+                truncated: result.truncated ?? false,
+              },
             })
           );
         }
@@ -1684,6 +1796,14 @@ export class FileSystemService {
 
   private cacheWorkspaceResult(requestId: string, result: ToolResult): ToolResult {
     const normalizedResult = this.normalizeWorkspaceResult(result, requestId);
+    
+    // Do not cache errors. This ensures that if the LLM makes a syntax mistake and retries
+    // with the same request_id but corrected arguments, it actually executes the operation
+    // instead of instantly returning the cached error.
+    if (normalizedResult.status === 'error') {
+      return normalizedResult;
+    }
+
     const cachedResult: CachedWorkspaceResult = {
       tool_name: normalizedResult.tool_name,
       status: normalizedResult.status,
@@ -1860,8 +1980,8 @@ export class FileSystemService {
     const endLine = this.requireIntegerField(edit, 'endLine', index);
     const endCol = this.requireIntegerField(edit, 'endCol', index);
     const text = this.optionalStringField(edit, 'text')
-      || this.optionalStringField(edit, 'newText')
-      || this.optionalStringField(edit, 'replacementText');
+      ?? this.optionalStringField(edit, 'newText')
+      ?? this.optionalStringField(edit, 'replacementText');
     if (text === undefined) {
       throw new Error(`Missing or invalid string field: text in edit ${index}`);
     }

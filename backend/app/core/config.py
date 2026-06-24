@@ -98,8 +98,8 @@ class Settings(BaseSettings):
     # ========================================
     openrouter_base_url: str = "https://openrouter.ai/api/v1"
     openrouter_api_key: str = ""
-    openrouter_model: str = "nvidia/nemotron-3-super-120b-a12b:free"
-    openrouter_fallback_model: str = "nvidia/nemotron-3-super-120b-a12b:free"
+    openrouter_model: str = "openai/gpt-oss-120b:free"
+    openrouter_fallback_model: str = "openai/gpt-oss-120b:free"
     openrouter_reasoning_enabled: bool = True
     openrouter_reasoning_effort: str = "low"
 
