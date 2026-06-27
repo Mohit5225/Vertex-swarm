@@ -4,7 +4,7 @@ import { OAuthHandler } from './oauth-handler';
 import { VertexSwarmSidebarProvider } from './webview-provider';
 import { VertexSwarmChatParticipant } from './chat-participant';
 
-const BACKEND_URL = process.env.VERTEX_BACKEND_URL || 'http://localhost:8000';
+const BACKEND_URL = process.env.VERTEX_BACKEND_URL || 'http://127.0.0.1:8000';
 
 async function revokeBackendRefreshToken(
   tokenManager: TokenManager,

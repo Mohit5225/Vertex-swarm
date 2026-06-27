@@ -98,8 +98,13 @@ class Settings(BaseSettings):
     # ========================================
     openrouter_base_url: str = "https://openrouter.ai/api/v1"
     openrouter_api_key: str = ""
-    openrouter_model: str = "openai/gpt-oss-120b:free"
-    openrouter_fallback_model: str = "openai/gpt-oss-120b:free"
+    openrouter_api_key_2: str = ""
+    openrouter_api_key_3: str = ""
+    openrouter_api_key_4: str = ""
+    openrouter_api_key_5: str = ""
+    openrouter_api_key_6: str = ""
+    openrouter_model: str = "openrouter/owl-alpha"
+    openrouter_fallback_model: str = "openrouter/owl-alpha"
     openrouter_reasoning_enabled: bool = True
     openrouter_reasoning_effort: str = "low"
 
@@ -115,6 +120,19 @@ class Settings(BaseSettings):
         if self.openrouter_api_key.strip():
             return self.openrouter_base_url
         return self.modal_base_url
+
+    @property
+    def llm_api_key_pool(self) -> list[str]:
+        """All configured OpenRouter keys (non-empty), in order."""
+        candidates = [
+            self.openrouter_api_key,
+            self.openrouter_api_key_2,
+            self.openrouter_api_key_3,
+            self.openrouter_api_key_4,
+            self.openrouter_api_key_5,
+            self.openrouter_api_key_6,
+        ]
+        return [k.strip() for k in candidates if k.strip()]
 
     @property
     def llm_api_key(self) -> str:

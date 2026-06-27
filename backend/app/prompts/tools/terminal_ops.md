@@ -7,12 +7,15 @@ Every call requires: `action`, `request_id`, `mode`, and `payload`.
 
 ### KEY RULES
 
-1. **IDEMPOTENCY**: Always provide a unique `request_id` for every distinct operation.
-2. **RELENTLESS VERIFICATION**: After every file edit, run the appropriate build or test command to verify correctness.
-3. **NON-INTERACTIVE FLAGS**: Always use `-y`, `--yes`, `--non-interactive` flags to prevent terminal hangs.
-4. **LOCATION INJECTION**: Every `run_command` call accepts a `cwd` parameter inside the `payload`. The system performs `cd` to this directory before your command. Always set `cwd` explicitly for monorepo operations.
-5. **BACKGROUND PROCESSES**: For dev servers or file watchers, use `mode='background'` with `wait_for_pattern` (e.g. `"ready|listening|started"`). The tool returns as soon as the pattern matches and the server keeps running. If background mode fails, diagnose the actual error — do NOT fall back to `mode='blocking'` for a process that does not exit on its own. Blocking a non-terminating process will freeze the session for up to 360 seconds.
-6. **SURGICAL DIAGNOSTICS**: If a build fails, use `get_diagnostics` to get structured errors from the VS Code Problems panel — do not just re-read raw shell output.
+1. **MANDATORY OBSERVATION PHASE (THE EXECUTION CONTRACT)**: Execution Lifecycle: Planning Phase → Execution Phase → Observation Phase → Reasoning Phase. You MUST NOT skip Observation. Never assume a command succeeded just because it was issued. You MUST read the `exit_code` and `output_tail` returned in the Execution Object before claiming a task is done. Commands are intentions; successful observations are facts.
+2. **STATELESS TERMINAL**: Treat the terminal as entirely stateless. **NEVER issue `cd` or `Set-Location` commands.** Always use the tool's `cwd` parameter to route your command. Relying on past `cd` state will cause failures when terminals restart or fallback processes are used.
+3. **NO CHAINED COMMANDS**: **Do not use `&&` to chain commands**, especially in PowerShell. Emit separate tool calls for individual commands. This ensures isolated retry loops, distinct memory entries, and prevents parsing errors.
+4. **IDEMPOTENCY**: Always provide a unique `request_id` for every distinct operation.
+5. **RELENTLESS VERIFICATION**: After every file edit, run the appropriate build or test command to verify correctness.
+6. **NON-INTERACTIVE FLAGS**: Always use `-y`, `--yes`, `--non-interactive` flags to prevent terminal hangs.
+7. **LOCATION INJECTION**: Every `run_command` call accepts a `cwd` parameter inside the `payload`. The system handles the directory state before your command. Always set `cwd` explicitly.
+8. **BACKGROUND PROCESSES**: For dev servers or file watchers, use `mode='background'` with `wait_for_pattern` (e.g. `"ready|listening|started"`). The tool returns as soon as the pattern matches and the server keeps running. If background mode fails, diagnose the actual error — do NOT fall back to `mode='blocking'` for a process that does not exit on its own. Blocking a non-terminating process will freeze the session for up to 360 seconds.
+9. **SURGICAL DIAGNOSTICS**: If a build fails, use `get_diagnostics` to get structured errors from the VS Code Problems panel — do not just re-read raw shell output.
 
 ---
 
@@ -31,7 +34,7 @@ Every call requires: `action`, `request_id`, `mode`, and `payload`.
 - `input_text`: Raw text or control character (e.g., `"\u0003"` for Ctrl+C)
 
 **get_output** — Retrieve recent terminal output
-- `since_command_id`: Only return output after this command ID
+- `tool_call_id` (required): The specific tool_call_id returned in the run_command Execution Object metadata.
 
 **get_diagnostics** — Pull structured errors from the VS Code Problems panel (LSP-native)
 - No additional payload required

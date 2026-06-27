@@ -127,20 +127,20 @@ export const getTraceEventSummary = (event: SessionEvent) => {
         return truncate(metadataSummary, 120)
       }
       
-      // Special handling for search_text to show regex mode and variants
+      // Special handling for search_text to show regex mode and multiple queries
       if (actionName === 'search_text') {
         const args = event.metadata?.args as Record<string, unknown> | undefined
         if (args) {
           const query = typeof args.query === 'string' ? args.query : null
           const useRegex = args.useRegex === true
-          const variants = Array.isArray(args.variants) ? args.variants : null
+          const multipleQueries = Array.isArray(args.multiple_queries) ? args.multiple_queries : (Array.isArray(args.variants) ? args.variants : null)
           
           const parts = []
           if (query) parts.push(`Searching: "${query}"`)
           if (useRegex) parts.push('(regex mode)')
-          if (variants && Array.isArray(variants) && variants.length > 0) {
-            const variantList = variants.filter((v): v is string => typeof v === 'string').join(', ')
-            if (variantList) parts.push(`variants: [${variantList}]`)
+          if (multipleQueries && Array.isArray(multipleQueries) && multipleQueries.length > 0) {
+            const queriesList = multipleQueries.filter((v): v is string => typeof v === 'string').join(', ')
+            if (queriesList) parts.push(`+ [${queriesList}]`)
           }
           
           if (parts.length > 0) {

@@ -205,9 +205,7 @@ def _extract_new_mutation_entries(trace_events: list[dict[str, Any]]) -> list[di
         if event_type != "tool_result":
             continue
 
-        status = _first_non_empty_str(event.get("status"))
-        if status != "success":
-            continue
+        status = _first_non_empty_str(event.get("status")) or "unknown"
 
         tool_call_id = _first_non_empty_str(event.get("tool_call_id")) or ""
         tool_call_event = tool_calls_by_id.get(tool_call_id, {})
@@ -228,7 +226,7 @@ def _extract_new_mutation_entries(trace_events: list[dict[str, Any]]) -> list[di
             {
                 "tool": policy_key,
                 "target": target,
-                "status": "success",
+                "status": status,
                 "result_trimmed": _trim_result(result_source),
             }
         )
@@ -255,13 +253,14 @@ def format_tool_memory_for_prompt(tool_memory_obj: Any) -> str | None:
         return None
 
     lines = [
-        "Previous response memory - changes made:",
-        "The following mutation operations already changed the workspace:",
+        "Previous response memory - attempted changes:",
+        "The following mutation operations were attempted on the workspace (both successful and failed):",
     ]
 
     for index, mutation in enumerate(completed_mutations, start=1):
+        status_label = "[SUCCESSFUL MUTATION]" if mutation['status'] == "success" else "[FAILED ATTEMPT]"
         lines.append(
-            f"{index}. tool={mutation['tool']}; target={mutation['target']}; "
+            f"{index}. {status_label} tool={mutation['tool']}; target={mutation['target']}; "
             f"status={mutation['status']}; result={mutation['result_trimmed']}"
         )
 

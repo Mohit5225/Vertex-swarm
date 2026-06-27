@@ -100,7 +100,7 @@ interface NormalizedTextEdit {
 
 interface SearchTextRequest {
   query: string;
-  variants?: string[];  // LLM-provided semantic synonyms (e.g., ["max_tokens", "token_budget"])
+  multipleQueries?: string[];  // LLM-provided additional search queries to batch together
   filePattern: string;
   includeGlobs: string[];
   excludeGlobs: string[];
@@ -252,19 +252,19 @@ export class FileSystemService {
         files = [...fallbackFiles.values()];
       }
 
-      const semanticVariants = this.buildSemanticVariants(searchRequest);
-      const searchPasses = semanticVariants.map((semanticVariant, index) => {
+      const queryList = this.buildQueryList(searchRequest);
+      const searchPasses = queryList.map((queryText, index) => {
         const namingForms = searchRequest.variantsEnabled
-          ? this.generateSearchVariants(semanticVariant)
-          : [semanticVariant];
+          ? this.generateSearchVariants(queryText)
+          : [queryText];
         const queryNeedles = searchRequest.caseSensitive
-          ? namingForms
-          : namingForms.map((term) => term.toLowerCase());
+            ? namingForms
+            : namingForms.map((term) => term.toLowerCase());
 
         return {
           metadata: {
             passNumber: index + 1,
-            query: semanticVariant,
+            query: queryText,
             resultCount: 0,
             timeElapsedMs: 0,
             namingForms,
@@ -361,7 +361,7 @@ export class FileSystemService {
 
       const content = this.formatSearchContent(
         searchRequest,
-        semanticVariants,
+        queryList,
         passResults,
         timedOut
       );
@@ -413,13 +413,16 @@ export class FileSystemService {
       }
       const resolution = resolutionAttempt.resolution;
 
-      const semanticVariants = this.buildSemanticVariants(searchRequest);
+      const queryList = this.buildQueryList(searchRequest);
       const timeoutAt = startMs + searchRequest.timeoutMs;
+      
+      const seenSearchHits = new Set<string>();
+      let maxResultsExceeded = false;
 
       // Execute all ripgrep passes in parallel
-      const passPromises = semanticVariants.map((semanticVariant, index) =>
+      const passPromises = queryList.map((queryText, index) =>
         this.executeRipgrepPass(
-          semanticVariant,
+          queryText,
           index + 1,  // passNumber
           searchRequest,
           includePatterns,
@@ -481,7 +484,7 @@ export class FileSystemService {
       const timedOut = orderedPassResults.some((passResult) => Boolean(passResult.metadata.timedOut));
       const content = this.formatSearchContent(
         searchRequest,
-        semanticVariants,
+        queryList,
         orderedPassResults,
         timedOut
       );
@@ -1171,9 +1174,11 @@ export class FileSystemService {
         return this.cacheWorkspaceResult(request.requestId, concurrencyError);
       }
 
-      const normalizedEdits = rawEdits.map((entry, index) =>
-        this.normalizeTextEdit(entry, index, document)
-      );
+      const normalizedEdits: NormalizedTextEdit[] = [];
+      for (let index = 0; index < rawEdits.length; index++) {
+        const edits = this.normalizeTextEdits(rawEdits[index], index, document);
+        normalizedEdits.push(...edits);
+      }
 
       const overlapViolation = this.findOverlappingEdit(normalizedEdits);
       if (overlapViolation) {
@@ -1625,7 +1630,7 @@ export class FileSystemService {
       throw new Error('search_text query cannot be empty.');
     }
 
-    const variants = this.optionalStringArrayField(payload, 'variants');
+    const multipleQueries = this.optionalStringArrayField(payload, 'multiple_queries') ?? this.optionalStringArrayField(payload, 'variants');
     const filePattern = this.optionalStringField(payload, 'filePattern')?.trim() || '**/*';
     const includeGlobs = this.optionalStringArrayField(payload, 'includeGlobs') ?? [];
     const excludeGlobs = this.optionalStringArrayField(payload, 'excludeGlobs')
@@ -1659,7 +1664,7 @@ export class FileSystemService {
 
     return {
       query,
-      variants,
+      multipleQueries,
       filePattern,
       includeGlobs,
       excludeGlobs,
@@ -1685,45 +1690,45 @@ export class FileSystemService {
     return boundedMinimum > maxValue ? maxValue : boundedMinimum;
   }
 
-  private buildSemanticVariants(searchRequest: SearchTextRequest): string[] {
+  private buildQueryList(searchRequest: SearchTextRequest): string[] {
     const query = searchRequest.query.trim();
-    const semanticVariants: string[] = [query];
+    const queryList: string[] = [query];
     if (!searchRequest.variantsEnabled) {
-      return semanticVariants;
+      return queryList;
     }
 
     const seen = new Set<string>([query.toLowerCase()]);
-    for (const rawVariant of searchRequest.variants ?? []) {
-      const variant = rawVariant.trim();
-      if (!variant) {
+    for (const rawQuery of searchRequest.multipleQueries ?? []) {
+      const q = rawQuery.trim();
+      if (!q) {
         continue;
       }
 
-      const normalizedVariant = variant.toLowerCase();
-      if (seen.has(normalizedVariant)) {
+      const normalizedQ = q.toLowerCase();
+      if (seen.has(normalizedQ)) {
         continue;
       }
 
-      semanticVariants.push(variant);
-      seen.add(normalizedVariant);
+      queryList.push(q);
+      seen.add(normalizedQ);
 
-      if (semanticVariants.length >= searchRequest.maxSynonymTerms + 1) {
+      if (queryList.length >= searchRequest.maxSynonymTerms + 1) {
         break;
       }
     }
 
-    return semanticVariants;
+    return queryList;
   }
 
   private formatSearchContent(
     searchRequest: SearchTextRequest,
-    semanticVariants: string[],
+    queryList: string[],
     passResults: SearchPassResult[],
     timedOut: boolean
   ): string {
     const hasAnyHits = passResults.some((passResult) => passResult.hits.length > 0);
     if (!hasAnyHits) {
-      return `No results for "${semanticVariants.join(', ')}"${timedOut ? ` (timeout ${searchRequest.timeoutMs}ms)` : ''}`;
+      return `No results for "${queryList.join(', ')}"${timedOut ? ` (timeout ${searchRequest.timeoutMs}ms)` : ''}`;
     }
 
     if (!searchRequest.includeSearchPlan) {
@@ -1738,14 +1743,15 @@ export class FileSystemService {
 
     const outputLines: string[] = [];
     outputLines.push(`SEARCH_QUERY: ${searchRequest.query}`);
-    outputLines.push(`PRIMARY_VARIANT: ${semanticVariants[0] ?? searchRequest.query}`);
-    outputLines.push(`SEMANTIC_VARIANTS: ${semanticVariants.join(' | ')}`);
-    outputLines.push('READ_POLICY: prioritize PRIMARY_VARIANT hits first; use SYNONYM hits only when PRIMARY_VARIANT is empty or insufficient.');
+    const extras = queryList.slice(1);
+    if (extras.length > 0) {
+      outputLines.push(`ADDITIONAL_QUERIES: ${extras.join(' | ')}`);
+    }
 
     for (const passResult of passResults) {
-      const passType = passResult.metadata.passNumber === 1 ? 'PRIMARY' : 'SYNONYM';
+      const passType = `QUERY_${passResult.metadata.passNumber}`;
       outputLines.push('');
-      outputLines.push(`${passType} query="${passResult.metadata.query}" hits=${passResult.hits.length}`);
+      outputLines.push(`${passType}="${passResult.metadata.query}" hits=${passResult.hits.length}`);
 
       if (passResult.metadata.namingForms && passResult.metadata.namingForms.length > 0) {
         outputLines.push(`naming_forms=${passResult.metadata.namingForms.join(' | ')}`);
@@ -1965,47 +1971,102 @@ export class FileSystemService {
     return this.computeContentHash(new TextDecoder().decode(fileBytes));
   }
 
-  private normalizeTextEdit(
+  private normalizeTextEdits(
     entry: unknown,
     index: number,
     document: vscode.TextDocument
-  ): NormalizedTextEdit {
+  ): NormalizedTextEdit[] {
     if (!entry || typeof entry !== 'object') {
       throw new Error(`Edit at index ${index} must be an object.`);
     }
 
     const edit = entry as Record<string, unknown>;
     const startLine = this.requireIntegerField(edit, 'startLine', index);
-    const startCol = this.requireIntegerField(edit, 'startCol', index);
     const endLine = this.requireIntegerField(edit, 'endLine', index);
-    const endCol = this.requireIntegerField(edit, 'endCol', index);
-    const text = this.optionalStringField(edit, 'text')
-      ?? this.optionalStringField(edit, 'newText')
-      ?? this.optionalStringField(edit, 'replacementText');
-    if (text === undefined) {
-      throw new Error(`Missing or invalid string field: text in edit ${index}`);
+    const targetContent = this.requireStringField(edit, 'targetContent');
+    const replacementContent = this.requireStringField(edit, 'replacementContent');
+    const allowMultiple = edit.allowMultiple === true;
+
+    const startPos = new vscode.Position(startLine - 1, 0);
+    const endPos = document.lineAt(Math.min(endLine - 1, document.lineCount - 1)).range.end;
+    const searchRange = new vscode.Range(startPos, endPos);
+    
+    const searchAreaText = document.getText(searchRange);
+
+    const normalizedSearchArea = searchAreaText.replace(/\r\n/g, '\n');
+    let normalizedTarget = targetContent.replace(/\r\n/g, '\n');
+    let normalizedReplacement = replacementContent;
+
+    if (normalizedTarget === '') {
+      throw new Error(`Edit at index ${index} has an empty targetContent.`);
     }
 
-    const start = this.validatePosition(document, startLine, startCol, index, 'start');
-    const end = this.validatePosition(document, endLine, endCol, index, 'end');
-
-    if (document.offsetAt(start) > document.offsetAt(end)) {
-      throw new Error(`Edit at index ${index} has start position after end position.`);
+    const fileUsesTabs = /^\t/m.test(searchAreaText);
+    const targetUsesTabs = /^\t/m.test(normalizedTarget);
+    
+    if (fileUsesTabs && !targetUsesTabs) {
+      normalizedTarget = normalizedTarget.replace(/^( {2,8})/gm, (match) => '\t'.repeat(Math.max(1, Math.floor(match.length / 4))));
+      normalizedReplacement = normalizedReplacement.replace(/^( {2,8})/gm, (match) => '\t'.repeat(Math.max(1, Math.floor(match.length / 4))));
+    } else if (!fileUsesTabs && targetUsesTabs) {
+      normalizedTarget = normalizedTarget.replace(/^\t+/gm, (match) => '    '.repeat(match.length));
+      normalizedReplacement = normalizedReplacement.replace(/^\t+/gm, (match) => '    '.repeat(match.length));
     }
 
-    return {
-      range: new vscode.Range(start, end),
-      newText: text,
-      startOffset: document.offsetAt(start),
-      endOffset: document.offsetAt(end),
-      summary: {
-        startLine,
-        startCol,
-        endLine,
-        endCol,
-        textLength: text.length,
-      },
-    };
+    let matches: number[] = [];
+    let currentIndex = normalizedSearchArea.indexOf(normalizedTarget);
+    while (currentIndex !== -1) {
+      matches.push(currentIndex);
+      currentIndex = normalizedSearchArea.indexOf(normalizedTarget, currentIndex + 1);
+    }
+
+    if (matches.length === 0) {
+      throw new Error(`Edit ${index} failed: 'targetContent' not found between lines ${startLine}-${endLine}. Check exact string matching.`);
+    }
+
+    if (matches.length > 1 && !allowMultiple) {
+      throw new Error(`Edit ${index} failed: Found ${matches.length} occurrences of 'targetContent'. Make it more unique or set allowMultiple: true.`);
+    }
+
+    const editsToApply: NormalizedTextEdit[] = [];
+    
+    for (const matchIndex of matches) {
+      const textBeforeMatch = normalizedSearchArea.substring(0, matchIndex);
+      const linesBefore = textBeforeMatch.split('\n');
+      const lineOffset = linesBefore.length - 1;
+      const charOffset = linesBefore[linesBefore.length - 1].length;
+
+      const targetLines = normalizedTarget.split('\n');
+      const targetLineCount = targetLines.length - 1;
+      const targetCharOffset = targetLines[targetLines.length - 1].length;
+
+      const matchStartPos = new vscode.Position(
+        startPos.line + lineOffset, 
+        lineOffset === 0 ? startPos.character + charOffset : charOffset
+      );
+      
+      let matchEndPos: vscode.Position;
+      if (targetLineCount === 0) {
+        matchEndPos = new vscode.Position(matchStartPos.line, matchStartPos.character + targetCharOffset);
+      } else {
+        matchEndPos = new vscode.Position(matchStartPos.line + targetLineCount, targetCharOffset);
+      }
+
+      editsToApply.push({
+        range: new vscode.Range(matchStartPos, matchEndPos),
+        newText: normalizedReplacement,
+        startOffset: document.offsetAt(matchStartPos),
+        endOffset: document.offsetAt(matchEndPos),
+        summary: {
+          startLine: matchStartPos.line + 1,
+          startCol: matchStartPos.character + 1,
+          endLine: matchEndPos.line + 1,
+          endCol: matchEndPos.character + 1,
+          textLength: normalizedReplacement.length,
+        },
+      });
+    }
+
+    return editsToApply;
   }
 
   private findOverlappingEdit(edits: NormalizedTextEdit[]): string | null {

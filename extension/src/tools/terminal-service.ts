@@ -103,6 +103,7 @@ export class TerminalService {
     const { command, cwd, mode: payloadMode, timeout_seconds = 360, wait_for_pattern } = payload;
     const mode = topLevelMode || payloadMode || 'blocking';
     const terminalName = payload.terminal_name || 'Vertex Worker';
+
     const terminal = await this.getOrCreateTerminal(terminalName);
 
     // Start Heartbeat for live progress
@@ -170,22 +171,69 @@ export class TerminalService {
     const startTime = Date.now();
 
     if (mode === 'background' && !waitForPattern) {
-      // Fire and forget reading to drain stream
-      (async () => {
-        for await (const chunk of execution.read()) { }
-      })();
-      this.stopHeartbeat(context.tool_call_id);
-      return {
-        tool_name: 'terminal_ops',
-        tool_call_id: context.tool_call_id,
-        session_id: context.session_id,
-        chat_id: context.chat_id,
-        message_id: context.message_id,
-        status: 'success',
-        content: `Command started in background: ${command}`,
-        data: { exit_code: 0 },
-        execution_time_ms: Date.now() - startTime,
-      };
+      return new Promise((resolve) => {
+        let earlyExitCode: number | undefined;
+        
+        const disposable = vscode.window.onDidEndTerminalShellExecution(event => {
+          if (event.execution === execution) {
+            earlyExitCode = event.exitCode;
+          }
+        });
+        
+        (async () => {
+          for await (const chunk of execution.read()) {
+            const stripped = chunk.replace(this.ansiRegex, '').replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+            output += stripped;
+            this.appendToBuffer(context.tool_call_id, stripped);
+          }
+        })();
+
+        setTimeout(() => {
+          disposable.dispose();
+          this.stopHeartbeat(context.tool_call_id);
+          
+          if (earlyExitCode !== undefined && earlyExitCode !== 0) {
+            resolve({
+              tool_name: 'terminal_ops',
+              tool_call_id: context.tool_call_id,
+              session_id: context.session_id,
+              chat_id: context.chat_id,
+              message_id: context.message_id,
+              status: 'error',
+              content: `Command failed immediately (exit ${earlyExitCode}): ${command}\nOutput tail:\n${output.slice(-4000)}`,
+              data: { 
+                tool_call_id: context.tool_call_id,
+                cwd,
+                shell: vscode.env.shell,
+                exit_code: earlyExitCode, 
+                termination_reason: 'exit',
+                command,
+                output_tail: output.slice(-4000)
+              },
+              execution_time_ms: Date.now() - startTime,
+            });
+          } else {
+            resolve({
+              tool_name: 'terminal_ops',
+              tool_call_id: context.tool_call_id,
+              session_id: context.session_id,
+              chat_id: context.chat_id,
+              message_id: context.message_id,
+              status: 'success',
+              content: `Command started in background: ${command}`,
+              data: { 
+                tool_call_id: context.tool_call_id,
+                cwd,
+                shell: vscode.env.shell,
+                exit_code: earlyExitCode ?? 0, 
+                termination_reason: 'background',
+                command
+              },
+              execution_time_ms: Date.now() - startTime,
+            });
+          }
+        }, 500);
+      });
     }
 
     const timeoutPromise = new Promise<never>((_, reject) =>
@@ -226,19 +274,45 @@ export class TerminalService {
         chat_id: context.chat_id,
         message_id: context.message_id,
         status: exitCode === 0 ? 'success' : 'error',
-        // Content is a terse summary for the LLM — raw output stays in the terminal panel
         content: exitCode === 0
-          ? `Command succeeded: ${command}`
-          : `Command failed (exit ${exitCode ?? 'unknown'}): ${command}`,
+          ? `Command succeeded: ${command}\nOutput tail:\n${output.slice(-4000)}`
+          : `Command failed (exit ${exitCode ?? 'unknown'}): ${command}\nOutput tail:\n${output.slice(-4000)}`,
         data: {
+          tool_call_id: context.tool_call_id,
+          cwd,
+          shell: vscode.env.shell,
           exit_code: exitCode,
+          termination_reason: 'exit',
           terminal_name: terminalName,
           command,
+          output_tail: output.slice(-4000)
         },
         execution_time_ms: Date.now() - startTime,
       };
-    } catch (err) {
+    } catch (err: any) {
       this.stopHeartbeat(context.tool_call_id);
+      if (err.message === 'Terminal command timed out') {
+         return {
+           tool_name: 'terminal_ops',
+           tool_call_id: context.tool_call_id,
+           session_id: context.session_id,
+           chat_id: context.chat_id,
+           message_id: context.message_id,
+           status: 'error',
+           content: `Command timed out: ${command}\nOutput tail:\n${output.slice(-4000)}`,
+           data: {
+             tool_call_id: context.tool_call_id,
+             cwd,
+             shell: vscode.env.shell,
+             exit_code: -1,
+             termination_reason: 'timeout',
+             terminal_name: terminalName,
+             command,
+             output_tail: output.slice(-4000)
+           },
+           execution_time_ms: Date.now() - startTime,
+         };
+      }
       throw err;
     }
   }
@@ -270,7 +344,73 @@ export class TerminalService {
         this.backgroundProcesses.set(proc.pid, proc);
       }
 
+      let output = '';
       if (mode === 'background' && !waitForPattern) {
+        let earlyExitCode: number | null = null;
+        
+        proc.on('close', (code) => {
+          earlyExitCode = code;
+        });
+        proc.stdout?.on('data', (data) => {
+          const stripped = data.toString().replace(this.ansiRegex, '').replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+          output += stripped;
+          this.appendToBuffer(context.tool_call_id, stripped);
+        });
+        proc.stderr?.on('data', (data) => {
+          const stripped = data.toString().replace(this.ansiRegex, '').replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+          output += stripped;
+          this.appendToBuffer(context.tool_call_id, stripped);
+        });
+
+        setTimeout(() => {
+          this.stopHeartbeat(context.tool_call_id);
+          if (earlyExitCode !== null && earlyExitCode !== 0) {
+            resolve({
+              tool_name: 'terminal_ops',
+              tool_call_id: context.tool_call_id,
+              session_id: context.session_id,
+              chat_id: context.chat_id,
+              message_id: context.message_id,
+              status: 'error',
+              content: `Command failed immediately (exit ${earlyExitCode}): ${command}\nOutput tail:\n${output.slice(-4000)}`,
+              data: { 
+                tool_call_id: context.tool_call_id,
+                cwd,
+                shell: vscode.env.shell,
+                exit_code: earlyExitCode, 
+                termination_reason: 'exit',
+                command,
+                output_tail: output.slice(-4000)
+              },
+              execution_time_ms: Date.now() - startTime,
+            });
+          } else {
+            resolve({
+              tool_name: 'terminal_ops',
+              tool_call_id: context.tool_call_id,
+              session_id: context.session_id,
+              chat_id: context.chat_id,
+              message_id: context.message_id,
+              status: 'success',
+              content: `Background process started with PID ${proc.pid}`,
+              data: { 
+                tool_call_id: context.tool_call_id,
+                cwd,
+                shell: vscode.env.shell,
+                exit_code: earlyExitCode ?? 0, 
+                pid: proc.pid,
+                termination_reason: 'background',
+                command
+              },
+              execution_time_ms: Date.now() - startTime,
+            });
+          }
+        }, 500);
+        return;
+      }
+
+      const timer = setTimeout(() => {
+        this.killProcessTree(proc);
         this.stopHeartbeat(context.tool_call_id);
         resolve({
           tool_name: 'terminal_ops',
@@ -278,18 +418,20 @@ export class TerminalService {
           session_id: context.session_id,
           chat_id: context.chat_id,
           message_id: context.message_id,
-          status: 'success',
-          content: `Background process started with PID ${proc.pid}`,
-          data: { exit_code: 0, pid: proc.pid },
+          status: 'error',
+          content: `Command timed out: ${command}\nOutput tail:\n${output.slice(-4000)}`,
+          data: {
+            tool_call_id: context.tool_call_id,
+            cwd,
+            shell: vscode.env.shell,
+            exit_code: -1,
+            termination_reason: 'timeout',
+            terminal_name: terminalName,
+            command,
+            output_tail: output.slice(-4000)
+          },
           execution_time_ms: Date.now() - startTime,
         });
-        return;
-      }
-
-      let output = '';
-      const timer = setTimeout(() => {
-        this.killProcessTree(proc);
-        reject(new Error('Terminal command timed out'));
       }, timeout * 1000);
 
       const checkPattern = () => {
@@ -334,14 +476,18 @@ export class TerminalService {
           chat_id: context.chat_id,
           message_id: context.message_id,
           status: code === 0 ? 'success' : 'error',
-          // Terse summary for LLM — raw output stays in the terminal panel
           content: code === 0
-            ? `Command succeeded: ${command}`
-            : `Command failed (exit ${code ?? 'unknown'}): ${command}`,
+            ? `Command succeeded: ${command}\nOutput tail:\n${output.slice(-4000)}`
+            : `Command failed (exit ${code ?? 'unknown'}): ${command}\nOutput tail:\n${output.slice(-4000)}`,
           data: {
+            tool_call_id: context.tool_call_id,
+            cwd,
+            shell: vscode.env.shell,
             exit_code: code,
+            termination_reason: 'exit',
             terminal_name: terminalName,
             command,
+            output_tail: output.slice(-4000)
           },
           execution_time_ms: Date.now() - startTime,
         });
@@ -350,7 +496,26 @@ export class TerminalService {
       proc.on('error', (err) => {
         clearTimeout(timer);
         this.stopHeartbeat(context.tool_call_id);
-        reject(err);
+        resolve({
+          tool_name: 'terminal_ops',
+          tool_call_id: context.tool_call_id,
+          session_id: context.session_id,
+          chat_id: context.chat_id,
+          message_id: context.message_id,
+          status: 'error',
+          content: `Command error: ${err.message}\nOutput tail:\n${output.slice(-4000)}`,
+          data: {
+            tool_call_id: context.tool_call_id,
+            cwd,
+            shell: vscode.env.shell,
+            exit_code: -1,
+            termination_reason: 'error',
+            terminal_name: terminalName,
+            command,
+            output_tail: output.slice(-4000)
+          },
+          execution_time_ms: Date.now() - startTime,
+        });
       });
     });
   }
@@ -457,9 +622,13 @@ export class TerminalService {
 
 
 
-  private getOutput(args: any): ToolResult {
-    // Basic implementation placeholder for Phase 4
-    return { status: 'success', content: 'Output placeholder' } as any;
+  private getOutput(payload: any): ToolResult {
+    const toolCallId = payload.tool_call_id || payload.execution_id;
+    if (!toolCallId) {
+      return { status: 'error', content: 'tool_call_id or execution_id is required in payload' } as any;
+    }
+    const output = this.outputBuffers.get(toolCallId) || '';
+    return { status: 'success', content: output } as any;
   }
 
   private async getDiagnostics(args: any): Promise<ToolResult> {

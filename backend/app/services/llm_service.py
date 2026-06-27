@@ -9,13 +9,19 @@ from uuid import uuid4
 from openai import AsyncOpenAI
 
 from app.core.config import settings
+from app.services.tool_schemas import WORKSPACE_OPS_TOOL_SPEC, TERMINAL_OPS_TOOL_SPEC, LOAD_TOOL_CONTEXT_TOOL_SPEC
 
 logger = logging.getLogger(__name__)
 context_logger = logging.getLogger("app.context")
 
-_glm_rate_limiter = asyncio.Semaphore(1)
-_glm_last_call_time = 0.0
-_glm_rate_limit_seconds = 70
+_rate_limiters: dict[str, asyncio.Semaphore] = {}
+_last_call_times: dict[str, float] = {}
+_rate_limit_seconds = 5
+
+def _get_rate_limiter(api_key: str) -> asyncio.Semaphore:
+    if api_key not in _rate_limiters:
+        _rate_limiters[api_key] = asyncio.Semaphore(1)
+    return _rate_limiters[api_key]
 _context_log_sequence = 0
 
 
@@ -37,218 +43,6 @@ def _log_llm_context_snapshot(
     }
     context_logger.info("LLM_CONTEXT %s", json.dumps(snapshot, ensure_ascii=False, default=str))
 
-
-WORKSPACE_OPS_TOOL_SPEC: dict[str, Any] = {
-    "type": "function",
-    "function": {
-        "name": "workspace_ops",
-        "description": "Single unified tool that dispatches all file system operations via an 'action' field. Set action to one of: list_dir, search_text, read_file, bulk_files_read, edit_file, create_file, delete_path, rename_path. Every call requires action, request_id, mode, and payload.",
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "action": {
-                    "type": "string",
-                    "enum": [
-                        "list_dir",
-                        "search_text",
-                        "read_file",
-                        "bulk_files_read",
-                        "edit_file",
-                        "create_file",
-                        "delete_path",
-                        "rename_path",
-                    ],
-                },
-                "request_id": {
-                    "type": "string",
-                    "description": "Stable idempotency key for retries of the same tool call.",
-                },
-                "mode": {
-                    "type": "string",
-                    "enum": ["preview", "apply"],
-                    "description": "Use 'preview' to see what would happen, 'apply' to execute the change."
-                },
-                "payload": {
-                    "type": "object",
-                    "description": "Arguments for the action.",
-                    "properties": {
-                        "path": {
-                            "type": "string",
-                            "description": "The file or directory path. Use '.' or '/' for the root directory."
-                        },
-                        "paths": {
-                            "type": "array",
-                            "items": {"type": "string"},
-                            "description": "Array of file paths to read. Required for bulk_files_read."
-                        },
-                        "query": {
-                            "type": "string",
-                            "description": "The text or regex inside file contents to search for. Required for search_text."
-                        },
-                        "variants": {
-                            "type": "array",
-                            "items": {"type": "string"},
-                            "description": "Semantic synonyms to improve search coverage (e.g. ['max_tokens', 'token_limit'])."
-                        },
-                        "filePattern": {
-                            "type": "string",
-                            "description": "Glob pattern to limit search, e.g. '**/*.py'."
-                        },
-                        "useRegex": {
-                            "type": "boolean",
-                            "description": "Whether query is a regex pattern."
-                        },
-                        "edits": {
-                            "type": "array",
-                            "description": (
-                                "Array of edit objects. Required for edit_file. "
-                                "Each object: {startLine, startCol, endLine, endCol, text}. "
-                                "ALL coordinates are 1-indexed — the first character of the first line is startLine:1, startCol:1. "
-                                "startCol:0 or endCol:0 are INVALID and will always be rejected. "
-                                "To insert text before existing content on a line, use startCol:1, endCol:1. "
-                                "To append a new block after the last line (lineCount=N), set startLine:N+1, startCol:1, endLine:N+1, endCol:1. "
-                                "To replace a whole line (e.g. line 5 in a CRLF file), set startCol:1, endCol equal to the line length+1."
-                            )
-                        },
-                        "expected_hash": {
-                            "type": "string",
-                            "description": "The hash of the file content before the edit. Required for edit_file."
-                        },
-                        "content": {
-                            "type": "string",
-                            "description": "Full file content. Required for create_file."
-                        },
-                        "overwrite": {
-                            "type": "boolean",
-                            "description": "Whether to overwrite existing files. Used in create_file and rename_path."
-                        },
-                        "recursive": {
-                            "type": "boolean",
-                            "description": "Whether to perform operation recursively. Required for delete_path on directories."
-                        },
-                        "useTrash": {
-                            "type": "boolean",
-                            "description": "Whether to move deleted path to trash instead of permanent deletion."
-                        },
-                        "oldPath": {
-                            "type": "string",
-                            "description": "Source path for rename_path."
-                        },
-                        "newPath": {
-                            "type": "string",
-                            "description": "Destination path for rename_path."
-                        }
-                    },
-                    "additionalProperties": True,
-                },
-            },
-            "required": ["action", "request_id", "mode", "payload"],
-            "additionalProperties": False,
-        },
-    },
-}
-
-TERMINAL_OPS_TOOL_SPEC: dict[str, Any] = {
-    "type": "function",
-    "function": {
-        "name": "terminal_ops",
-        "description": "Execute terminal commands, manage processes, and get diagnostics.",
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "action": {
-                    "type": "string",
-                    "enum": [
-                        "run_command",
-                        "send_input",
-                        "get_output",
-                        "get_diagnostics",
-                        "get_state",
-                        "list_processes",
-                        "kill_process",
-                        "list_terminals",
-                        "new_terminal",
-                        "kill_terminal",
-                    ],
-                    "description": "The terminal action to perform.",
-                },
-                "request_id": {
-                    "type": "string",
-                    "description": "Stable idempotency key for retries of the same tool call.",
-                },
-                "mode": {
-                    "type": "string",
-                    "enum": ["blocking", "background"],
-                    "description": "Whether to wait for completion (blocking) or run in background (background). Defaults to blocking.",
-                },
-                "payload": {
-                    "type": "object",
-                    "description": "Arguments for the action.",
-                    "properties": {
-                        "command": {
-                            "type": "string",
-                            "description": "The shell command to run. Required for run_command.",
-                        },
-                        "cwd": {
-                            "type": "string",
-                            "description": "The directory to run the command in. Defaults to workspace root. Required for run_command.",
-                        },
-                        "terminal_name": {
-                            "type": "string",
-                            "description": "Name of the terminal instance to use. Defaults to 'Vertex Worker'.",
-                        },
-                        "timeout_seconds": {
-                            "type": "integer",
-                            "description": "Max time to wait for a blocking command. Default 360.",
-                        },
-                        "input_text": {
-                            "type": "string",
-                            "description": "Raw text or control character (e.g. \\u0003 for Ctrl+C) to send. Required for send_input.",
-                        },
-                        "pid": {
-                            "type": "integer",
-                            "description": "Process ID to target. Required for kill_process.",
-                        },
-                        "wait_for_pattern": {
-                            "type": "string",
-                            "description": "Optional regex pattern. If provided, the command will run in the background, and the tool will pause until this pattern is detected in the output stream before returning.",
-                        },
-                        "since_command_id": {
-                            "type": "string",
-                            "description": "Filter output to only show text emitted after this command ID in get_output.",
-                        },
-                    },
-                    "additionalProperties": True,
-                },
-            },
-            "required": ["action", "request_id", "mode", "payload"],
-            "additionalProperties": False,
-        },
-    },
-}
-
-LOAD_TOOL_CONTEXT_TOOL_SPEC: dict[str, Any] = {
-    "type": "function",
-    "function": {
-        "name": "load_tool_context",
-        "description": "Loads detailed usage guidance for tool categories into your context. Call this first, before workspace_ops or terminal_ops, to receive the full usage instructions. Load all required categories in one call.",
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "categories": {
-                    "type": "array",
-                    "items": {
-                        "type": "string",
-                        "enum": ["workspace_ops", "terminal_ops"],
-                    },
-                    "description": "The tool categories to load. Load all categories you expect to need in one call.",
-                }
-            },
-            "required": ["categories"],
-            "additionalProperties": False,
-        },
-    },
-}
 
 
 def format_tool_response(
@@ -343,11 +137,11 @@ def _build_system_prompt(
     return "\n\n".join(parts)
 
 
-def _get_client() -> AsyncOpenAI:
+def _get_client(api_key: str | None = None) -> AsyncOpenAI:
     base_url = _normalize_base_url(settings.llm_base_url)
     return AsyncOpenAI(
         base_url=base_url,
-        api_key=settings.llm_api_key,
+        api_key=api_key or settings.llm_api_key,
     )
 
 
@@ -355,7 +149,7 @@ def _normalize_base_url(base_url: str) -> str:
     normalized_base_url = base_url.strip().rstrip("/")
 
     if not normalized_base_url:
-        return "https://api.us-west-2.modal.direct/v1"
+        raise ValueError("LLM base URL is empty or unconfigured")
 
     chat_completions_suffix = "/chat/completions"
     if normalized_base_url.endswith(chat_completions_suffix):
@@ -539,7 +333,15 @@ def _finalize_pending_tool_calls(
         try:
             arguments = json.loads(arguments_text) if arguments_text else {}
         except json.JSONDecodeError:
-            logger.warning("Ignoring malformed structured tool call arguments: %s", arguments_text)
+            logger.warning("Yielding malformed structured tool call arguments to agent: %s", arguments_text)
+            tool_call_events.append(
+                {
+                    "type": "tool_call",
+                    "tool_call_id": tool_call_id,
+                    "tool_name": tool_name,
+                    "args": {"__schema_error__": "JSONDecodeError: Malformed JSON arguments", "raw_text": arguments_text},
+                }
+            )
             continue
 
         if not isinstance(arguments, dict):
@@ -571,7 +373,10 @@ async def stream_chat_completion(
     Yields:
         Token chunks (str) as they stream from the model.
     """
-    client = _get_client()
+    from app.services.key_pool import key_pool
+    key_idx, api_key = await key_pool.next_key()
+    
+    client = _get_client(api_key=api_key)
     stream = await client.chat.completions.create(
         **_build_request_payload(messages, workspace_skeleton)
     )
@@ -612,9 +417,13 @@ async def stream_chat_events(
       - {"type": "thinking", "content": "..."}
       - {"type": "tool_call", "tool_call_id": "...", "tool_name": "...", "args": {...}}
     """
-    global _glm_last_call_time
+    from app.services.key_pool import key_pool
+    key_idx, api_key = await key_pool.next_key()
     
-    client = _get_client()
+    rate_limiter = _get_rate_limiter(api_key)
+    client = _get_client(api_key=api_key)
+    logger.info("Using API key index %d from pool of size %d", key_idx, key_pool.pool_size)
+    
     payload = _build_request_payload(messages, workspace_skeleton, model, active_tool_guidance)
     _log_llm_context_snapshot(payload, context_log_metadata)
     
@@ -637,15 +446,16 @@ async def stream_chat_events(
     )
     
     try:
-        async with _glm_rate_limiter:
-            elapsed = time.monotonic() - _glm_last_call_time
-            if elapsed < _glm_rate_limit_seconds:
-                wait_time = _glm_rate_limit_seconds - elapsed
-                logger.info("🔄 %s-second rate limit delay started (waiting %.1f seconds)", _glm_rate_limit_seconds, wait_time)
+        async with rate_limiter:
+            last_call_time = _last_call_times.get(api_key, 0.0)
+            elapsed = time.monotonic() - last_call_time
+            if elapsed < _rate_limit_seconds:
+                wait_time = _rate_limit_seconds - elapsed
+                logger.info("🔄 %s-second rate limit delay started (waiting %.1f seconds)", _rate_limit_seconds, wait_time)
                 await asyncio.sleep(wait_time)
-                logger.info("✅ %s-second rate limit delay finished, proceeding with LLM call", _glm_rate_limit_seconds)
+                logger.info("✅ %s-second rate limit delay finished, proceeding with LLM call", _rate_limit_seconds)
             stream = await client.chat.completions.create(**payload)
-            _glm_last_call_time = time.monotonic()
+            _last_call_times[api_key] = time.monotonic()
         logger.debug("LLM stream established successfully")
     except Exception as stream_init_exc:
         logger.error(

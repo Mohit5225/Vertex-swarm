@@ -201,14 +201,36 @@ const renderChevron = (expanded: boolean) => (
   </span>
 )
 
+const extractTerminalOutput = (resultDebug: any): string => {
+  if (!resultDebug) return ''
+  if (typeof resultDebug === 'string') return resultDebug
+  
+  const data = resultDebug.data
+  if (data) {
+    if (typeof data.output === 'string') return data.output
+    if (typeof data.stdout === 'string' || typeof data.stderr === 'string') {
+      return [data.stdout, data.stderr].filter(Boolean).join('\n')
+    }
+  }
+  
+  if (typeof resultDebug.output === 'string') return resultDebug.output
+  
+  try {
+    return JSON.stringify(resultDebug, null, 2)
+  } catch {
+    return String(resultDebug)
+  }
+}
+
 /**
  * TerminalCard — shown instead of raw debug output for terminal_ops nodes.
  * Displays command + exit status and a "Show Terminal" button that focuses
- * the actual terminal panel instance — zero raw output in chat.
+ * the actual terminal panel instance. Now supports expanding to view output!
  */
 const TerminalCard: React.FC<{
   node: ToolExecutionNode
-}> = ({ node }) => {
+  expanded?: boolean
+}> = ({ node, expanded }) => {
   const data = (node.resultDebug as any)?.data as
     | { terminal_name?: string; command?: string; exit_code?: number | null }
     | undefined
@@ -219,50 +241,78 @@ const TerminalCard: React.FC<{
   const durationMs =
     node.completedAt && node.startedAt ? node.completedAt - node.startedAt : undefined
 
+  const outputText = extractTerminalOutput(node.resultDebug)
+
   const handleShowTerminal = () => {
     getVsCodeApi()?.postMessage({ type: 'show-terminal', payload: { terminalName } })
   }
 
   return (
-    <div className="mt-2 ml-0.5 rounded-[18px] bg-[linear-gradient(180deg,rgba(18,25,39,0.95),rgba(12,18,29,0.98))] px-3 py-3 shadow-[0_14px_30px_rgba(0,0,0,0.22)]">
-      <div className="mb-2 flex items-center gap-2 text-[11px] font-medium text-[#7f91b4]">
-        <Terminal className="h-3.5 w-3.5" />
-        <span>{terminalName}</span>
+    <div className="mt-2 ml-0.5 overflow-hidden rounded-[18px] bg-[linear-gradient(180deg,rgba(18,25,39,0.95),rgba(12,18,29,0.98))] shadow-[0_14px_30px_rgba(0,0,0,0.22)] border border-white/[0.05]">
+      {/* Header */}
+      <div className="px-3 pt-3 pb-2">
+        <div className="mb-2 flex items-center justify-between text-[11px] font-medium text-[#7f91b4]">
+          <div className="flex items-center gap-2">
+            <Terminal className="h-3.5 w-3.5" />
+            <span>{terminalName}</span>
+          </div>
+          <div className="flex items-center gap-3">
+            {exitCode !== undefined && exitCode !== null && (
+              <span
+                className={`rounded-md px-1.5 py-0.5 font-mono text-[10px] font-medium ${
+                  exitCode === 0
+                    ? 'bg-[#1a3a2a] text-[#79d3b3]'
+                    : 'bg-[#3a1a1a] text-[#ff9f95]'
+                }`}
+              >
+                exit {exitCode}
+              </span>
+            )}
+            {durationMs !== undefined && (
+              <span>{(durationMs / 1000).toFixed(1)}s</span>
+            )}
+          </div>
+        </div>
+
+        {command && (
+          <div className="rounded-xl bg-white/[0.04] px-3 py-2">
+            <p className="font-mono text-[11px] leading-5 text-[#c6d2e7] break-all">{command}</p>
+          </div>
+        )}
       </div>
 
-      {command && (
-        <div className="mb-2 rounded-xl bg-white/[0.04] px-3 py-2">
-          <p className="font-mono text-[11px] leading-5 text-[#c6d2e7] break-all">{command}</p>
+      {/* Expanded view for terminal output */}
+      {expanded ? (
+        <div className="border-t border-white/[0.05] bg-[#06090e]">
+          <div className="flex items-center justify-between px-3 py-2 bg-white/[0.02]">
+            <span className="text-[10px] font-medium text-[#6f81a1] uppercase tracking-wider">Command Output</span>
+            <button
+              type="button"
+              onClick={handleShowTerminal}
+              className="flex items-center gap-1.5 rounded text-[10px] font-medium text-[#8bd7ff] transition hover:text-[#b8e8ff]"
+            >
+              <Terminal className="h-3 w-3" />
+              Open Terminal Panel
+            </button>
+          </div>
+          <div className="p-3 overflow-x-auto max-h-[300px] custom-scrollbar">
+            <pre className="font-mono text-[11px] leading-5 text-[#a1b0cb] whitespace-pre-wrap break-words">
+              {outputText || 'No output captured.'}
+            </pre>
+          </div>
+        </div>
+      ) : (
+        <div className="px-3 pb-3 flex justify-end">
+          <button
+            type="button"
+            onClick={handleShowTerminal}
+            className="flex items-center gap-1.5 rounded-lg bg-white/[0.06] px-2.5 py-1.5 text-[11px] font-medium text-[#8bd7ff] transition hover:bg-white/[0.1] hover:text-[#b8e8ff] active:scale-[0.97]"
+          >
+            <Terminal className="h-3 w-3" />
+            Show Terminal
+          </button>
         </div>
       )}
-
-      <div className="flex items-center justify-between gap-3">
-        <div className="flex items-center gap-3 text-[11px] text-[#7f91b4]">
-          {exitCode !== undefined && exitCode !== null && (
-            <span
-              className={`rounded-md px-1.5 py-0.5 font-mono text-[10px] font-medium ${
-                exitCode === 0
-                  ? 'bg-[#1a3a2a] text-[#79d3b3]'
-                  : 'bg-[#3a1a1a] text-[#ff9f95]'
-              }`}
-            >
-              exit {exitCode}
-            </span>
-          )}
-          {durationMs !== undefined && (
-            <span>{(durationMs / 1000).toFixed(1)}s</span>
-          )}
-        </div>
-
-        <button
-          type="button"
-          onClick={handleShowTerminal}
-          className="flex items-center gap-1.5 rounded-lg bg-white/[0.06] px-2.5 py-1.5 text-[11px] font-medium text-[#8bd7ff] transition hover:bg-white/[0.1] hover:text-[#b8e8ff] active:scale-[0.97]"
-        >
-          <Terminal className="h-3 w-3" />
-          Show Terminal
-        </button>
-      </div>
     </div>
   )
 }
@@ -298,13 +348,13 @@ const NodeAccordion: React.FC<{
 
         <div className="mt-0.5 flex shrink-0 items-center gap-1.5">
           {stateIndicator(node.state)}
-          {node.toolName !== 'terminal_ops' && renderChevron(expanded)}
+          {renderChevron(expanded)}
         </div>
       </button>
 
       {/* Terminal ops: show terminal card (no raw output in chat) */}
       {node.toolName === 'terminal_ops' && node.state !== 'running' && (
-        <TerminalCard node={node} />
+        <TerminalCard node={node} expanded={expanded} />
       )}
 
       {/* All other tools: show debug view on expand */}

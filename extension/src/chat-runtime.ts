@@ -20,7 +20,7 @@ import type {
   ToolCallPayload,
 } from './types/index';
 
-const BACKEND_URL = process.env.VERTEX_BACKEND_URL || 'http://localhost:8000';
+const BACKEND_URL = process.env.VERTEX_BACKEND_URL || 'http://127.0.0.1:8000';
 
 interface ChatMessagesResponse {
   chatId: string;
