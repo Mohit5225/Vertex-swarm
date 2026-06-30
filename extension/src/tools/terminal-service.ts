@@ -6,8 +6,16 @@ import { ToolResult, SessionEvent } from '../types/index';
  * TerminalService
  * Handles terminal execution via Shell Integration (Primary) or child_process (Fallback).
  */
+export interface TerminalContextState {
+  name: string;
+  purpose: string;
+  isBusy: boolean;
+  lifecycleAction: string;
+}
+
 export class TerminalService {
   private readonly terminals = new Map<string, vscode.Terminal>();
+  private readonly terminalContexts = new Map<string, TerminalContextState>();
   private readonly backgroundProcesses = new Map<number, cp.ChildProcess>();
   private readonly heartbeatFlushes = new Map<string, NodeJS.Timeout>();
   private readonly outputBuffers = new Map<string, string>();
@@ -20,7 +28,55 @@ export class TerminalService {
   constructor(
     private readonly log: (message: string) => void,
     private readonly postEvent: (event: SessionEvent) => void
-  ) { }
+  ) {
+    vscode.window.onDidCloseTerminal(terminal => {
+      for (const [key, t] of this.terminals.entries()) {
+        if (t === terminal) {
+          this.terminals.delete(key);
+          this.terminalContexts.delete(key);
+          break;
+        }
+      }
+    });
+
+    vscode.window.onDidStartTerminalShellExecution(event => {
+      for (const [key, t] of this.terminals.entries()) {
+        if (t === event.terminal) {
+          const ctx = this.terminalContexts.get(key);
+          if (ctx) ctx.isBusy = true;
+          break;
+        }
+      }
+    });
+
+    vscode.window.onDidEndTerminalShellExecution(event => {
+      for (const [key, t] of this.terminals.entries()) {
+        if (t === event.terminal) {
+          const ctx = this.terminalContexts.get(key);
+          if (ctx) ctx.isBusy = false;
+          break;
+        }
+      }
+    });
+  }
+
+  public getActiveTerminalContexts(): TerminalContextState[] {
+    const activeContexts: TerminalContextState[] = [];
+    for (const t of vscode.window.terminals) {
+       const tracked = this.terminalContexts.get(t.name);
+       if (tracked) {
+         activeContexts.push(tracked);
+       } else {
+         activeContexts.push({
+           name: t.name,
+           purpose: 'User-created or untracked terminal',
+           isBusy: false,
+           lifecycleAction: 'keep_open_long_term'
+         });
+       }
+    }
+    return activeContexts;
+  }
 
   /**
    * Execute a terminal operation
@@ -96,23 +152,51 @@ export class TerminalService {
     }
   }
 
-  /**
-   * Run a command (Blocking or Background)
-   */
   private async runCommand(payload: any, context: any, topLevelMode?: string): Promise<ToolResult> {
     const { command, cwd, mode: payloadMode, timeout_seconds = 360, wait_for_pattern } = payload;
     const mode = topLevelMode || payloadMode || 'blocking';
-    const terminalName = payload.terminal_name || 'Vertex Worker';
+    
+    let terminalName = payload.terminal_name || 'Vertex Worker';
+    let lifecycleAction = 'keep_open_long_term';
+    
+    if (payload.terminal_context) {
+      terminalName = payload.terminal_context.name || terminalName;
+      lifecycleAction = payload.terminal_context.lifecycle_action || lifecycleAction;
+      
+      this.terminalContexts.set(terminalName, {
+        name: terminalName,
+        purpose: payload.terminal_context.purpose || 'Default purpose',
+        lifecycleAction: lifecycleAction,
+        isBusy: true
+      });
+    } else {
+      this.terminalContexts.set(terminalName, {
+        name: terminalName,
+        purpose: 'Default background worker',
+        lifecycleAction: lifecycleAction,
+        isBusy: true
+      });
+    }
 
     const terminal = await this.getOrCreateTerminal(terminalName);
 
     // Start Heartbeat for live progress
     this.startHeartbeat(context.tool_call_id);
 
-    if (terminal.shellIntegration) {
-      return await this.runViaShellIntegration(terminal, command, cwd, context, timeout_seconds, wait_for_pattern, mode, terminalName);
-    } else {
-      return await this.runViaFallback(command, cwd, context, timeout_seconds, wait_for_pattern, mode, terminalName);
+    try {
+      if (terminal.shellIntegration) {
+        return await this.runViaShellIntegration(terminal, command, cwd, context, timeout_seconds, wait_for_pattern, mode, terminalName, lifecycleAction);
+      } else {
+        return await this.runViaFallback(command, cwd, context, timeout_seconds, wait_for_pattern, mode, terminalName, lifecycleAction);
+      }
+    } finally {
+      // Blocking command cleanup handled here. Background command cleanup handled internally by methods.
+      if (mode !== 'background' && lifecycleAction === 'auto_delete_after_command') {
+        const t = this.terminals.get(terminalName);
+        if (t) {
+          t.dispose(); // This triggers onDidCloseTerminal which removes from maps
+        }
+      }
     }
   }
 
@@ -127,7 +211,8 @@ export class TerminalService {
     timeout: number,
     waitForPattern?: string,
     mode?: string,
-    terminalName: string = 'Vertex Worker'
+    terminalName: string = 'Vertex Worker',
+    lifecycleAction: string = 'keep_open_long_term'
   ): Promise<ToolResult> {
     if (cwd) {
       const shell = vscode.env.shell.toLowerCase();
@@ -138,7 +223,14 @@ export class TerminalService {
       this.log(`Terminal: Injecting location: ${cdCmd}`);
       const cdExecution = terminal.shellIntegration!.executeCommand(cdCmd);
 
-      const cdExitCode = await new Promise<number | undefined>((resolve) => {
+      const cdTimeoutPromise = new Promise<number | undefined>((resolve) => {
+        setTimeout(() => {
+          this.log(`Terminal: cd command timed out after 5 seconds`);
+          resolve(undefined);
+        }, 5000);
+      });
+
+      const cdEventPromise = new Promise<number | undefined>((resolve) => {
         const disposable = vscode.window.onDidEndTerminalShellExecution(event => {
           if (event.execution === cdExecution) {
             disposable.dispose();
@@ -146,6 +238,8 @@ export class TerminalService {
           }
         });
       });
+
+      const cdExitCode = await Promise.race([cdEventPromise, cdTimeoutPromise]);
 
       if (cdExitCode !== 0 && cdExitCode !== undefined) {
         this.stopHeartbeat(context.tool_call_id);
@@ -177,6 +271,9 @@ export class TerminalService {
         const disposable = vscode.window.onDidEndTerminalShellExecution(event => {
           if (event.execution === execution) {
             earlyExitCode = event.exitCode;
+            if (lifecycleAction === 'auto_delete_after_command') {
+               terminal.dispose();
+            }
           }
         });
         
@@ -327,7 +424,8 @@ export class TerminalService {
     timeout: number,
     waitForPattern?: string,
     mode?: string,
-    terminalName: string = 'Vertex Worker'
+    terminalName: string = 'Vertex Worker',
+    lifecycleAction: string = 'keep_open_long_term'
   ): Promise<ToolResult> {
     this.log(`Terminal: Running via Fallback (child_process): ${command}`);
     const startTime = Date.now();
@@ -469,6 +567,10 @@ export class TerminalService {
       proc.on('close', (code) => {
         clearTimeout(timer);
         this.stopHeartbeat(context.tool_call_id);
+        if (lifecycleAction === 'auto_delete_after_command') {
+          const t = this.terminals.get(terminalName);
+          if (t) t.dispose();
+        }
         resolve({
           tool_name: 'terminal_ops',
           tool_call_id: context.tool_call_id,
@@ -524,19 +626,23 @@ export class TerminalService {
    * Helper: Get or create a terminal instance
    */
   private async getOrCreateTerminal(name: string): Promise<vscode.Terminal> {
-    let terminal = this.terminals.get(name);
+    let terminal = this.terminals.get(name) || vscode.window.terminals.find(t => t.name === name);
     if (!terminal || terminal.exitStatus !== undefined) {
       terminal = vscode.window.createTerminal(name);
+    }
+    
+    // Ensure we are tracking it for lifecycle events
+    if (!this.terminals.has(name)) {
       this.terminals.set(name, terminal);
-      terminal.show(true);
-      
-      // Wait for shell integration to become available (up to 10 seconds)
-      for (let i = 0; i < 200; i++) {
-        if (terminal.shellIntegration) {
-          break;
-        }
-        await new Promise(resolve => setTimeout(resolve, 50));
+    }
+    terminal.show(true);
+    
+    // Wait for shell integration to become available (up to 10 seconds)
+    for (let i = 0; i < 200; i++) {
+      if (terminal.shellIntegration) {
+        break;
       }
+      await new Promise(resolve => setTimeout(resolve, 50));
     }
     return terminal;
   }
@@ -581,9 +687,10 @@ export class TerminalService {
   // --- Action Implementations ---
 
   private async sendInput(payload: any): Promise<ToolResult> {
-    const terminal = this.terminals.get(payload.terminal_name || 'Vertex Worker');
+    const name = payload.terminal_name || 'Vertex Worker';
+    const terminal = this.terminals.get(name) || vscode.window.terminals.find(t => t.name === name);
     if (!terminal) {
-      throw new Error(`Terminal not found: ${payload.terminal_name}`);
+      throw new Error(`Terminal not found: ${name}`);
     }
     terminal.sendText(payload.input_text || '', false);
     return { status: 'success', content: 'Input sent successfully' } as any;
@@ -615,7 +722,7 @@ export class TerminalService {
       content: JSON.stringify({
         os: process.platform,
         shell: vscode.env.shell,
-        terminals: Array.from(this.terminals.keys())
+        terminals: this.getActiveTerminalContexts()
       }, null, 2)
     } as any;
   }
@@ -644,8 +751,8 @@ export class TerminalService {
   }
 
   private listTerminals(): ToolResult {
-    const names = vscode.window.terminals.map(t => t.name);
-    return { status: 'success', content: JSON.stringify(names, null, 2) } as any;
+    const contexts = this.getActiveTerminalContexts();
+    return { status: 'success', content: JSON.stringify(contexts, null, 2) } as any;
   }
 
   private async newTerminal(payload: any): Promise<ToolResult> {
@@ -656,12 +763,14 @@ export class TerminalService {
 
   private killTerminal(payload: any): ToolResult {
     const name = payload.terminal_name;
-    const terminal = this.terminals.get(name);
+    const terminal = this.terminals.get(name) || vscode.window.terminals.find(t => t.name === name);
     if (terminal) {
       terminal.dispose();
       this.terminals.delete(name);
-      return { status: 'success', content: `Terminal ${name} disposed` } as any;
+      // @ts-ignore
+      this.terminalContexts?.delete(name);
+      return { status: 'success', content: `Killed terminal ${name}` } as any;
     }
-    return { status: 'error', content: `Terminal ${name} not found` } as any;
+    return { status: 'error', content: `Terminal not found: ${name}` } as any;
   }
 }

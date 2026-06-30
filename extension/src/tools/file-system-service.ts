@@ -1283,61 +1283,110 @@ export class FileSystemService {
     startMs: number
   ): Promise<ToolResult> {
     try {
-      const path = this.requireStringField(request.payload, 'path');
-      const content = this.requireStringField(request.payload, 'content');
+      const filesPayload = request.payload.files as Array<{ path: string, content?: string }> | undefined;
+      let filesToCreate: Array<{ path: string, content?: string }> = [];
+
+      // Support legacy single file format and new multiple files format
+      if (filesPayload && Array.isArray(filesPayload)) {
+        for (const file of filesPayload) {
+          if (!file || typeof file.path !== 'string') {
+            return this.errorResult('workspace_ops', context, 'Each item in "files" array must be an object with a "path" string property.', 'INVALID_FILES', startMs);
+          }
+        }
+        filesToCreate = filesPayload;
+      } else {
+        const legacyPath = this.requireStringField(request.payload, 'path');
+        const legacyContent = this.optionalStringField(request.payload, 'content');
+        filesToCreate = [{ path: legacyPath, content: legacyContent }];
+      }
+
       const overwrite = this.optionalBooleanField(request.payload, 'overwrite') ?? false;
 
-      const fileUri = this.resolveWorkspacePath(path);
-      const existingStat = await this.tryStat(fileUri);
-      const exists = Boolean(existingStat);
-
-      if (exists && !overwrite) {
-        return this.cacheWorkspaceResult(request.requestId, this.errorResult(
-          'workspace_ops',
-          context,
-          `create_file target already exists: ${path}`,
-          'ALREADY_EXISTS',
-          startMs
-        ));
+      if (filesToCreate.length === 0) {
+        return this.errorResult('workspace_ops', context, 'create_file requires at least one file or folder to create.', 'INVALID_FILES', startMs);
       }
 
-      const currentVersion = exists && existingStat
-        ? await this.computePathVersion(fileUri, existingStat)
-        : undefined;
+      let fileCount = 0;
+      let folderCount = 0;
 
-      if (request.mode === 'apply' && exists) {
-        const concurrencyError = this.validateConcurrencyGuard(
-          request,
-          currentVersion ?? '',
-          context,
-          startMs,
-          path
-        );
-        if (concurrencyError) {
-          return this.cacheWorkspaceResult(request.requestId, concurrencyError);
-        }
-      } else if (currentVersion) {
-        const concurrencyError = this.validateConcurrencyGuard(
-          request,
-          currentVersion,
-          context,
-          startMs,
-          path
-        );
-        if (concurrencyError) {
-          return this.cacheWorkspaceResult(request.requestId, concurrencyError);
+      for (const file of filesToCreate) {
+        const isFolder = file.content === undefined || file.content === null || file.path.endsWith('/') || file.path.endsWith('\\');
+        if (isFolder) {
+          folderCount++;
+        } else {
+          fileCount++;
         }
       }
 
-      const contentBytes = new TextEncoder().encode(content);
-      if (contentBytes.byteLength > HARD_LIMITS.maxWriteFileBytes) {
-        return this.errorResult(
-          'workspace_ops',
-          context,
-          `create_file content too large (${contentBytes.byteLength} bytes). Max ${HARD_LIMITS.maxWriteFileBytes} bytes.`,
-          'FILE_TOO_LARGE',
-          startMs
-        );
+      if (fileCount > 5) {
+        return this.errorResult('workspace_ops', context, `create_file limit exceeded: max 5 files per turn, but ${fileCount} requested.`, 'LIMIT_EXCEEDED', startMs);
+      }
+
+      if (folderCount > 1) {
+        return this.errorResult('workspace_ops', context, `create_file limit exceeded: max 1 folder per turn, but ${folderCount} requested.`, 'LIMIT_EXCEEDED', startMs);
+      }
+
+      const resultsData: any[] = [];
+      let totalBytes = 0;
+
+      for (const file of filesToCreate) {
+        const fileUri = this.resolveWorkspacePath(file.path);
+        const existingStat = await this.tryStat(fileUri);
+        const exists = Boolean(existingStat);
+
+        if (exists && !overwrite) {
+          return this.cacheWorkspaceResult(request.requestId, this.errorResult(
+            'workspace_ops',
+            context,
+            `create_file target already exists: ${file.path}`,
+            'ALREADY_EXISTS',
+            startMs
+          ));
+        }
+
+        const currentVersion = exists && existingStat
+          ? await this.computePathVersion(fileUri, existingStat)
+          : undefined;
+
+        if (request.mode === 'apply' && exists) {
+          const concurrencyError = this.validateConcurrencyGuard(
+            request,
+            currentVersion ?? '',
+            context,
+            startMs,
+            file.path
+          );
+          if (concurrencyError) {
+            return this.cacheWorkspaceResult(request.requestId, concurrencyError);
+          }
+        } else if (currentVersion) {
+          const concurrencyError = this.validateConcurrencyGuard(
+            request,
+            currentVersion,
+            context,
+            startMs,
+            file.path
+          );
+          if (concurrencyError) {
+            return this.cacheWorkspaceResult(request.requestId, concurrencyError);
+          }
+        }
+
+        const isFolder = file.content === undefined || file.content === null || file.path.endsWith('/') || file.path.endsWith('\\');
+        
+        if (!isFolder) {
+            const contentBytes = new TextEncoder().encode(file.content ?? '');
+            totalBytes += contentBytes.byteLength;
+            if (contentBytes.byteLength > HARD_LIMITS.maxWriteFileBytes) {
+              return this.errorResult(
+                'workspace_ops',
+                context,
+                `create_file content for ${file.path} is too large (${contentBytes.byteLength} bytes). Max ${HARD_LIMITS.maxWriteFileBytes} bytes.`,
+                'FILE_TOO_LARGE',
+                startMs
+              );
+            }
+        }
       }
 
       if (request.mode === 'preview') {
@@ -1349,12 +1398,11 @@ export class FileSystemService {
               action: request.action,
               mode: request.mode,
               request_id: request.requestId,
-              path,
-              summary: `Previewed create_file for ${path}.`,
+              summary: `Previewed create_file for ${filesToCreate.length} item(s).`,
               data: {
-                exists,
+                count: filesToCreate.length,
                 overwrite,
-                content_bytes: contentBytes.byteLength,
+                total_bytes: totalBytes,
                 applied: false,
               },
               conflict: null,
@@ -1366,9 +1414,21 @@ export class FileSystemService {
         ));
       }
 
-      await this.ensureParentDirectory(fileUri);
-      await vscode.workspace.fs.writeFile(fileUri, contentBytes);
-      const nextHash = this.computeContentHash(content);
+      for (const file of filesToCreate) {
+        const fileUri = this.resolveWorkspacePath(file.path);
+        const isFolder = file.content === undefined || file.content === null || file.path.endsWith('/') || file.path.endsWith('\\');
+
+        if (isFolder) {
+            await vscode.workspace.fs.createDirectory(fileUri);
+            resultsData.push({ path: file.path, type: 'folder', applied: true });
+        } else {
+            await this.ensureParentDirectory(fileUri);
+            const contentBytes = new TextEncoder().encode(file.content ?? '');
+            await vscode.workspace.fs.writeFile(fileUri, contentBytes);
+            const nextHash = this.computeContentHash(file.content ?? '');
+            resultsData.push({ path: file.path, type: 'file', next_hash: nextHash, applied: true });
+        }
+      }
 
       return this.cacheWorkspaceResult(request.requestId, this.successResult(
         'workspace_ops',
@@ -1378,12 +1438,10 @@ export class FileSystemService {
             action: request.action,
             mode: request.mode,
             request_id: request.requestId,
-            path,
-            summary: `Created ${path}.`,
+            summary: `Created ${filesToCreate.length} item(s).`,
             data: {
-              exists,
+              items: resultsData,
               overwrite,
-              next_hash: nextHash,
               applied: true,
             },
             conflict: null,

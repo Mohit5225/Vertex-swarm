@@ -1,12 +1,12 @@
-import React, { useEffect, useMemo, useRef, useState } from 'react'
+import React, { useEffect, useRef, useState } from 'react'
 import { useAuthStore } from '../store/authStore'
 import { useChatStore } from '../store/chatStore'
 import MessageRenderer from './MessageRenderer'
 import InputArea from './InputArea'
 import ConfirmDialog from './ConfirmDialog'
 import { getVsCodeApi } from '../lib/vscode'
-import { ArrowLeft, History, LogOut, RefreshCw, Settings, Package } from 'lucide-react'
-import { describeStreamState } from '../lib/trace'
+import { Package } from 'lucide-react'
+
 import { TOAST_STATUS_PHASES } from '../lib/agentRunBlocks'
 import { getEventPhase } from '../lib/sessionEvents'
 
@@ -68,38 +68,13 @@ const ChatPanel: React.FC = () => {
   const sessionPanelRef = useRef<HTMLDivElement>(null)
   const historyPanelRef = useRef<HTMLDivElement>(null)
 
-  const chatTitle = useMemo(() => {
-    const latestUserMessage = [...messages]
-      .reverse()
-      .find((message) => message.type === 'user')
 
-    if (!latestUserMessage) {
-      return 'Chat'
-    }
-
-    return latestUserMessage.content.length > 68
-      ? `${latestUserMessage.content.slice(0, 68)}...`
-      : latestUserMessage.content
-  }, [messages])
-
-  const streamStateDescription = useMemo(
-    () => describeStreamState(messages, isStreaming),
-    [messages, isStreaming]
-  )
 
   const sessionStateLabel = isStreaming
     ? 'Running'
     : messages.length > 0
       ? 'Ready'
       : 'Idle'
-
-  const latestAgentMessage = useMemo(
-    () => [...messages].reverse().find((message) => message.type === 'agent'),
-    [messages]
-  )
-
-  const shouldShowInlineStreamingState =
-    isStreaming && !latestAgentMessage?.events?.length
 
   useEffect(() => {
     // Only smooth scroll if there are messages and we're not streaming super fast, 
@@ -172,6 +147,27 @@ const ChatPanel: React.FC = () => {
     }
   }, [showHistoryPanel, showSessionPanel])
 
+  useEffect(() => {
+    const handleMessage = (event: MessageEvent) => {
+      const message = event.data;
+      switch (message.type) {
+        case 'toggle-history':
+          setShowHistoryPanel((prev) => !prev);
+          setShowSessionPanel(false);
+          break;
+        case 'toggle-session':
+          setShowSessionPanel((prev) => !prev);
+          setShowHistoryPanel(false);
+          break;
+        case 'logout-confirm':
+          setShowLogoutConfirm(true);
+          break;
+      }
+    };
+    window.addEventListener('message', handleMessage);
+    return () => window.removeEventListener('message', handleMessage);
+  }, []);
+
   const handleConfirmLogout = () => {
     setShowLogoutConfirm(false)
     getVsCodeApi()?.postMessage({ type: 'logout' })
@@ -228,109 +224,12 @@ const ChatPanel: React.FC = () => {
         </div>
       )}
 
-      <div className="flex h-full min-h-0 flex-col overflow-hidden">
-        <div className="relative border-b chat-divider px-2 pb-2 pt-3">
-          <p className="text-[11px] font-semibold uppercase tracking-[0.22em] text-[#8ea0c0]">
-            Vertex Swarm
-          </p>
-
-          <div className="mt-2.5 flex items-start justify-between gap-2">
-            <div className="min-w-0 flex items-start gap-2">
-              {messages.length > 0 && (
-                <button
-                  type="button"
-                  onClick={handleStartFresh}
-                  className="icon-btn mt-0.5"
-                  title="Start a fresh task"
-                  disabled={isStreaming}
-                >
-                  <ArrowLeft className="h-4 w-4" />
-                </button>
-              )}
-
-              <div className="min-w-0">
-                <div className="flex items-center gap-2">
-                  <span
-                    className={`h-2 w-2 shrink-0 rounded-full ${isStreaming
-                        ? 'bg-[#48d2b4]'
-                        : messages.length > 0
-                          ? 'bg-[#8bd7ff]'
-                          : 'bg-[#7f91b4]'
-                      }`}
-                  />
-                  <h2
-                    className="truncate text-[1.08rem] font-semibold tracking-[-0.01em] text-[#f4f7ff]"
-                    title={chatTitle}
-                  >
-                    {chatTitle}
-                  </h2>
-                </div>
-
-                <div className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-1 text-[11px] leading-5 text-[#8f9cb7]">
-                  <span className="hidden min-[460px]:inline text-[#7d89a6]">
-                    {streamStateDescription}
-                  </span>
-                  <span className="hidden min-[460px]:inline text-white/15">
-                    |
-                  </span>
-                  <span>
-                    IDE context: {currentIdeContextEnabled ? 'On' : 'Off'}
-                  </span>
-                </div>
-              </div>
-            </div>
-
-            <div className="flex items-center gap-1">
-              <button
-                type="button"
-                onClick={() => {
-                  setShowHistoryPanel((value) => !value)
-                  setShowSessionPanel(false)
-                }}
-                className="icon-btn"
-                title="Recent chats"
-                data-history-toggle="true"
-              >
-                <History className="h-4 w-4" />
-              </button>
-              {messages.length > 0 && (
-                <button
-                  type="button"
-                  onClick={handleStartFresh}
-                  className="hidden min-[420px]:inline-flex icon-btn"
-                  title="New task"
-                  disabled={isStreaming}
-                >
-                  <RefreshCw className="h-4 w-4" />
-                </button>
-              )}
-              <button
-                type="button"
-                onClick={() => {
-                  setShowSessionPanel((value) => !value)
-                  setShowHistoryPanel(false)
-                }}
-                className="icon-btn"
-                title="Session"
-                data-session-toggle="true"
-              >
-                <Settings className="h-4 w-4" />
-              </button>
-              <button
-                type="button"
-                onClick={() => setShowLogoutConfirm(true)}
-                className="icon-btn"
-                title="Sign out"
-              >
-                <LogOut className="h-4 w-4" />
-              </button>
-            </div>
-          </div>
+      <div className="flex h-full min-h-0 flex-col overflow-hidden relative">
 
           {showHistoryPanel && (
             <div
               ref={historyPanelRef}
-              className="absolute left-2 top-[calc(100%+0.6rem)] z-20 w-[min(20rem,calc(100vw-1rem))] rounded-[22px] border border-white/10 bg-[#0c1220]/96 p-4 shadow-[0_22px_60px_rgba(0,0,0,0.38)] backdrop-blur-xl"
+              className="absolute right-2 top-2 z-20 w-[min(20rem,calc(100vw-1rem))] rounded-[22px] border border-white/10 bg-[#0c1220]/96 p-4 shadow-[0_22px_60px_rgba(0,0,0,0.38)] backdrop-blur-xl"
             >
               <div className="flex items-center justify-between gap-3">
                 <p className="text-[11px] font-medium uppercase tracking-[0.2em] text-[#7d89a6]">
@@ -359,8 +258,8 @@ const ChatPanel: React.FC = () => {
                         onClick={() => handleOpenChat(chat.chatId)}
                         disabled={isStreaming}
                         className={`w-full rounded-[16px] border px-3 py-3 text-left transition ${isActiveChat
-                            ? 'border-[#8bd7ff]/30 bg-[#8bd7ff]/10'
-                            : 'border-white/6 bg-white/[0.03] hover:bg-white/[0.06]'
+                          ? 'border-[#8bd7ff]/30 bg-[#8bd7ff]/10'
+                          : 'border-white/6 bg-white/[0.03] hover:bg-white/[0.06]'
                           } ${isStreaming ? 'cursor-not-allowed opacity-60' : ''
                           }`}
                       >
@@ -383,7 +282,7 @@ const ChatPanel: React.FC = () => {
           {showSessionPanel && (
             <div
               ref={sessionPanelRef}
-              className="absolute right-2 top-[calc(100%+0.6rem)] z-20 w-[min(17rem,calc(100vw-1rem))] rounded-[22px] border border-white/10 bg-[#0c1220]/96 p-4 shadow-[0_22px_60px_rgba(0,0,0,0.38)] backdrop-blur-xl"
+              className="absolute right-2 top-2 z-20 w-[min(17rem,calc(100vw-1rem))] rounded-[22px] border border-white/10 bg-[#0c1220]/96 p-4 shadow-[0_22px_60px_rgba(0,0,0,0.38)] backdrop-blur-xl"
             >
               <div className="flex items-center justify-between gap-3">
                 <p className="text-[11px] font-medium uppercase tracking-[0.2em] text-[#7d89a6]">
@@ -424,7 +323,6 @@ const ChatPanel: React.FC = () => {
               </div>
             </div>
           )}
-        </div>
 
         <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
           <div className="flex-1 overflow-hidden">
@@ -457,12 +355,6 @@ const ChatPanel: React.FC = () => {
                     <MessageRenderer key={message.id} message={message} />
                   ))}
 
-                  {shouldShowInlineStreamingState && (
-                    <div className="flex items-center gap-2 px-1 py-2 text-sm text-[#95a2bd] animate-fade-up">
-                      <span className="h-1.5 w-1.5 rounded-full bg-[#48d2b4] animate-pulse" />
-                      <span>{streamStateDescription}</span>
-                    </div>
-                  )}
 
                   {error && (
                     <div className="border-l-2 border-[#f27d75] pl-3 text-sm leading-6 text-[#ffbeb8]">

@@ -26,14 +26,13 @@ export class SSEStreamClient {
     requestContext?: RequestContextPayload
   ): Promise<void> {
     try {
-      const streamUrl = `${this.backendUrl}/api/v1/chats/${chatId}/messages`;
+      const postUrl = `${this.backendUrl}/api/v1/chats/${chatId}/messages`;
       this.abortController = new AbortController();
 
-      const response = await fetch(streamUrl, {
+      const response = await fetch(postUrl, {
         method: 'POST',
         headers: {
           Authorization: `Bearer ${this.token}`,
-          Accept: 'text/event-stream',
           'Content-Type': 'application/json',
         },
         body: JSON.stringify({
@@ -42,15 +41,56 @@ export class SSEStreamClient {
           ...(workspaceSkeleton ? { workspace_skeleton: workspaceSkeleton } : {}),
           ...(requestContext ? { request_context: requestContext } : {}),
         }),
-        signal: this.abortController.signal,
       });
 
       if (!response.ok) {
         throw new Error(await this.buildErrorMessage(response));
       }
+      
+      const responseData = await response.json() as { message_id?: string };
+      const messageId = responseData.message_id;
+      if (!messageId) {
+        throw new Error('No message_id returned from POST');
+      }
 
       this.isConnected = true;
-      await this.parseStreamResponse(response);
+      let lastEventId = '0';
+      
+      const connectStream = async () => {
+        if (!this.isConnected || this.abortController?.signal.aborted) return;
+        
+        try {
+          const streamResponse = await fetch(`${this.backendUrl}/api/v1/chats/${chatId}/messages/${messageId}/stream`, {
+            method: 'GET',
+            headers: {
+              Authorization: `Bearer ${this.token}`,
+              Accept: 'text/event-stream',
+              'Last-Event-ID': lastEventId,
+            },
+            signal: this.abortController?.signal,
+          });
+
+          if (!streamResponse.ok) {
+            throw new Error(await this.buildErrorMessage(streamResponse));
+          }
+
+          let doneEventReceived = false;
+          await this.parseStreamResponse(streamResponse, (id) => { lastEventId = id; }, () => { doneEventReceived = true; });
+          
+          if (!doneEventReceived && this.isConnected && !this.abortController?.signal.aborted) {
+            console.log("Stream ended unexpectedly, reconnecting...");
+            setTimeout(connectStream, 1000);
+          }
+        } catch (e) {
+          if (e instanceof Error && e.name === 'AbortError') return;
+          if (this.isConnected && !this.abortController?.signal.aborted) {
+            console.error("Stream fetch error, reconnecting:", e);
+            setTimeout(connectStream, 2000);
+          }
+        }
+      };
+      
+      await connectStream();
     } catch (error) {
       if (error instanceof Error && error.name === 'AbortError') {
         this.cleanup();
@@ -68,7 +108,7 @@ export class SSEStreamClient {
   /**
    * Parse server-sent events from response body
    */
-  private async parseStreamResponse(response: Response): Promise<void> {
+  private async parseStreamResponse(response: Response, onId?: (id: string) => void, onDone?: () => void): Promise<void> {
     if (!response.body) {
       throw new Error('Response has no body');
     }
@@ -99,6 +139,11 @@ export class SSEStreamClient {
             // Empty line marks end of event
             continue;
           }
+          
+          if (line.startsWith('id: ')) {
+            if (onId) onId(line.substring(4).trim());
+            continue;
+          }
 
           if (line.startsWith('data: ')) {
             try {
@@ -108,7 +153,9 @@ export class SSEStreamClient {
                 typeof eventData === 'object' &&
                 eventData.type === 'done'
               ) {
+                if (onDone) onDone();
                 await reader.cancel().catch(() => undefined);
+                this.cleanup();
                 this.onClose();
                 return;
               }
@@ -124,7 +171,7 @@ export class SSEStreamClient {
         }
       }
     } finally {
-      this.cleanup();
+      // Don't auto-cleanup on normal close, so reconnect can happen if needed
     }
   }
 
@@ -137,7 +184,7 @@ export class SSEStreamClient {
     } catch (error) {
       console.error('Failed to send cancel request:', error);
     } finally {
-      this.cleanup();
+      // Don't auto-cleanup on normal close, so reconnect can happen if needed
     }
   }
 

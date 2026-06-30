@@ -103,8 +103,8 @@ class Settings(BaseSettings):
     openrouter_api_key_4: str = ""
     openrouter_api_key_5: str = ""
     openrouter_api_key_6: str = ""
-    openrouter_model: str = "openrouter/owl-alpha"
-    openrouter_fallback_model: str = "openrouter/owl-alpha"
+    openrouter_model: str = "poolside/laguna-m.1:free"
+    openrouter_fallback_model: str = "poolside/laguna-m.1:free"
     openrouter_reasoning_enabled: bool = True
     openrouter_reasoning_effort: str = "low"
 

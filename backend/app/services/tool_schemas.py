@@ -4,7 +4,7 @@ WORKSPACE_OPS_TOOL_SPEC: dict[str, Any] = {
     "type": "function",
     "function": {
         "name": "workspace_ops",
-        "description": "Single unified tool that dispatches all file system operations via an 'action' field. Set action to one of: list_dir, search_text, read_file, bulk_files_read, edit_file, create_file, delete_path, rename_path. Every call requires action, request_id, mode, and payload.",
+        "description": "Single unified tool that dispatches all file system operations via an 'action' field. Set action to one of: list_dir, search_text, read_file, bulk_files_read, edit_file, create_file, delete_path, rename_path. Every call requires action, request_id, mode, and payload. CRITICAL: All action-specific arguments (like paths, query, edits) MUST be strictly nested INSIDE the `payload` object, not at the top level.",
         "parameters": {
             "type": "object",
             "properties": {
@@ -89,9 +89,21 @@ WORKSPACE_OPS_TOOL_SPEC: dict[str, Any] = {
                             "type": "string",
                             "description": "The hash of the file content before the edit. Required for edit_file."
                         },
+                        "files": {
+                            "type": "array",
+                            "description": "Array of files or folders to create. Required for create_file. Limit: max 5 files and max 1 folder per turn. Proactively think in good folder/file practices like good naming, standardized folder structures, etc.",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "path": {"type": "string", "description": "The file or directory path."},
+                                    "content": {"type": "string", "description": "Full file content. Omit or leave empty if creating a folder."}
+                                },
+                                "required": ["path"]
+                            }
+                        },
                         "content": {
                             "type": "string",
-                            "description": "Full file content. Required for create_file."
+                            "description": "Full file content. (Legacy, use files array for create_file)."
                         },
                         "overwrite": {
                             "type": "boolean",
@@ -127,7 +139,7 @@ TERMINAL_OPS_TOOL_SPEC: dict[str, Any] = {
     "type": "function",
     "function": {
         "name": "terminal_ops",
-        "description": "Execute terminal commands, manage processes, and get diagnostics.",
+        "description": "Execute terminal commands, manage processes, and get diagnostics. CRITICAL: All action-specific arguments (like command, cwd, tool_call_id, terminal_context) MUST be strictly nested INSIDE the `payload` object, not at the top level.",
         "parameters": {
             "type": "object",
             "properties": {
@@ -158,8 +170,12 @@ TERMINAL_OPS_TOOL_SPEC: dict[str, Any] = {
                 },
                 "payload": {
                     "type": "object",
-                    "description": "Arguments for the action.",
+                    "description": "Arguments for the action. CRITICAL: You must provide a valid `terminal_context` object inside this payload when action is 'run_command'.",
                     "properties": {
+                        "tool_call_id": {
+                            "type": "string",
+                            "description": "The tool_call_id of the command you want to retrieve output for. Required for get_output.",
+                        },
                         "command": {
                             "type": "string",
                             "description": "The shell command to run. Required for run_command.",
@@ -168,13 +184,42 @@ TERMINAL_OPS_TOOL_SPEC: dict[str, Any] = {
                             "type": "string",
                             "description": "The directory to run the command in. Defaults to workspace root. Required for run_command.",
                         },
-                        "terminal_name": {
-                            "type": "string",
-                            "description": "Name of the terminal instance to use. Defaults to 'Vertex Worker'.",
+                        "terminal_context": {
+                            "type": "object",
+                            "description": "Mandatory lifecycle and context declaration for this terminal. If unsure about lifecycle, default to keep_open_long_term.",
+                            "properties": {
+                                "name": {
+                                    "type": "string",
+                                    "description": "The exact name of the terminal to use or create."
+                                },
+                                "purpose": {
+                                    "type": "string",
+                                    "description": "The explicit current purpose of this terminal (e.g. 'Running frontend dev server')."
+                                },
+                                "will_use_in_future": {
+                                    "type": "boolean",
+                                    "description": "Set to true if you plan to reuse this terminal later, false if it is single-use."
+                                },
+                                "future_usage_reason": {
+                                    "type": "string",
+                                    "description": "If yes, explain why you need it later. If no, explain why it can be discarded."
+                                },
+                                "lifecycle_action": {
+                                    "type": "string",
+                                    "enum": ["auto_delete_after_command", "keep_open_long_term"],
+                                    "description": "If 'auto_delete_after_command', the system will automatically dispose of the terminal when the command finishes. If 'keep_open_long_term', it remains open until the user or you explicitly delete it."
+                                }
+                            },
+                            "required": ["name", "purpose", "will_use_in_future", "future_usage_reason", "lifecycle_action"],
+                            "additionalProperties": False
                         },
                         "timeout_seconds": {
                             "type": "integer",
                             "description": "Max time to wait for a blocking command. Default 360.",
+                        },
+                        "terminal_name": {
+                            "type": "string",
+                            "description": "Target terminal name for actions like send_input, new_terminal, kill_terminal.",
                         },
                         "input_text": {
                             "type": "string",

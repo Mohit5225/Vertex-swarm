@@ -82,8 +82,10 @@ export class ToolExecutor {
           execution_time_ms: 0,
         };
       } else if (resolvedToolName === 'terminal_ops') {
+        this.normalizePayload(resolvedArgs);
         toolResult = await this.terminalService.execute(resolvedArgs, context);
       } else {
+        this.normalizePayload(resolvedArgs);
         toolResult = await this.fileSystemService.workspace_ops(resolvedArgs, context);
       }
     } catch (error) {
@@ -112,6 +114,17 @@ export class ToolExecutor {
       `tool result posted name=${toolResult.tool_name} tool_call_id=${toolResult.tool_call_id} status=${toolResult.status}`
     );
     return toolResult;
+  }
+
+  private normalizePayload(args: Record<string, any>) {
+    if (typeof args !== 'object' || args === null) return;
+    const { action, request_id, mode, payload, ...rest } = args;
+    if (Object.keys(rest).length > 0) {
+      args.payload = { ...(payload || {}), ...rest };
+      for (const key of Object.keys(rest)) {
+        delete args[key];
+      }
+    }
   }
 
   private extractWorkspaceMeta(args: Record<string, unknown>): { request_id?: string; action?: string } {
@@ -175,6 +188,9 @@ export class ToolExecutor {
         `Tool result POST failed: ${response.status} ${response.statusText}${responseBody ? ` - ${responseBody}` : ''}`
       );
     }
+    
+    // Always consume the response body on success to free the socket back to the Keep-Alive pool
+    await response.text().catch(() => '');
   }
 
 }

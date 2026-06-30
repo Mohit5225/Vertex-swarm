@@ -234,6 +234,7 @@ export class VertexSwarmChatRuntime {
               name: vscode.window.activeTerminal.name,
               shell: vscode.env.shell,
             } : undefined,
+            activeTerminals: this.terminalService.getActiveTerminalContexts(),
           });
 
           await this.streamClient.openChatStream(

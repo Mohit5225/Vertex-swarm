@@ -27,10 +27,15 @@ Every call requires: `action`, `request_id`, `mode`, and `payload`.
 - `mode`: `"blocking"` (default, waits for completion) | `"background"` (returns immediately with PID)
 - `timeout_seconds`: Max wait time for blocking mode (default: 360)
 - `wait_for_pattern`: Regex string. If provided with a background process, the tool waits until this pattern appears in stdout/stderr before returning. Case-insensitive.
-- `terminal_name`: Named terminal instance (default: `"Vertex Worker"`)
+- `terminal_context` (required): Deterministic intent declaration object:
+  - `name`: Exact name for this terminal. Be contextual (e.g. `"[Worker] backend"`).
+  - `purpose`: The explicit current purpose of this terminal.
+  - `will_use_in_future`: Boolean indicating if you plan to reuse this terminal later.
+  - `future_usage_reason`: String explaining why it is needed later, or why it can be discarded.
+  - `lifecycle_action`: `"auto_delete_after_command"` (system auto-disposes terminal when command finishes) or `"keep_open_long_term"` (terminal remains open). If unsure, default to `"keep_open_long_term"`.
 
 **send_input** — Send text or control characters to a running terminal
-- `terminal_name`: Target terminal
+- `terminal_name`: Target terminal name
 - `input_text`: Raw text or control character (e.g., `"\u0003"` for Ctrl+C)
 
 **get_output** — Retrieve recent terminal output
@@ -59,7 +64,7 @@ Every call requires: `action`, `request_id`, `mode`, and `payload`.
 
 ### CONTEXT-AWARE PATH CONSTRUCTION (MANDATORY)
 
-Your context block includes `Terminal CWD`, `Workspace folders`, and `Operating System`. Always use these as your source of truth for paths:
+Your context block includes `Active Terminals State`, `Terminal CWD`, `Workspace folders`, and `Operating System`. Always use these as your source of truth for paths and terminal names:
 
 - **DO**: `"cwd": "c:\\Users\\user\\project\\frontend"` — taken directly from workspace context
 - **DON'T**: `"cwd": "/workspace/frontend"` — this is a Docker/CI default that does not exist on the user's machine
@@ -72,22 +77,45 @@ Path separators follow the OS in your context:
 
 ### EXAMPLE: Starting a dev server and waiting for it to be ready
 
-```
-// Terminal CWD from context: "c:\Users\user\project"
-// OS from context: win32
-
-terminal_ops({
-  action: "run_command",
-  request_id: "start_dev_server_456",
-  mode: "background",
-  payload: {
-    command: "npm run dev",
-    cwd: "c:\\Users\\user\\project\\frontend",   // ← derived from context, not guessed
-    wait_for_pattern: "ready|listening|started on port",
-    terminal_name: "Dev Server"
+```json
+{
+  "action": "run_command",
+  "request_id": "start_dev_server_456",
+  "mode": "background",
+  "payload": {
+    "command": "npm run dev",
+    "cwd": "c:\\Users\\user\\project\\frontend",
+    "wait_for_pattern": "ready|listening|started on port",
+    "terminal_context": {
+      "name": "[Worker] frontend-dev",
+      "purpose": "Running frontend dev server",
+      "will_use_in_future": true,
+      "future_usage_reason": "I will need this terminal running continuously for HMR.",
+      "lifecycle_action": "keep_open_long_term"
+    }
   }
-})
+}
 ```
 
-The tool returns as soon as the pattern matches. The server keeps running. Track its PID with `list_processes`.
+### EXAMPLE: Running a short-lived diagnostic command
 
+```json
+{
+  "action": "run_command",
+  "request_id": "check_directory_789",
+  "mode": "blocking",
+  "payload": {
+    "command": "dir",
+    "cwd": "c:\\Users\\user\\project",
+    "terminal_context": {
+      "name": "[Temp] dir-check",
+      "purpose": "Checking directory contents",
+      "will_use_in_future": false,
+      "future_usage_reason": "This is a one-off command. Terminal is not needed after execution.",
+      "lifecycle_action": "auto_delete_after_command"
+    }
+  }
+}
+```
+
+The tool enforces deterministic behavior based on your context. When `auto_delete_after_command` is specified, the terminal is physically destroyed the millisecond the command ends to prevent clutter.

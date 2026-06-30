@@ -92,7 +92,26 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     )
   );
 
-  // Logout command
+  // Sidebar toggle commands
+  context.subscriptions.push(
+    vscode.commands.registerCommand('vertex-swarm.toggleHistory', () => {
+      sidebarProvider.postMessageToWebview({ type: 'toggle-history' });
+    })
+  );
+
+  context.subscriptions.push(
+    vscode.commands.registerCommand('vertex-swarm.toggleSession', () => {
+      sidebarProvider.postMessageToWebview({ type: 'toggle-session' });
+    })
+  );
+
+  context.subscriptions.push(
+    vscode.commands.registerCommand('vertex-swarm.requestLogout', () => {
+      sidebarProvider.postMessageToWebview({ type: 'logout-confirm' });
+    })
+  );
+
+  // Logout command (executes actual logout)
   context.subscriptions.push(
     vscode.commands.registerCommand('vertex-swarm.logout', async () => {
       await revokeBackendRefreshToken(tokenManager, logAuthToOutput);

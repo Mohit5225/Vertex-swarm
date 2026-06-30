@@ -11,8 +11,7 @@
   ],
   "main": "./dist/extension.js",
   "activationEvents": [
-    "onStartupFinished",
-    "onView:vertex-swarm.sidebar"
+    "onStartupFinished"
   ],
   "contributes": {
     "viewsContainers": {
@@ -51,8 +50,42 @@
         "command": "vertex-swarm.logout",
         "title": "Sign Out",
         "icon": "$(sign-out)"
+      },
+      {
+        "command": "vertex-swarm.toggleHistory",
+        "title": "Recent Chats",
+        "icon": "$(history)"
+      },
+      {
+        "command": "vertex-swarm.toggleSession",
+        "title": "Session",
+        "icon": "$(settings-gear)"
+      },
+      {
+        "command": "vertex-swarm.requestLogout",
+        "title": "Sign Out",
+        "icon": "$(sign-out)"
       }
-    ]
+    ],
+    "menus": {
+      "view/title": [
+        {
+          "command": "vertex-swarm.toggleHistory",
+          "when": "view == vertex-swarm.sidebar",
+          "group": "navigation@1"
+        },
+        {
+          "command": "vertex-swarm.toggleSession",
+          "when": "view == vertex-swarm.sidebar",
+          "group": "navigation@2"
+        },
+        {
+          "command": "vertex-swarm.requestLogout",
+          "when": "view == vertex-swarm.sidebar",
+          "group": "navigation@3"
+        }
+      ]
+    }
   },
   "scripts": {
     "dev": "vite build --watch",

@@ -15,8 +15,7 @@ import {
   Terminal,
   Trash2,
   Wrench,
-  X,
-  Sparkles
+  X
 } from 'lucide-react'
 import { getVsCodeApi } from '../lib/vscode'
 
@@ -88,7 +87,7 @@ const groupTimelineItems = (steps: ProcessBlock['steps']): TimelineItem[] => {
   const flushNodes = () => {
     if (nodesBuffer.length === 0) return
 
-    for (let index = 0; index < nodesBuffer.length; ) {
+    for (let index = 0; index < nodesBuffer.length;) {
       const node = nodesBuffer[index]
       const shouldGroup =
         node.state === 'success' &&
@@ -181,21 +180,20 @@ const actionIcon = (action?: string) => {
 const stateIndicator = (state: ToolExecutionNode['state']) => {
   switch (state) {
     case 'running':
-      return <Loader2 className="h-3.5 w-3.5 animate-spin text-[#8bd7ff]" />
+      return <Loader2 className="h-3.5 w-3.5 animate-spin text-[#5e6ad2]" />
     case 'error':
-      return <X className="h-3.5 w-3.5 text-[#ff9f95]" />
+      return <X className="h-3.5 w-3.5 text-[#f43f5e]" />
     case 'timeout':
       return <Clock3 className="h-3.5 w-3.5 text-[#f1cb78]" />
     default:
-      return <Check className="h-3.5 w-3.5 text-[#79d3b3]" />
+      return <Check className="h-3.5 w-3.5 text-[#2dd4bf]" />
   }
 }
 
 const renderChevron = (expanded: boolean) => (
   <span
-    className={`inline-flex h-5 w-5 items-center justify-center rounded-full text-[#6f81a1] transition ${
-      expanded ? 'rotate-180' : ''
-    }`}
+    className={`inline-flex h-5 w-5 items-center justify-center rounded-full text-[#6f81a1] transition ${expanded ? 'rotate-180' : ''
+      }`}
   >
     <ChevronDown className="h-3.5 w-3.5" />
   </span>
@@ -204,7 +202,7 @@ const renderChevron = (expanded: boolean) => (
 const extractTerminalOutput = (resultDebug: any): string => {
   if (!resultDebug) return ''
   if (typeof resultDebug === 'string') return resultDebug
-  
+
   const data = resultDebug.data
   if (data) {
     if (typeof data.output === 'string') return data.output
@@ -212,9 +210,9 @@ const extractTerminalOutput = (resultDebug: any): string => {
       return [data.stdout, data.stderr].filter(Boolean).join('\n')
     }
   }
-  
+
   if (typeof resultDebug.output === 'string') return resultDebug.output
-  
+
   try {
     return JSON.stringify(resultDebug, null, 2)
   } catch {
@@ -235,7 +233,7 @@ const TerminalCard: React.FC<{
     | { terminal_name?: string; command?: string; exit_code?: number | null }
     | undefined
 
-  const terminalName = data?.terminal_name ?? 'Vertex Worker'
+  const terminalName = data?.terminal_name ?? (node.requestDebug as any)?.args?.payload?.terminal_context?.name ?? (node.requestDebug as any)?.args?.payload?.terminal_name ?? 'Vertex Worker'
   const command = data?.command ?? (node.requestDebug as any)?.args?.payload?.command ?? ''
   const exitCode = data?.exit_code
   const durationMs =
@@ -259,11 +257,10 @@ const TerminalCard: React.FC<{
           <div className="flex items-center gap-3">
             {exitCode !== undefined && exitCode !== null && (
               <span
-                className={`rounded-md px-1.5 py-0.5 font-mono text-[10px] font-medium ${
-                  exitCode === 0
-                    ? 'bg-[#1a3a2a] text-[#79d3b3]'
-                    : 'bg-[#3a1a1a] text-[#ff9f95]'
-                }`}
+                className={`rounded-md px-1.5 py-0.5 font-mono text-[10px] font-medium ${exitCode === 0
+                    ? 'bg-[#0c2a23] text-[#2dd4bf] border border-[#2dd4bf]/20'
+                    : 'bg-[#3a1a1a] text-[#f43f5e] border border-[#f43f5e]/20'
+                  }`}
               >
                 exit {exitCode}
               </span>
@@ -289,7 +286,7 @@ const TerminalCard: React.FC<{
             <button
               type="button"
               onClick={handleShowTerminal}
-              className="flex items-center gap-1.5 rounded text-[10px] font-medium text-[#8bd7ff] transition hover:text-[#b8e8ff]"
+              className="flex items-center gap-1.5 rounded text-[10px] font-medium text-[#7d8cf0] transition hover:text-[#9eb1ff]"
             >
               <Terminal className="h-3 w-3" />
               Open Terminal Panel
@@ -306,7 +303,7 @@ const TerminalCard: React.FC<{
           <button
             type="button"
             onClick={handleShowTerminal}
-            className="flex items-center gap-1.5 rounded-lg bg-white/[0.06] px-2.5 py-1.5 text-[11px] font-medium text-[#8bd7ff] transition hover:bg-white/[0.1] hover:text-[#b8e8ff] active:scale-[0.97]"
+            className="flex items-center gap-1.5 rounded-lg bg-[#5e6ad2]/10 px-2.5 py-1.5 text-[11px] font-medium text-[#9eb1ff] border border-[#5e6ad2]/20 transition hover:bg-[#5e6ad2]/20 hover:text-white active:scale-[0.97]"
           >
             <Terminal className="h-3 w-3" />
             Show Terminal
@@ -353,8 +350,8 @@ const NodeAccordion: React.FC<{
       </button>
 
       {/* Terminal ops: show terminal card (no raw output in chat) */}
-      {node.toolName === 'terminal_ops' && node.state !== 'running' && (
-        <TerminalCard node={node} expanded={expanded} />
+      {node.toolName === 'terminal_ops' && expanded && (
+        <TerminalCard node={node} expanded={true} />
       )}
 
       {/* All other tools: show debug view on expand */}
@@ -461,7 +458,7 @@ const AgentTimeline: React.FC<Props> = ({ block, isStreamingMessage, isActiveBlo
   }, [items, processExpanded, isRunning])
 
   return (
-    <div className="pt-2">
+    <div>
       <button
         type="button"
         onClick={() => setProcessExpanded(!processExpanded)}
@@ -469,9 +466,9 @@ const AgentTimeline: React.FC<Props> = ({ block, isStreamingMessage, isActiveBlo
       >
         <div className="flex items-center gap-2 text-[12px] font-medium text-[#7384a3]">
           {isRunning ? (
-            <Loader2 className="h-3.5 w-3.5 animate-spin text-[#8bd7ff]" />
+            <Loader2 className="h-3.5 w-3.5 animate-spin text-[#5e6ad2]" />
           ) : (
-            <Sparkles className="h-3.5 w-3.5 text-[#fff]" />
+            <Check className="h-3.5 w-3.5 text-[#2dd4bf]" />
           )}
           <span>{isRunning ? 'Working...' : 'Finished working'}</span>
         </div>
@@ -481,9 +478,9 @@ const AgentTimeline: React.FC<Props> = ({ block, isStreamingMessage, isActiveBlo
       </button>
 
       {processExpanded && (
-        <div 
+        <div
           ref={scrollRef}
-          className="mt-2 space-y-1 rounded-xl bg-white/[0.01] px-2 py-3 max-h-[300px] overflow-y-auto custom-scrollbar"
+          className="mt-2 space-y-1 rounded-xl bg-[#0c0e15] border border-white/[0.04] px-2 py-3 max-h-[300px] overflow-y-auto custom-scrollbar shadow-inner"
         >
           {items.map((item) => {
             if (item.kind === 'thinking') {
@@ -494,8 +491,8 @@ const AgentTimeline: React.FC<Props> = ({ block, isStreamingMessage, isActiveBlo
                   <div className="space-y-3">
                     {paragraphs.map((paragraph, index) => (
                       <div key={index} className="relative pl-8">
-                        <div className="absolute left-[6px] top-[9px] z-10 h-[6px] w-[6px] rounded-full bg-[#8b9ebf] ring-[3px] ring-[#141b2a]" />
-                        <div className="whitespace-pre-wrap text-[13px] leading-6 text-[#a1b0cb]">
+                        <div className="absolute left-[6px] top-[9px] z-10 h-[6px] w-[6px] rounded-full bg-[#5e6ad2]/50 ring-[3px] ring-[#0c0e15]" />
+                        <div className="whitespace-pre-wrap text-[13px] leading-6 text-[#b4c4de]">
                           {paragraph}
                         </div>
                       </div>
@@ -509,34 +506,34 @@ const AgentTimeline: React.FC<Props> = ({ block, isStreamingMessage, isActiveBlo
               <GroupAccordion
                 key={item.id}
                 item={item}
-              expanded={expandedGroups[item.id] ?? false}
-              expandedNodes={expandedNodes}
-              onToggleGroup={() =>
-                setExpandedGroups((current) => ({
-                  ...current,
-                  [item.id]: !(current[item.id] ?? false),
-                }))
-              }
-              onToggleNode={(nodeId) =>
-                setExpandedNodes((current) => ({
-                  ...current,
-                  [nodeId]: !(current[nodeId] ?? false),
-                }))
-              }
-            />
-          ) : (
-            <NodeAccordion
-              key={item.id}
-              node={item.node}
-              expanded={expandedNodes[item.node.id] ?? false}
-              onToggle={() =>
-                setExpandedNodes((current) => ({
-                  ...current,
-                  [item.node.id]: !(current[item.node.id] ?? false),
-                }))
-              }
-            />
-          )
+                expanded={expandedGroups[item.id] ?? false}
+                expandedNodes={expandedNodes}
+                onToggleGroup={() =>
+                  setExpandedGroups((current) => ({
+                    ...current,
+                    [item.id]: !(current[item.id] ?? false),
+                  }))
+                }
+                onToggleNode={(nodeId) =>
+                  setExpandedNodes((current) => ({
+                    ...current,
+                    [nodeId]: !(current[nodeId] ?? false),
+                  }))
+                }
+              />
+            ) : (
+              <NodeAccordion
+                key={item.id}
+                node={item.node}
+                expanded={expandedNodes[item.node.id] ?? false}
+                onToggle={() =>
+                  setExpandedNodes((current) => ({
+                    ...current,
+                    [item.node.id]: !(current[item.node.id] ?? false),
+                  }))
+                }
+              />
+            )
           })}
         </div>
       )}

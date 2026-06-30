@@ -8,7 +8,6 @@ import {
   Plus,
   Sparkles,
   Square,
-  X,
   Zap,
 } from 'lucide-react'
 
@@ -200,18 +199,10 @@ const InputArea: React.FC<Props> = ({
 
   return (
     <div
-      className={`composer-shell transition-all duration-200 ${
-        isFocused ? 'ring-1 ring-[#8bd7ff]/20' : ''
-      }`}
+      className={`composer-shell transition-all duration-200 ${isFocused ? 'ring-1 ring-[#8bd7ff]/20' : ''
+        }`}
     >
-      <div className="flex items-center px-4 pt-3 pb-0 text-[10px] font-semibold uppercase tracking-[0.18em]">
-        {ideContextEnabled && (
-          <span className="inline-flex items-center gap-1.5 rounded-full border border-[#8a4bff]/30 bg-[#8a4bff]/10 px-2.5 py-1 text-[#c6a8ff]">
-            <Sparkles className="h-3 w-3" />
-            IDE context
-          </span>
-        )}
-      </div>
+      <div className="flex items-center px-4 pt-3 pb-0 text-[10px] font-semibold uppercase tracking-[0.18em]" />
 
       <div className="px-4 pt-1">
         <textarea
@@ -235,18 +226,17 @@ const InputArea: React.FC<Props> = ({
               type="button"
               onClick={() => setShowQuickActions((value) => !value)}
               disabled={disabled}
-              className={`inline-flex h-10 w-10 items-center justify-center rounded-full border transition ${
-                disabled
-                  ? 'cursor-not-allowed border-white/10 bg-white/[0.03] text-[#657594]'
-                  : 'border-white/12 bg-white/[0.04] text-[#d9e2f6] hover:bg-white/[0.08]'
-              }`}
+              className={`inline-flex h-8 w-8 items-center justify-center rounded-md border transition ${disabled
+                  ? 'cursor-not-allowed border-transparent bg-transparent text-[#454e5e]'
+                  : 'border-white/10 bg-white/[0.04] text-[#a4b4cb] hover:bg-white/[0.08] hover:text-white'
+                }`}
               title="Quick actions"
             >
               <Plus className="h-5 w-5" />
             </button>
 
             {showQuickActions && (
-              <div className="absolute bottom-[calc(100%+0.7rem)] left-0 z-20 w-[16rem] rounded-[22px] border border-white/10 bg-[#141b2b]/96 p-2 shadow-[0_22px_60px_rgba(0,0,0,0.45)] backdrop-blur-xl">
+              <div className="absolute bottom-[calc(100%+0.5rem)] left-0 z-20 w-[16rem] rounded-xl border border-white/10 bg-[#12141c]/95 p-1.5 shadow-[0_12px_40px_rgba(0,0,0,0.4)] backdrop-blur-md">
                 <button
                   type="button"
                   disabled={disabled}
@@ -267,14 +257,12 @@ const InputArea: React.FC<Props> = ({
                     <span>Include IDE context</span>
                   </div>
                   <span
-                    className={`relative inline-flex h-6 w-11 items-center rounded-full transition ${
-                      ideContextEnabled ? 'bg-[#4bb5df]' : 'bg-white/15'
-                    }`}
+                    className={`relative inline-flex h-6 w-11 items-center rounded-full transition ${ideContextEnabled ? 'bg-[#4bb5df]' : 'bg-white/15'
+                      }`}
                   >
                     <span
-                      className={`inline-block h-5 w-5 transform rounded-full bg-[#eef4ff] transition ${
-                        ideContextEnabled ? 'translate-x-5' : 'translate-x-1'
-                      }`}
+                      className={`inline-block h-5 w-5 transform rounded-full bg-[#eef4ff] transition ${ideContextEnabled ? 'translate-x-5' : 'translate-x-1'
+                        }`}
                     />
                   </span>
                 </button>
@@ -315,53 +303,18 @@ const InputArea: React.FC<Props> = ({
         </div>
 
         <div className="flex items-center gap-2">
-          {ideContextEnabled && (
-            <div className="relative" ref={contextBadgeRef}>
-              <button
-                type="button"
-                onClick={() => {
-                  if (disabled) {
-                    return
-                  }
-                  setShowContextDismissButton((value) => !value)
-                }}
-                className="relative inline-flex h-9 w-9 items-center justify-center rounded-full bg-[#8a4bff]/14 text-[#b57cff] ring-1 ring-[#8a4bff]/35 transition hover:bg-[#8a4bff]/22"
-                title="IDE context enabled"
-              >
-                <Sparkles className="h-4 w-4" />
-              </button>
-
-              {showContextDismissButton && (
-                <button
-                  type="button"
-                  disabled={disabled}
-                  onClick={(event) => {
-                    event.stopPropagation()
-                    onToggleIdeContext(false)
-                    setShowContextDismissButton(false)
-                  }}
-                  className="absolute -right-1.5 -top-1.5 inline-flex h-5 w-5 items-center justify-center rounded-full bg-[#f3f0dd] text-[#08101e] shadow disabled:cursor-not-allowed disabled:opacity-70"
-                  title="Disable IDE context"
-                >
-                  <X className="h-3 w-3" />
-                </button>
-              )}
-            </div>
-          )}
-
           <button
             type="button"
             onClick={disabled ? handleCancel : handleSend}
             onMouseEnter={() => setIsHoveringStop(true)}
             onMouseLeave={() => setIsHoveringStop(false)}
             disabled={isSendDisabled}
-            className={`inline-flex shrink-0 items-center justify-center gap-2 rounded-full px-4 py-2.5 text-sm font-medium transition ${
-              isRunning
-                ? 'bg-[#f27d75]/12 text-[#ffbeb8] shadow-[0_14px_30px_rgba(242,125,117,0.16)] hover:-translate-y-[1px] hover:bg-[#f27d75]/20'
+            className={`inline-flex shrink-0 items-center justify-center gap-2 rounded-lg px-3 py-1.5 text-sm font-medium transition ${isRunning
+                ? 'bg-[#2a1b24] text-[#f43f5e] border border-[#f43f5e]/20 hover:bg-[#381e28]'
                 : !trimmedMessage
-                  ? 'cursor-not-allowed bg-white/[0.04] text-[#7383a1]'
-                : 'bg-[#f3f0dd] text-[#08101e] shadow-[0_14px_30px_rgba(243,240,221,0.18)] hover:-translate-y-[1px]'
-            }`}
+                  ? 'cursor-not-allowed bg-white/[0.03] text-[#5e697e]'
+                  : 'bg-[linear-gradient(180deg,#5e6ad2,#4b59c4)] text-white shadow-[0_2px_10px_rgba(75,89,196,0.2),inset_0_1px_0_rgba(255,255,255,0.15)] hover:bg-[linear-gradient(180deg,#6c79e8,#5a68d8)]'
+              }`}
             title={isRunning ? 'Stop the running operation' : 'Send message'}
           >
             <span className="max-[360px]:hidden">
@@ -370,9 +323,9 @@ const InputArea: React.FC<Props> = ({
                 : 'Send'}
             </span>
             {isRunning && isHoveringStop ? (
-              <Square className="h-4 w-4" />
+              <Square className="h-3.5 w-3.5" />
             ) : (
-              <ArrowUp className="h-4 w-4 text-[#ff4d4d]" />
+              <ArrowUp className="h-3.5 w-3.5" />
             )}
           </button>
         </div>

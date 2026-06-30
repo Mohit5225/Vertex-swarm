@@ -42,6 +42,7 @@ export interface RequestContextTerminal {
 export interface RequestContextPayload {
   activeFile?: RequestContextFile;
   activeTerminal?: RequestContextTerminal;
+  activeTerminals?: { name: string; purpose: string; isBusy: boolean }[];
   workspaceFolders?: string[];
 }
 

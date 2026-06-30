@@ -19,6 +19,11 @@ export interface RequestContextSnapshot {
     shell?: string;
     cwd?: string;
   };
+  activeTerminals?: {
+    name: string;
+    purpose: string;
+    isBusy: boolean;
+  }[];
   os?: string;
   workspaceFolders?: string[];
 }
@@ -41,16 +46,19 @@ export function createRequestContext(
         cwd: snapshot.activeTerminal.cwd,
       }
     : undefined;
+    
+  const activeTerminals = snapshot.activeTerminals;
 
   const workspaceFolders = snapshot.workspaceFolders?.filter((folder) => Boolean(folder.trim()));
 
-  if (!activeFile && !activeTerminal && (!workspaceFolders || workspaceFolders.length === 0)) {
+  if (!activeFile && !activeTerminal && (!activeTerminals || activeTerminals.length === 0) && (!workspaceFolders || workspaceFolders.length === 0)) {
     return undefined;
   }
 
   return {
     ...(activeFile ? { activeFile } : {}),
     ...(activeTerminal ? { activeTerminal } : {}),
+    ...(activeTerminals && activeTerminals.length > 0 ? { activeTerminals } : {}),
     ...(snapshot.os ? { os: snapshot.os } : {}),
     ...(workspaceFolders && workspaceFolders.length > 0 ? { workspaceFolders } : {}),
   };

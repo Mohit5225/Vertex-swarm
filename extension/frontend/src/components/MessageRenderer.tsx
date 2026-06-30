@@ -43,7 +43,7 @@ const normalizeAssistantContent = (content: string) => {
 const StreamingCursor = () => (
   <span
     aria-hidden="true"
-    className="ml-0.5 inline-block align-baseline text-[#8bd7ff] animate-pulse"
+    className="ml-0.5 inline-block align-baseline text-[#5e6ad2] animate-pulse"
   >
     ▍
   </span>
@@ -118,7 +118,7 @@ const MessageRenderer: React.FC<Props> = ({ message }) => {
         >
           <span
             className={`h-1.5 w-1.5 rounded-full ${
-              isUser ? 'bg-[#f3f0dd]/70' : 'bg-[#8bd7ff]/70'
+              isUser ? 'bg-[#8b9ebf]' : 'bg-[#5e6ad2]'
             }`}
           />
           <span>{isUser ? 'You' : 'Agent'}</span>
@@ -128,7 +128,7 @@ const MessageRenderer: React.FC<Props> = ({ message }) => {
           className={isUser ? 'user-bubble inline-block max-w-full' : 'agent-thread w-full min-w-0'}
         >
           {shouldRenderProcess ? (
-            <div className="space-y-4">
+            <div className="flex flex-col gap-1.5">
               {blocks.map((block, index) => {
                 if (block.kind === 'narrative') {
                   return (
@@ -192,9 +192,10 @@ const MessageRenderer: React.FC<Props> = ({ message }) => {
           )}
 
           {!message.content && !isUser && (!message.events || message.events.length === 0) && (
-            <p className="text-sm leading-6 text-[#91a0bb]">
-              {pendingLabel}
-            </p>
+            <div className="flex items-center gap-2 text-sm leading-6 text-[#91a0bb]">
+              {isStreamingMessage && <span className="h-1.5 w-1.5 rounded-full bg-[#5e6ad2] animate-pulse" />}
+              <p>{pendingLabel}</p>
+            </div>
           )}
         </div>
       </div>

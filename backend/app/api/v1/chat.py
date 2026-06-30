@@ -5,7 +5,8 @@ from datetime import datetime, timezone
 from typing import Any, Optional
 from uuid import UUID, uuid4
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status, Request
+import asyncio
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from sqlalchemy import desc, select
@@ -180,6 +181,16 @@ def _build_request_context_message(request_context: dict[str, Any] | None) -> st
         if isinstance(process_id, int):
             lines.append(f"Terminal process id: {process_id}")
 
+    active_terminals = request_context.get("activeTerminals")
+    if isinstance(active_terminals, list) and active_terminals:
+        lines.append("Active Terminals State:")
+        for t in active_terminals:
+            if isinstance(t, dict):
+                t_name = t.get("name", "unknown")
+                t_purpose = t.get("purpose", "unknown")
+                t_busy = t.get("isBusy", False)
+                lines.append(f"- [Name: \"{t_name}\"] (Busy: {t_busy}) Purpose: \"{t_purpose}\"")
+
     os_platform = request_context.get("os")
     if isinstance(os_platform, str) and os_platform:
         lines.append(f"Operating System: {os_platform}")
@@ -314,7 +325,7 @@ async def list_chats(user: AuthenticatedUser = Depends(get_current_user)):
     ]
 
 
-@router.post("/{chat_id}/messages", response_class=StreamingResponse)
+@router.post("/{chat_id}/messages", status_code=status.HTTP_202_ACCEPTED)
 async def send_message(
     chat_id: UUID,
     req: SendMessageRequest,
@@ -358,40 +369,41 @@ async def send_message(
         req.ide_context_enabled,
     )
 
-    async def event_stream():
+    async with AsyncSessionLocal() as db:
+        logger.info(
+            "persisting user message user_id=%s chat_id=%s session_id=%s",
+            user.user_id,
+            chat_id,
+            synthetic_session_id,
+        )
+        user_msg = MessageORM(
+            chat_id=chat_id,
+            role="user",
+            content=req.content,
+        )
+        db.add(user_msg)
+
+        chat_row = await db.get(ChatORM, chat_id)
+        if chat_row:
+            if req.ide_context_enabled is not None:
+                chat_row.ide_context_enabled = req.ide_context_enabled
+                logger.info(
+                    "ide_context toggle loaded chat_id=%s enabled=%s",
+                    chat_id,
+                    req.ide_context_enabled,
+                )
+
+            if not chat_row.title:
+                normalized_title = " ".join(req.content.split())
+                chat_row.title = normalized_title[:80] if normalized_title else "Untitled chat"
+
+        await db.commit()
+        await db.refresh(user_msg)
+        request_message_id = str(user_msg.message_id)
+
+    async def run_agent_loop():
         nonlocal existing_active_categories
         async with AsyncSessionLocal() as db:
-            logger.info(
-                "persisting user message user_id=%s chat_id=%s session_id=%s",
-                user.user_id,
-                chat_id,
-                synthetic_session_id,
-            )
-            user_msg = MessageORM(
-                chat_id=chat_id,
-                role="user",
-                content=req.content,
-            )
-            db.add(user_msg)
-
-            chat_row = await db.get(ChatORM, chat_id)
-            if chat_row:
-                if req.ide_context_enabled is not None:
-                    chat_row.ide_context_enabled = req.ide_context_enabled
-                    logger.info(
-                        "ide_context toggle loaded chat_id=%s enabled=%s",
-                        chat_id,
-                        req.ide_context_enabled,
-                    )
-
-                if not chat_row.title:
-                    normalized_title = " ".join(req.content.split())
-                    chat_row.title = normalized_title[:80] if normalized_title else "Untitled chat"
-
-            await db.commit()
-            await db.refresh(user_msg)
-            request_message_id = str(user_msg.message_id)
-
             history_result = await db.execute(
                 select(MessageORM)
                 .where(MessageORM.chat_id == chat_id)
@@ -399,7 +411,12 @@ async def send_message(
             )
             history = history_result.scalars().all()
 
-        llm_messages = [{"role": m.role, "content": m.content} for m in history]
+        llm_messages = []
+        for m in history:
+            content = m.content
+            if not content:
+                content = "[Executed workspace tools]" if m.role == "assistant" else "[Empty message]"
+            llm_messages.append({"role": m.role, "content": content})
         request_context_message = _build_request_context_message(req.request_context)
         tool_memory_message = format_tool_memory_for_prompt(existing_tool_memory)
 
@@ -441,7 +458,11 @@ async def send_message(
         run_failed = False
         llm_round = 0
 
-        def emit_trace(event: dict[str, Any]) -> str:
+        async def push_event(event: dict[str, Any]) -> None:
+            redis_client = await get_redis()
+            await redis_client.xadd(f"message-events:{request_message_id}", {"payload": json.dumps(event)})
+            
+        async def emit_trace_and_push(event: dict[str, Any]) -> None:
             trace_events.append(event)
             _log_trace_event(
                 user.user_id,
@@ -450,7 +471,7 @@ async def send_message(
                 request_message_id,
                 event,
             )
-            return _serialize_sse(event)
+            await push_event(event)
 
         def build_status_event(content: str, phase: str) -> dict[str, Any]:
             return _build_event(
@@ -463,7 +484,7 @@ async def send_message(
             )
 
         try:
-            yield emit_trace(build_status_event("Preparing conversation context...", "preparing_context"))
+            await emit_trace_and_push(build_status_event("Preparing conversation context...", "preparing_context"))
 
             while True:
                 llm_round += 1
@@ -477,7 +498,7 @@ async def send_message(
                     else "Continuing with tool result..."
                 )
                 status_phase = "calling_model" if llm_round == 1 else "resuming_after_tool"
-                yield emit_trace(build_status_event(status_text, status_phase))
+                await emit_trace_and_push(build_status_event(status_text, status_phase))
 
                 llm_context_log_base = {
                     "user_id": user.user_id,
@@ -515,7 +536,7 @@ async def send_message(
                         settings.llm_model,
                         settings.llm_fallback_model,
                     )
-                    yield emit_trace(
+                    await emit_trace_and_push(
                         build_status_event(
                             f"Primary model rate-limited, switching to fallback...",
                             "fallback_model",
@@ -543,7 +564,7 @@ async def send_message(
 
                         assistant_turn_content += token
                         full_response += token
-                        yield _serialize_sse(
+                        await push_event(
                             _build_event(
                                 "token",
                                 content=token,
@@ -557,7 +578,7 @@ async def send_message(
                         if not thinking_content.strip():
                             continue
 
-                        yield emit_trace(
+                        await emit_trace_and_push(
                             _build_event(
                                 "thinking",
                                 content=thinking_content,
@@ -612,7 +633,7 @@ async def send_message(
                             # Emit ephemeral UI notification
                             if newly_loaded:
                                 label = ", ".join(c.replace("_", " ").title() for c in newly_loaded)
-                                yield emit_trace(
+                                await emit_trace_and_push(
                                     build_status_event(
                                         f"Loaded {label} guidance",
                                         "tool_context_loaded",
@@ -659,9 +680,9 @@ async def send_message(
                             chat_id=str(chat_id),
                             message_id=request_message_id,
                         )
-                        yield emit_trace(tool_event)
+                        await emit_trace_and_push(tool_event)
 
-                        yield emit_trace(
+                        await emit_trace_and_push(
                             build_status_event(
                                 f"Waiting for {tool_name} result from the extension...",
                                 "awaiting_tool_result",
@@ -678,7 +699,7 @@ async def send_message(
                         if tool_result is None:
                             run_failed = True
                             stream_aborted = True
-                            yield emit_trace(
+                            await emit_trace_and_push(
                                 _build_event(
                                     "error",
                                     content=f"Timed out waiting for tool result: {tool_name}",
@@ -700,9 +721,9 @@ async def send_message(
                             },
                             **tool_result.model_dump(),
                         )
-                        yield emit_trace(tool_result_event)
+                        await emit_trace_and_push(tool_result_event)
 
-                        yield emit_trace(
+                        await emit_trace_and_push(
                             build_status_event(
                                 f"Tool result received from {tool_name}. Continuing reasoning...",
                                 "tool_result_received",
@@ -762,7 +783,7 @@ async def send_message(
                         if llm_round > 1
                         else "Model stream completed without a visible assistant answer."
                     )
-                    yield emit_trace(
+                    await emit_trace_and_push(
                         _build_event(
                             "error",
                             content=empty_response_message,
@@ -773,7 +794,7 @@ async def send_message(
                         )
                     )
                 else:
-                    yield emit_trace(build_status_event("Final answer ready.", "completed"))
+                    await emit_trace_and_push(build_status_event("Final answer ready.", "completed"))
                 break
         except Exception as exc:
             run_failed = True
@@ -803,7 +824,7 @@ async def send_message(
             else:
                 logger.error("LLM stream error for chat %s: %s", chat_id, error_details, exc_info=True)
             
-            yield emit_trace(
+            await emit_trace_and_push(
                 _build_event(
                     "error",
                     content=f"LLM stream failed: {error_details}",
@@ -876,10 +897,91 @@ async def send_message(
                 request_message_id,
             )
 
-        yield _serialize_sse({"type": "done", "messageId": str(asst_msg.message_id)})
+        await push_event({"type": "done", "messageId": str(asst_msg.message_id)})
+
+    asyncio.create_task(run_agent_loop())
+    
+    return {"status": "accepted", "message_id": request_message_id}
+
+
+@router.get("/{chat_id}/messages/{message_id}/stream", response_class=StreamingResponse)
+async def stream_chat_events_from_redis(
+    chat_id: UUID,
+    message_id: str,
+    request: Request,
+    user: AuthenticatedUser = Depends(get_current_user),
+):
+    # Verify chat access
+    async with AsyncSessionLocal() as db:
+        chat_result = await db.execute(
+            select(ChatORM).where(
+                ChatORM.chat_id == chat_id,
+                ChatORM.user_id == user.user_id,
+            )
+        )
+        chat = chat_result.scalar_one_or_none()
+        if not chat:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Chat not found")
+
+    last_id = request.headers.get("Last-Event-ID", "0")
+    stream_key = f"message-events:{message_id}"
+    
+    async def sse_generator():
+        redis_client = await get_redis()
+        current_id = last_id
+        
+        while True:
+            if await request.is_disconnected():
+                logger.info("SSE client disconnected chat_id=%s message_id=%s", chat_id, message_id)
+                break
+                
+            try:
+                # Block for up to 5 seconds
+                stream_entries = await redis_client.xread(
+                    {stream_key: current_id},
+                    count=10,
+                    block=5000,
+                )
+                
+                if stream_entries:
+                    for _, entries in stream_entries:
+                        for entry_id, payload in entries:
+                            current_id = entry_id
+                            if b"payload" in payload:
+                                # Data payload
+                                data_str = payload[b"payload"].decode("utf-8")
+                                yield f"id: {entry_id.decode('utf-8')}\ndata: {data_str}\n\n"
+                                
+                                # Check if it's a terminal event
+                                try:
+                                    parsed = json.loads(data_str)
+                                    if parsed.get("type") in ("done", "error", "finished"):
+                                        return
+                                except json.JSONDecodeError:
+                                    pass
+                            elif "payload" in payload: # String keys
+                                data_str = payload["payload"]
+                                yield f"id: {entry_id}\ndata: {data_str}\n\n"
+                                
+                                try:
+                                    parsed = json.loads(data_str)
+                                    if parsed.get("type") in ("done", "error", "finished"):
+                                        return
+                                except json.JSONDecodeError:
+                                    pass
+                else:
+                    # Keep connection alive during long tool executions to prevent upstream proxies from timing out
+                    yield ": keepalive\n\n"
+                            
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.error("Error reading redis stream chat_id=%s message_id=%s: %s", chat_id, message_id, e)
+                yield f"data: {json.dumps({'type': 'error', 'content': 'Stream read error'})}\n\n"
+                break
 
     return StreamingResponse(
-        event_stream(),
+        sse_generator(),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",

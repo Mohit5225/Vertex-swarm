@@ -69,6 +69,10 @@ export class VertexSwarmSidebarProvider implements vscode.WebviewViewProvider {
   /**
    * Post message to webview
    */
+  public postMessageToWebview(message: object): void {
+    this.post(message);
+  }
+
   private post(message: object): void {
     this.webviewView?.webview.postMessage(message);
   }
