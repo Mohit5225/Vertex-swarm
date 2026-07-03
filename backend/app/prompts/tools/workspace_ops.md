@@ -49,7 +49,7 @@ Determine your reading strategy based on the overall objective. Sequential readi
 |---|---|
 | Task requires multiple files | use `workspace_ops` with action: `bulk_files_read`. Group your required paths to save roundtrips and execute faster. |
 | Task requires only one file | use `workspace_ops` with action: `read_file` directly. Ideal for focused, single-file changes. |
-| Find function / class / symbol | use `workspace_ops` with action: `search_text` first (costs ~20 tokens), then action: `read_file` or `bulk_files_read` on the returned lines/files |
+| Find function / class / symbol | use `workspace_ops` with action: `search_text` first (costs ~20 tokens), then action HIGHLY ENCOURAGED TO LOOK FOR WHAT YOU NEED WITH `search_text`, THIS GIVE YOU PRECISE LINES FOR WHAT YOU ARE LOOKING FOR use it extensively whenever you need to precisely locate code, symbols, or patterns : `read_file` or `bulk_files_read` on the returned lines/files |
 | Broad feature exploration | use `workspace_ops` with action: `list_dir` → action: `search_text` with regex → action: `bulk_files_read` on key files |
 | Find all call sites | use `workspace_ops` with action: `search_text` and payload: `{query: 'fn_name(', filePattern: '**/*.py'}` |
 

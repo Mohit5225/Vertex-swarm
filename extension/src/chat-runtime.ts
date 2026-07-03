@@ -5,6 +5,7 @@ import { SSEStreamClient } from './sse-client/stream';
 import { FileSystemService } from './tools/file-system-service';
 import { ToolExecutor } from './tools/tool-executor';
 import { WorkspaceStore } from './workspace-store';
+import { DiskSnapshotManager } from './snapshot/snapshot-manager';
 import { TerminalService } from './tools/terminal-service';
 import { createRequestContext } from './request-context';
 import type {
@@ -68,11 +69,13 @@ export class VertexSwarmChatRuntime {
   private readonly fileSystemService: FileSystemService;
   private readonly terminalService: TerminalService;
   private readonly workspaceStore: WorkspaceStore;
+  private readonly snapshotManager: DiskSnapshotManager;
   private readonly toolExecutor: ToolExecutor;
   private readonly processedToolCallIds = new Set<string>();
 
-  private streamClient: SSEStreamClient | undefined;
-  private currentChatId: string | undefined;
+  private streamClient: SSEStreamClient | null = null;
+  private currentChatId: string | null = null;
+  private streamCancellationRequested: boolean = false;
   private authResetInProgress = false;
   private refreshInFlight: Promise<StoredSession> | null = null;
   private staticContext: { os: string; workspaceFolders: string[] } | null = null;
@@ -92,9 +95,11 @@ export class VertexSwarmChatRuntime {
     );
     this.workspaceStore = new WorkspaceStore();
     this.context.subscriptions.push(this.workspaceStore);
+    this.snapshotManager = new DiskSnapshotManager();
     this.toolExecutor = new ToolExecutor(
       this.fileSystemService,
       this.terminalService,
+      this.snapshotManager,
       this.backendUrl,
       (tokenOptions) => this.getValidToken(tokenOptions),
       (message: string) => this.log(message)
@@ -159,6 +164,7 @@ export class VertexSwarmChatRuntime {
       }
 
       case 'start-stream': {
+        this.streamCancellationRequested = false;
         const payload = message.payload as StreamStartPayload;
         const token = await this.getValidToken();
 
@@ -169,6 +175,12 @@ export class VertexSwarmChatRuntime {
         try {
           const ideContextEnabled = Boolean(payload.ideContextEnabled);
           const chatId = this.currentChatId ?? await this.createChat(token, ideContextEnabled);
+          
+          if (this.streamCancellationRequested) {
+            this.log(`Stream cancelled before creation finished`);
+            return;
+          }
+
           this.log(
             `starting chat stream chat_id=${chatId ?? 'unknown'} ide_context_enabled=${ideContextEnabled}`
           );
@@ -184,6 +196,11 @@ export class VertexSwarmChatRuntime {
           const workspaceSkeleton = ideContextEnabled
             ? await this.workspaceStore.getSkeleton()
             : undefined;
+
+          if (this.streamCancellationRequested) {
+            this.log(`Stream cancelled while fetching skeleton`);
+            return;
+          }
 
           this.streamClient = new SSEStreamClient(
             this.backendUrl,
@@ -303,6 +320,7 @@ export class VertexSwarmChatRuntime {
       case 'cancel-stream': {
         const payload = message.payload as StreamCancelPayload;
         this.log(`cancel stream requested session_id=${payload.sessionId}`);
+        this.streamCancellationRequested = true;
         if (this.streamClient) {
           await this.streamClient.cancelStream(payload.sessionId);
         }
@@ -361,6 +379,64 @@ export class VertexSwarmChatRuntime {
           target.show();
         } else {
           this.log(`show-terminal: terminal "${terminalName}" not found`);
+        }
+        break;
+      }
+
+      case 'undo-snapshot': {
+        const payload = message.payload as any;
+        this.log(`undo requested for snapshot ${payload?.snapshotId}`);
+        if (payload?.snapshotId && payload?.sessionId && payload?.messageId) {
+          try {
+            await this.snapshotManager.restoreSnapshot({
+              snapshotId: payload.snapshotId,
+              sessionId: payload.sessionId,
+              messageId: payload.messageId
+            });
+            this.post({ type: 'event', payload: { type: 'output', content: 'Undo successful.' } });
+          } catch (e) {
+            const err = e instanceof Error ? e.message : String(e);
+            this.log(`undo failed: ${err}`);
+            this.post({ type: 'error', payload: `Undo failed: ${err}` });
+          }
+        } else {
+          this.log('undo failed: missing snapshot details');
+        }
+        break;
+      }
+
+      case 'review-snapshot': {
+        const payload = message.payload as any;
+        this.log(`review requested for snapshot file ${payload?.file}`);
+        if (payload?.originalUri && payload?.snapshotPath) {
+          try {
+            const liveUri = vscode.Uri.parse(payload.originalUri);
+            const snapshotUri = vscode.Uri.parse(`vertex-snapshot:/${payload.file}?snapshotPath=${encodeURIComponent(payload.snapshotPath)}`);
+            const title = `${payload.file} (Snapshot vs Live)`;
+            
+            await vscode.commands.executeCommand('vscode.diff', snapshotUri, liveUri, title);
+          } catch (e) {
+            this.log(`review failed: ${e}`);
+          }
+        }
+        break;
+      }
+
+      case 'get-config': {
+        const config = vscode.workspace.getConfiguration('vertexSwarm');
+        const snapshotRetentionDays = config.get<number>('snapshotRetentionDays', 7);
+        this.post({ type: 'config-state', payload: { snapshotRetentionDays } });
+        break;
+      }
+
+      case 'set-config': {
+        const payload = message.payload as { snapshotRetentionDays?: number };
+        const config = vscode.workspace.getConfiguration('vertexSwarm');
+        if (payload.snapshotRetentionDays !== undefined) {
+          // ensure between 1 and 7
+          const val = Math.max(1, Math.min(7, payload.snapshotRetentionDays));
+          await config.update('snapshotRetentionDays', val, vscode.ConfigurationTarget.Global);
+          this.post({ type: 'config-state', payload: { snapshotRetentionDays: val } });
         }
         break;
       }

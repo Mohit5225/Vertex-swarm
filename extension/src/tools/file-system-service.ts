@@ -1240,6 +1240,7 @@ export class FileSystemService {
       }
 
       const refreshedDocument = await vscode.workspace.openTextDocument(fileUri);
+      await refreshedDocument.save();
       const appliedHash = this.computeContentHash(refreshedDocument.getText());
 
       return this.cacheWorkspaceResult(request.requestId, this.successResult(
@@ -2358,7 +2359,7 @@ export class FileSystemService {
     };
   }
 
-  private resolveWorkspacePath(inputPath: string): vscode.Uri {
+  public resolveWorkspacePath(inputPath: string): vscode.Uri {
     const workspaceFolders = vscode.workspace.workspaceFolders;
     if (!workspaceFolders || workspaceFolders.length === 0) {
       throw new Error('No workspace folder is currently open.');

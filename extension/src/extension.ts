@@ -3,6 +3,10 @@ import { TokenManager } from './token-manager';
 import { OAuthHandler } from './oauth-handler';
 import { VertexSwarmSidebarProvider } from './webview-provider';
 import { VertexSwarmChatParticipant } from './chat-participant';
+import { SnapshotContentProvider, SNAPSHOT_SCHEME } from './snapshot/snapshot-content-provider';
+import { SnapshotGarbageCollector } from './snapshot/garbage-collector';
+import * as path from 'path';
+import * as os from 'os';
 
 const BACKEND_URL = process.env.VERTEX_BACKEND_URL || 'http://127.0.0.1:8000';
 
@@ -110,6 +114,18 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       sidebarProvider.postMessageToWebview({ type: 'logout-confirm' });
     })
   );
+
+  // Register the snapshot content provider for diff views
+  const snapshotContentProvider = new SnapshotContentProvider();
+  context.subscriptions.push(
+    vscode.workspace.registerTextDocumentContentProvider(SNAPSHOT_SCHEME, snapshotContentProvider)
+  );
+
+  // Start Snapshot Garbage Collector
+  const snapshotsRootDir = path.join(os.homedir(), '.vertex-swarm', 'snapshots');
+  const garbageCollector = new SnapshotGarbageCollector(snapshotsRootDir);
+  garbageCollector.start();
+  context.subscriptions.push(garbageCollector);
 
   // Logout command (executes actual logout)
   context.subscriptions.push(

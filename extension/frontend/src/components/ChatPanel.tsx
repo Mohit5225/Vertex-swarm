@@ -5,10 +5,21 @@ import MessageRenderer from './MessageRenderer'
 import InputArea from './InputArea'
 import ConfirmDialog from './ConfirmDialog'
 import { getVsCodeApi } from '../lib/vscode'
-import { Package } from 'lucide-react'
+import { Package, FileSignature, Search } from 'lucide-react'
 
-import { TOAST_STATUS_PHASES } from '../lib/agentRunBlocks'
+import { TOAST_STATUS_PHASES, buildAgentRunBlocks } from '../lib/agentRunBlocks'
 import { getEventPhase } from '../lib/sessionEvents'
+
+const FILE_ACTIONS = new Set([
+  'edit_file',
+  'create_file',
+  'delete_path',
+  'rename_path',
+  'write_file',
+  'replace_file_content',
+  'multi_replace_file_content',
+  'delete_file'
+])
 
 const starterPrompts = [
   {
@@ -62,6 +73,7 @@ const ChatPanel: React.FC = () => {
   const [showLogoutConfirm, setShowLogoutConfirm] = useState(false)
   const [showSessionPanel, setShowSessionPanel] = useState(false)
   const [showHistoryPanel, setShowHistoryPanel] = useState(false)
+  const [snapshotRetentionDays, setSnapshotRetentionDays] = useState(7)
   const [toolToast, setToolToast] = useState<string | null>(null)
   const toolToastTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const messagesEndRef = useRef<HTMLDivElement>(null)
@@ -162,9 +174,18 @@ const ChatPanel: React.FC = () => {
         case 'logout-confirm':
           setShowLogoutConfirm(true);
           break;
+        case 'config-state':
+          if (message.payload?.snapshotRetentionDays !== undefined) {
+            setSnapshotRetentionDays(message.payload.snapshotRetentionDays);
+          }
+          break;
       }
     };
     window.addEventListener('message', handleMessage);
+    
+    // Request initial config
+    getVsCodeApi()?.postMessage({ type: 'get-config' });
+    
     return () => window.removeEventListener('message', handleMessage);
   }, []);
 
@@ -299,6 +320,33 @@ const ChatPanel: React.FC = () => {
                 <p>Stored locally inside the extension.</p>
                 <p>The backend JWT refreshes automatically while your Neon session stays valid.</p>
               </div>
+
+              <div className="mt-4 border-t border-white/10 pt-3">
+                <label className="text-[11px] font-medium text-[#7d89a6] block mb-1">
+                  Snapshot Retention (Days)
+                </label>
+                <div className="flex items-center gap-2">
+                  <input
+                    type="range"
+                    min="1"
+                    max="7"
+                    value={snapshotRetentionDays}
+                    onChange={(e) => {
+                      const val = parseInt(e.target.value, 10);
+                      setSnapshotRetentionDays(val);
+                      getVsCodeApi()?.postMessage({
+                        type: 'set-config',
+                        payload: { snapshotRetentionDays: val }
+                      });
+                    }}
+                    className="flex-1 h-1.5 bg-white/10 rounded-full appearance-none [&::-webkit-slider-thumb]:appearance-none [&::-webkit-slider-thumb]:w-3 [&::-webkit-slider-thumb]:h-3 [&::-webkit-slider-thumb]:rounded-full [&::-webkit-slider-thumb]:bg-[#8bd7ff] cursor-pointer"
+                  />
+                  <span className="text-[12px] font-mono text-[#8bd7ff] min-w-[1.5rem] text-right">
+                    {snapshotRetentionDays}
+                  </span>
+                </div>
+              </div>
+
               <div className="mt-4 flex flex-wrap gap-2">
                 {messages.length > 0 && (
                   <button
@@ -355,7 +403,6 @@ const ChatPanel: React.FC = () => {
                     <MessageRenderer key={message.id} message={message} />
                   ))}
 
-
                   {error && (
                     <div className="border-l-2 border-[#f27d75] pl-3 text-sm leading-6 text-[#ffbeb8]">
                       {error}
@@ -367,6 +414,64 @@ const ChatPanel: React.FC = () => {
               )}
             </div>
           </div>
+
+          {/* Live file edit bar — shows during streaming (like Codex Image 2).
+               Displays "N files changed +X -Y  Review" above the input area while agent is working.
+               Disappears when streaming ends; replaced by the SnapshotCard inside the message. */}
+          {isStreaming && (() => {
+            const lastAgent = [...messages].reverse().find(m => m.type === 'agent')
+            if (!lastAgent?.events?.length) return null
+            const blocks = buildAgentRunBlocks(lastAgent.events, lastAgent.content)
+            let fileCount = 0, totalAdds = 0, totalDels = 0
+            let firstDiff: { file: string; originalUri: string; snapshotPath: string } | null = null
+            for (const block of blocks) {
+              if (block.kind !== 'process') continue
+              for (const step of block.steps) {
+                if (step.kind !== 'node') continue
+                if (!FILE_ACTIONS.has(step.node.action ?? '')) continue
+                const diffs: any[] = (step.node.resultDebug as any)?.data?.snapshot_diffs ?? []
+                for (const d of diffs) {
+                  totalAdds += d.additions ?? 0
+                  totalDels += d.deletions ?? 0
+                  fileCount++
+                  if (!firstDiff) firstDiff = d
+                }
+                // Count running nodes too (no diffs yet)
+                if (diffs.length === 0) fileCount++
+              }
+            }
+            if (fileCount === 0) return null
+            return (
+              <div 
+                className={`flex items-center justify-between border-t border-white/[0.05] bg-[#0a0d14]/80 px-4 py-2 ${firstDiff ? 'cursor-pointer hover:bg-white/[0.02] transition-colors' : ''}`}
+                onClick={() => {
+                  if (firstDiff) {
+                    getVsCodeApi()?.postMessage({
+                      type: 'review-snapshot',
+                      payload: { file: firstDiff!.file, originalUri: firstDiff!.originalUri, snapshotPath: firstDiff!.snapshotPath }
+                    })
+                  }
+                }}
+              >
+                <div className="flex items-center gap-2">
+                  <span className="text-[12px] font-medium text-[#c6d2e7]">
+                    {fileCount} file{fileCount !== 1 ? 's' : ''} changed
+                  </span>
+                  {(totalAdds > 0 || totalDels > 0) && (
+                    <div className="flex items-center gap-1.5 font-mono text-[11px]">
+                      <span className="text-[#2dd4bf]">+{totalAdds}</span>
+                      <span className="text-[#f43f5e]">-{totalDels}</span>
+                    </div>
+                  )}
+                </div>
+                {firstDiff && (
+                  <span className="text-[12px] font-medium text-[#c6d2e7] hover:text-white transition-colors">
+                    Review
+                  </span>
+                )}
+              </div>
+            )
+          })()}
 
           <div className="border-t chat-divider bg-[linear-gradient(180deg,rgba(255,255,255,0.02),transparent)] px-3 pb-3 pt-2 sm:px-4">
             <InputArea

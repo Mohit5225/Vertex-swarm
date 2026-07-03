@@ -88,7 +88,8 @@ export type ExtensionToWebviewMessage =
   | { type: 'chat-list'; payload: ChatListPayload }
   | { type: 'chat-opened'; payload: ChatOpenedPayload }
   | { type: 'error'; payload: string }
-  | { type: 'cancel-stream'; payload: { sessionId: string } };
+  | { type: 'cancel-stream'; payload: { sessionId: string } }
+  | { type: 'config-state'; payload: { snapshotRetentionDays: number } };
 
 // Messages FROM Webview TO Extension Host
 export type WebviewToExtensionMessage =
@@ -104,7 +105,11 @@ export type WebviewToExtensionMessage =
   | { type: 'show-terminal'; payload: { terminalName: string } }
   | { type: 'reset-chat' }
   | { type: 'logout' }
-  | { type: 'log'; payload: string };
+  | { type: 'log'; payload: string }
+  | { type: 'undo-snapshot'; payload: { snapshotId: string; sessionId: string; messageId: string } }
+  | { type: 'review-snapshot'; payload: { file: string; originalUri: string; snapshotPath: string } }
+  | { type: 'get-config' }
+  | { type: 'set-config'; payload: { snapshotRetentionDays: number } };
 
 // Legacy union kept for backward compat
 export type ExtensionMessage = ExtensionToWebviewMessage | WebviewToExtensionMessage;

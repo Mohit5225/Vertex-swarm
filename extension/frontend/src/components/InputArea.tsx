@@ -94,7 +94,7 @@ const InputArea: React.FC<Props> = ({
   }
 
   const handleCancel = () => {
-    if (!disabled || !currentChatId) {
+    if (!disabled) {
       return
     }
 
@@ -118,7 +118,7 @@ const InputArea: React.FC<Props> = ({
       getVsCodeApi()?.postMessage({
         type: 'cancel-stream',
         payload: {
-          sessionId: currentChatId,
+          sessionId: currentChatId || '',
         },
       })
     } catch (error) {

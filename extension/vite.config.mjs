@@ -6,6 +6,7 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 
 export default defineConfig({
   build: {
+    target: 'node18',
     lib: {
       entry: resolve(__dirname, 'src/extension.ts'),
       name: 'VertexSwarmExtension',
@@ -13,7 +14,11 @@ export default defineConfig({
       formats: ['cjs'],
     },
     rollupOptions: {
-      external: ['vscode', 'http', 'path', 'fs', 'child_process', 'node:child_process'],
+      external: [
+        'vscode',
+        'http', 'path', 'fs', 'child_process', 'crypto', 'os', 'fs/promises',
+        /node:.*/
+      ],
       output: {
         globals: {
           vscode: 'vscode',
