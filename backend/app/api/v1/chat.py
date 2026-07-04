@@ -9,7 +9,7 @@ from fastapi import APIRouter, Depends, HTTPException, status, Request
 import asyncio
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
-from sqlalchemy import desc, select
+from sqlalchemy import desc, select, delete
 from openai import RateLimitError, APIError
 
 from app.auth.dependencies import AuthenticatedUser, get_current_user
@@ -1173,3 +1173,74 @@ async def cancel_chat_stream(
         "status": "cancelled",
         "message": "Stream cancellation recorded. The LLM will be aware of this in the next message.",
     }
+
+
+@router.delete("/{chat_id}/messages/truncate-after/{message_id}", status_code=status.HTTP_200_OK)
+async def truncate_messages_after(
+    chat_id: UUID,
+    message_id: UUID,
+    user: AuthenticatedUser = Depends(get_current_user),
+):
+    """
+    Delete all messages that come AFTER the given message_id in this chat.
+    Used by the Edit Message flow: the user edits message N, so we delete
+    messages N+1, N+2, ... from the DB so the next send_message call builds
+    a clean history from message N onward.
+
+    Returns the sessionId (Redis key) so the extension can restore the
+    matching snapshot without re-deriving it.
+    """
+    async with AsyncSessionLocal() as db:
+        # Verify chat ownership
+        chat_result = await db.execute(
+            select(ChatORM).where(
+                ChatORM.chat_id == chat_id,
+                ChatORM.user_id == user.user_id,
+            )
+        )
+        chat = chat_result.scalar_one_or_none()
+        if not chat:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Chat not found")
+
+        # Find the anchor message
+        anchor_result = await db.execute(
+            select(MessageORM).where(
+                MessageORM.message_id == message_id,
+                MessageORM.chat_id == chat_id,
+            )
+        )
+        anchor = anchor_result.scalar_one_or_none()
+        if not anchor:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Message not found")
+
+        anchor_created_at = anchor.created_at
+
+        # Delete all messages created strictly after the anchor
+        delete_result = await db.execute(
+            delete(MessageORM).where(
+                MessageORM.chat_id == chat_id,
+                MessageORM.created_at > anchor_created_at,
+            )
+        )
+        deleted_count = delete_result.rowcount
+
+        # Update chat.updated_at
+        chat.updated_at = datetime.now(timezone.utc)
+        await db.commit()
+
+    session_id = build_chat_session_id(chat_id)
+
+    logger.info(
+        "messages truncated user_id=%s chat_id=%s anchor_message_id=%s deleted_count=%s",
+        user.user_id,
+        chat_id,
+        message_id,
+        deleted_count,
+    )
+
+    return {
+        "chatId": str(chat_id),
+        "messageId": str(message_id),
+        "sessionId": session_id,
+        "deletedCount": deleted_count,
+    }

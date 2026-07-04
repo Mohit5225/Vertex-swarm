@@ -89,7 +89,9 @@ export type ExtensionToWebviewMessage =
   | { type: 'chat-opened'; payload: ChatOpenedPayload }
   | { type: 'error'; payload: string }
   | { type: 'cancel-stream'; payload: { sessionId: string } }
-  | { type: 'config-state'; payload: { snapshotRetentionDays: number } };
+  | { type: 'config-state'; payload: { snapshotRetentionDays: number } }
+  | { type: 'message-id-assigned'; payload: { tempId: string; realId: string } }
+  | { type: 'messages-truncated'; payload: { messageId: string; messageText: string } };
 
 // Messages FROM Webview TO Extension Host
 export type WebviewToExtensionMessage =
@@ -107,9 +109,11 @@ export type WebviewToExtensionMessage =
   | { type: 'logout' }
   | { type: 'log'; payload: string }
   | { type: 'undo-snapshot'; payload: { snapshotId: string; sessionId: string; messageId: string } }
+  | { type: 'undo-snapshot-file'; payload: { snapshotId: string; sessionId: string; messageId: string; originalUri: string } }
   | { type: 'review-snapshot'; payload: { file: string; originalUri: string; snapshotPath: string } }
   | { type: 'get-config' }
-  | { type: 'set-config'; payload: { snapshotRetentionDays: number } };
+  | { type: 'set-config'; payload: { snapshotRetentionDays: number } }
+  | { type: 'truncate-messages'; payload: { chatId: string; messageId: string; messageText: string } };
 
 // Legacy union kept for backward compat
 export type ExtensionMessage = ExtensionToWebviewMessage | WebviewToExtensionMessage;
@@ -117,6 +121,7 @@ export type ExtensionMessage = ExtensionToWebviewMessage | WebviewToExtensionMes
 export interface StreamStartPayload {
   message: string;
   ideContextEnabled: boolean;
+  tempId?: string;
   requestContext?: RequestContextPayload;
 }
 

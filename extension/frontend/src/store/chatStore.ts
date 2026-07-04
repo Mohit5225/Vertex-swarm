@@ -10,6 +10,8 @@ export interface SessionEvent {
 
 export interface ChatMessage {
   id: string
+  /** Real DB UUID — only set for user messages sent live (not loaded from history) */
+  dbMessageId?: string
   type: 'user' | 'agent' | 'system'
   content: string
   events?: SessionEvent[]
@@ -49,6 +51,8 @@ interface ChatState {
   setError: (error: string | null) => void
   finishStreaming: () => void
   clearMessages: () => void
+  patchMessageId: (tempId: string, realId: string) => void
+  truncateAfter: (messageId: string) => void
 }
 
 const appendEventContent = (currentContent: string, event: SessionEvent): string => {
@@ -363,6 +367,29 @@ export const useChatStore = create<ChatState>((set) => ({
 
   finishStreaming: () => {
     set({ isStreaming: false, activeMessageId: null })
+  },
+
+  patchMessageId: (tempId: string, realId: string) => {
+    set((state) => ({
+      messages: state.messages.map((m) =>
+        m.id === tempId ? { ...m, id: realId, dbMessageId: realId } : m
+      ),
+    }))
+  },
+
+  truncateAfter: (messageId: string) => {
+    set((state) => {
+      const idx = state.messages.findIndex(
+        (m) => m.id === messageId || m.dbMessageId === messageId
+      )
+      if (idx === -1) return state
+      return {
+        messages: state.messages.slice(0, idx + 1),
+        isStreaming: false,
+        activeMessageId: null,
+        error: null,
+      }
+    })
   },
 
   clearMessages: () => {

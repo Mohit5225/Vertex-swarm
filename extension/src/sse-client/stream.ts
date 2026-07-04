@@ -24,7 +24,8 @@ export class SSEStreamClient {
     workspaceSkeleton?: string,
     ideContextEnabled?: boolean,
     requestContext?: RequestContextPayload
-  ): Promise<void> {
+  ): Promise<string> {
+    let capturedMessageId = '';
     try {
       const postUrl = `${this.backendUrl}/api/v1/chats/${chatId}/messages`;
       this.abortController = new AbortController();
@@ -52,6 +53,8 @@ export class SSEStreamClient {
       if (!messageId) {
         throw new Error('No message_id returned from POST');
       }
+
+      capturedMessageId = messageId;
 
       this.isConnected = true;
       let lastEventId = '0';
@@ -95,7 +98,7 @@ export class SSEStreamClient {
       if (error instanceof Error && error.name === 'AbortError') {
         this.cleanup();
         this.onClose();
-        return;
+        return capturedMessageId;
       }
 
       const errorMessage = error instanceof Error ? error.message : 'Unknown error';
@@ -103,6 +106,7 @@ export class SSEStreamClient {
       this.onError(errorMessage);
       this.cleanup();
     }
+    return capturedMessageId;
   }
 
   /**

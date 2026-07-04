@@ -4,8 +4,10 @@ import { useChatStore } from '../store/chatStore'
 import AgentTimeline from './AgentProcess'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
+import { Copy, Edit2 } from 'lucide-react'
 import { buildAgentRunBlocks } from '../lib/agentRunBlocks'
 import { describePendingMessage } from '../lib/trace'
+import { getVsCodeApi } from '../lib/vscode'
 
 interface Props {
   message: ChatMessage
@@ -60,9 +62,10 @@ const renderAssistantText = (content: string) => (
 const MessageRenderer: React.FC<Props> = ({ message }) => {
   const isUser = message.type === 'user'
   const isSystem = message.type === 'system'
-  const { activeMessageId, isStreaming } = useChatStore((state) => ({
+  const { activeMessageId, isStreaming, currentChatId } = useChatStore((state) => ({
     activeMessageId: state.activeMessageId,
     isStreaming: state.isStreaming,
+    currentChatId: state.currentChatId,
   }))
   const isStreamingMessage =
     message.type === 'agent' && isStreaming && activeMessageId === message.id
@@ -102,7 +105,7 @@ const MessageRenderer: React.FC<Props> = ({ message }) => {
     <div
       className={`flex py-2 pr-0 ${
         isUser ? 'justify-end' : 'justify-start'
-      } animate-fade-up`}
+      } animate-fade-up group relative`}
     >
       <div
         className={`min-w-0 ${
@@ -182,9 +185,11 @@ const MessageRenderer: React.FC<Props> = ({ message }) => {
               {renderedStreamingAssistantContent ??
                 (renderedAssistantContent &&
                   (isUser ? (
-                    <p className="whitespace-pre-wrap break-words text-[15px] leading-7 text-[#f4f7ff]">
-                      {message.content}
-                    </p>
+                    <div className="relative">
+                      <p className="whitespace-pre-wrap break-words text-[15px] leading-7 text-[#f4f7ff]">
+                        {message.content}
+                      </p>
+                    </div>
                   ) : (
                     renderedAssistantContent
                   )))}
@@ -198,6 +203,38 @@ const MessageRenderer: React.FC<Props> = ({ message }) => {
             </div>
           )}
         </div>
+
+        {/* Action Buttons for User Messages */}
+        {isUser && !isStreaming && (
+          <div className="absolute -left-2 top-1/2 -translate-x-full -translate-y-1/2 opacity-0 group-hover:opacity-100 transition-opacity flex items-center gap-1.5 pr-2">
+            <button
+              onClick={() => {
+                const messageId = message.dbMessageId || message.id
+                if (!messageId || !currentChatId) return
+                getVsCodeApi()?.postMessage({
+                  type: 'truncate-messages',
+                  payload: {
+                    chatId: currentChatId,
+                    messageId: messageId,
+                    messageText: message.content
+                  }
+                })
+              }}
+              className="p-1.5 rounded-md text-[#91a0bb] hover:text-white hover:bg-white/[0.05] transition-colors"
+              title="Edit Message (Removes subsequent agent responses)"
+            >
+              <Edit2 className="w-3.5 h-3.5" />
+            </button>
+            <button
+              onClick={() => navigator.clipboard.writeText(message.content)}
+              className="p-1.5 rounded-md text-[#91a0bb] hover:text-white hover:bg-white/[0.05] transition-colors"
+              title="Copy Message"
+            >
+              <Copy className="w-3.5 h-3.5" />
+            </button>
+          </div>
+        )}
+
       </div>
     </div>
   )

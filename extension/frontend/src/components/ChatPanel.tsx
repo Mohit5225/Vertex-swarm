@@ -5,7 +5,7 @@ import MessageRenderer from './MessageRenderer'
 import InputArea from './InputArea'
 import ConfirmDialog from './ConfirmDialog'
 import { getVsCodeApi } from '../lib/vscode'
-import { Package, FileSignature, Search, ChevronDown } from 'lucide-react'
+import { Package, ChevronDown, Undo2 } from 'lucide-react'
 
 import { TOAST_STATUS_PHASES, buildAgentRunBlocks } from '../lib/agentRunBlocks'
 import { getEventPhase } from '../lib/sessionEvents'
@@ -58,36 +58,111 @@ const formatRelativeTime = (isoTimestamp: string) => {
   return `${diffDays} day${diffDays === 1 ? '' : 's'} ago`
 }
 
+interface LiveDiff {
+  file: string
+  additions: number
+  deletions: number
+  originalUri?: string
+  snapshotPath?: string
+  snapshotId?: string
+  sessionId?: string
+  messageId?: string
+}
+
 const LiveFileEditBar: React.FC<{ messages: ChatMessage[] }> = ({ messages }) => {
   const [isExpanded, setIsExpanded] = useState(false)
-  const lastAgent = [...messages].reverse().find(m => m.type === 'agent')
-  if (!lastAgent?.events?.length) return null
+  if (messages.length === 0) return null
+  const lastMessage = messages[messages.length - 1]
+  if (lastMessage.type !== 'agent' || !lastMessage.events?.length) return null
+  const lastAgent = lastMessage
 
-  const blocks = buildAgentRunBlocks(lastAgent.events, lastAgent.content)
-  let fileCount = 0, totalAdds = 0, totalDels = 0
-  const allDiffs: any[] = []
+  const blocks = buildAgentRunBlocks(lastAgent.events || [], lastAgent.content)
+
+  // Key: filename → merged diff. Only accumulate from SUCCESSFUL file-op nodes.
+  const diffMap = new Map<string, LiveDiff>()
+  let topSnapshotId = '', topSessionId = '', topMessageId = ''
 
   for (const block of blocks) {
     if (block.kind !== 'process') continue
     for (const step of block.steps) {
       if (step.kind !== 'node') continue
       if (!FILE_ACTIONS.has(step.node.action ?? '')) continue
-      const diffs: any[] = (step.node.resultDebug as any)?.data?.snapshot_diffs ?? []
-      for (const d of diffs) {
-        totalAdds += d.additions ?? 0
-        totalDels += d.deletions ?? 0
-        fileCount++
-        allDiffs.push(d)
+      // Skip failed / still-running nodes — only count actual edits
+      if (step.node.state !== 'success') continue
+
+      const data = (step.node.resultDebug as any)?.data
+      const diffs: any[] = data?.snapshot_diffs ?? []
+
+      // Capture snapshot metadata from the first successful node
+      if (!topSnapshotId && data?.snapshot_id) {
+        topSnapshotId = data.snapshot_id ?? ''
+        topSessionId  = data.snapshot_session_id ?? ''
+        topMessageId  = data.snapshot_id ?? ''
       }
-      if (diffs.length === 0) fileCount++
+
+      for (const d of diffs) {
+        const filename: string = d.file ?? ''
+        if (!filename) continue
+        const existing = diffMap.get(filename)
+        if (existing) {
+          // Same file edited again — take the latest delta since it is computed against the base snapshot
+          existing.additions = d.additions ?? 0
+          existing.deletions = d.deletions ?? 0
+          // Keep the most-recent snapshot refs so Undo/Review targets the latest snapshot
+          if (d.snapshotPath) existing.snapshotPath = d.snapshotPath
+          if (d.originalUri) existing.originalUri   = d.originalUri
+        } else {
+          diffMap.set(filename, {
+            file:        filename,
+            additions:   d.additions ?? 0,
+            deletions:   d.deletions ?? 0,
+            originalUri: d.originalUri,
+            snapshotPath: d.snapshotPath,
+            snapshotId:  data?.snapshot_id,
+            sessionId:   data?.snapshot_session_id,
+            messageId:   data?.snapshot_id,
+          })
+        }
+      }
     }
   }
 
+  const mergedDiffs = Array.from(diffMap.values())
+  const fileCount  = mergedDiffs.length
+  const totalAdds  = mergedDiffs.reduce((s, d) => s + d.additions, 0)
+  const totalDels  = mergedDiffs.reduce((s, d) => s + d.deletions, 0)
+
   if (fileCount === 0) return null
+
+  const handleUndoAll = (e: React.MouseEvent) => {
+    e.stopPropagation()
+    if (!topSnapshotId) return
+    getVsCodeApi()?.postMessage({
+      type: 'undo-snapshot',
+      payload: { snapshotId: topSnapshotId, sessionId: topSessionId, messageId: topMessageId }
+    })
+  }
+
+  const handleReviewFile = (e: React.MouseEvent, d: LiveDiff) => {
+    e.stopPropagation()
+    getVsCodeApi()?.postMessage({
+      type: 'review-snapshot',
+      payload: { file: d.file, originalUri: d.originalUri, snapshotPath: d.snapshotPath }
+    })
+  }
+
+  const handleUndoFile = (e: React.MouseEvent, d: LiveDiff) => {
+    e.stopPropagation()
+    if (!d.snapshotId || !d.originalUri) return
+    getVsCodeApi()?.postMessage({
+      type: 'undo-snapshot-file',
+      payload: { snapshotId: d.snapshotId, sessionId: d.sessionId, messageId: d.messageId, originalUri: d.originalUri }
+    })
+  }
 
   return (
     <div className="flex flex-col border-t border-white/[0.05] bg-[#0a0d14]/80">
-      <div 
+      <div
         className="flex items-center justify-between px-4 py-2 cursor-pointer hover:bg-white/[0.02] transition-colors"
         onClick={() => setIsExpanded(!isExpanded)}
       >
@@ -102,7 +177,17 @@ const LiveFileEditBar: React.FC<{ messages: ChatMessage[] }> = ({ messages }) =>
             </div>
           )}
         </div>
-        <div className="flex items-center">
+        <div className="flex items-center gap-2">
+          {topSnapshotId && (
+            <button
+              onClick={handleUndoAll}
+              className="flex items-center gap-1 rounded-md px-2 py-0.5 text-[11px] font-medium text-[#c6d2e7] hover:bg-white/[0.1] transition-colors"
+              title="Undo all file edits in this turn"
+            >
+              <Undo2 className="h-3 w-3" />
+              Undo
+            </button>
+          )}
           <span
             className={`inline-flex h-5 w-5 items-center justify-center rounded-full text-[#6f81a1] transition ${
               isExpanded ? 'rotate-180' : ''
@@ -112,26 +197,40 @@ const LiveFileEditBar: React.FC<{ messages: ChatMessage[] }> = ({ messages }) =>
           </span>
         </div>
       </div>
-      
-      {isExpanded && allDiffs.length > 0 && (
+
+      {isExpanded && mergedDiffs.length > 0 && (
         <div className="px-2 pb-2">
-          {allDiffs.map((d, i) => (
-            <div 
-              key={i} 
-              className="flex items-center justify-between px-3 py-1.5 rounded-md hover:bg-white/[0.03] transition-colors group cursor-pointer"
-              onClick={(e) => {
-                e.stopPropagation()
-                getVsCodeApi()?.postMessage({
-                  type: 'review-snapshot',
-                  payload: { file: d.file, originalUri: d.originalUri, snapshotPath: d.snapshotPath }
-                })
-              }}
+          {mergedDiffs.map((d) => (
+            <div
+              key={d.file}
+              className="flex items-center justify-between px-3 py-1.5 rounded-md hover:bg-white/[0.03] transition-colors group"
             >
-              <span className="text-[11px] text-[#91a0bb] font-mono truncate max-w-[250px] group-hover:text-[#c6d2e7] transition-colors">{d.file}</span>
+              <span
+                className="text-[11px] text-[#91a0bb] font-mono truncate max-w-[160px] group-hover:text-[#c6d2e7] transition-colors cursor-pointer"
+                onClick={(e) => handleReviewFile(e, d)}
+                title={d.file}
+              >
+                {d.file}
+              </span>
               <div className="flex items-center gap-2 opacity-70 group-hover:opacity-100 transition-opacity">
                 <span className="text-[10px] font-mono text-[#2dd4bf]">+{d.additions}</span>
                 <span className="text-[10px] font-mono text-[#f43f5e]">-{d.deletions}</span>
-                <span className="text-[10px] font-medium text-[#5e6ad2] ml-1">Review</span>
+                {d.snapshotId && (
+                  <button
+                    onClick={(e) => handleUndoFile(e, d)}
+                    className="flex items-center gap-0.5 text-[10px] font-medium text-[#c6d2e7] hover:text-white transition-colors ml-0.5"
+                    title={`Undo changes to ${d.file}`}
+                  >
+                    <Undo2 className="h-2.5 w-2.5" />
+                    Undo
+                  </button>
+                )}
+                <button
+                  onClick={(e) => handleReviewFile(e, d)}
+                  className="text-[10px] font-medium text-[#5e6ad2] hover:text-[#9eb1ff] transition-colors ml-0.5"
+                >
+                  Review
+                </button>
               </div>
             </div>
           ))}
@@ -153,6 +252,7 @@ const ChatPanel: React.FC = () => {
     setCurrentIdeContextEnabled: state.setCurrentIdeContextEnabled,
   }))
   const [queuedPrompt, setQueuedPrompt] = useState('')
+  const [queuedEdit, setQueuedEdit] = useState('')
   const [showLogoutConfirm, setShowLogoutConfirm] = useState(false)
   const [showSessionPanel, setShowSessionPanel] = useState(false)
   const [showHistoryPanel, setShowHistoryPanel] = useState(false)
@@ -162,8 +262,6 @@ const ChatPanel: React.FC = () => {
   const messagesEndRef = useRef<HTMLDivElement>(null)
   const sessionPanelRef = useRef<HTMLDivElement>(null)
   const historyPanelRef = useRef<HTMLDivElement>(null)
-
-
 
   const sessionStateLabel = isStreaming
     ? 'Running'
@@ -181,6 +279,15 @@ const ChatPanel: React.FC = () => {
 
   useEffect(() => {
     getVsCodeApi()?.postMessage({ type: 'load-chat-list' })
+
+    const handleQueuedEdit = (e: Event) => {
+      const customEvent = e as CustomEvent<{ text: string }>
+      setQueuedEdit(customEvent.detail.text)
+    }
+    window.addEventListener('vertex-queued-edit', handleQueuedEdit)
+    return () => {
+      window.removeEventListener('vertex-queued-edit', handleQueuedEdit)
+    }
   }, [])
 
   // Watch for tool_context_loaded status events and show ephemeral toast
@@ -498,18 +605,19 @@ const ChatPanel: React.FC = () => {
             </div>
           </div>
 
-          {/* Live file edit bar — shows during streaming (like Codex Image 2).
-               Displays "N files changed +X -Y  Review" above the input area while agent is working.
-               Disappears when streaming ends; replaced by the SnapshotCard inside the message. */}
-          {isStreaming && <LiveFileEditBar messages={messages} />}
+          {/* Live file edit bar — shows changes from the active or most recent agent turn.
+               Disappears when the user sends a new message. */}
+          <LiveFileEditBar messages={messages} />
 
           <div className="border-t chat-divider bg-[linear-gradient(180deg,rgba(255,255,255,0.02),transparent)] px-3 pb-3 pt-2 sm:px-4">
             <InputArea
               disabled={isStreaming}
               queuedPrompt={queuedPrompt}
+              queuedEdit={queuedEdit}
               ideContextEnabled={currentIdeContextEnabled}
               onToggleIdeContext={handleToggleIdeContext}
               onQueuedPromptApplied={() => setQueuedPrompt('')}
+              onQueuedEditApplied={() => setQueuedEdit('')}
             />
           </div>
         </div>

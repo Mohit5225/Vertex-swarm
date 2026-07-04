@@ -65,3 +65,59 @@ export async function restoreSnapshotPipeline(handle: SnapshotHandle, snapshotDi
     throw new Error('Failed to apply workspace edit during restore.');
   }
 }
+
+export async function restoreSnapshotFilePipeline(handle: SnapshotHandle, snapshotDir: string, fileUri: string): Promise<void> {
+  const manifestUri = vscode.Uri.file(path.join(snapshotDir, 'manifest.json'));
+  let manifestData: Uint8Array;
+  try {
+    manifestData = await vscode.workspace.fs.readFile(manifestUri);
+  } catch (err) {
+    throw new Error(`Snapshot manifest not found at ${manifestUri.fsPath}`);
+  }
+
+  const manifest: SnapshotManifest = JSON.parse(Buffer.from(manifestData).toString('utf8'));
+  const entry = manifest.files.find(f => f.path === fileUri);
+  
+  if (!entry) {
+    throw new Error(`File ${fileUri} not found in snapshot manifest`);
+  }
+
+  const workspaceEdit = new vscode.WorkspaceEdit();
+  const targetUri = vscode.Uri.parse(entry.path);
+
+  if (!entry.existedBefore) {
+    workspaceEdit.deleteFile(targetUri, { ignoreIfNotExists: true });
+  } else {
+    if (entry.backend === 'disk') {
+      if (!entry.snapshotPath) {
+        throw new Error(`Missing snapshotPath for disk backend file ${entry.path}`);
+      }
+      
+      const snapshotFileUri = vscode.Uri.file(entry.snapshotPath);
+      const contentData = await vscode.workspace.fs.readFile(snapshotFileUri);
+      const originalContent = Buffer.from(contentData).toString('utf8');
+
+      let currentDocument: vscode.TextDocument;
+      try {
+        currentDocument = await vscode.workspace.openTextDocument(targetUri);
+        const lastLine = currentDocument.lineAt(currentDocument.lineCount - 1);
+        const fullRange = new vscode.Range(
+          new vscode.Position(0, 0),
+          lastLine.range.end
+        );
+        workspaceEdit.replace(targetUri, fullRange, originalContent);
+      } catch {
+        workspaceEdit.createFile(targetUri, { ignoreIfExists: true });
+        const fullRange = new vscode.Range(new vscode.Position(0, 0), new vscode.Position(0, 0));
+        workspaceEdit.replace(targetUri, fullRange, originalContent);
+      }
+    } else if (entry.backend === 'git') {
+      throw new Error('Git backend restoration is not implemented in Phase 1.');
+    }
+  }
+
+  const success = await vscode.workspace.applyEdit(workspaceEdit);
+  if (!success) {
+    throw new Error(`Failed to apply workspace edit during file restore for ${fileUri}.`);
+  }
+}

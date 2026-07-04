@@ -99,4 +99,10 @@ export class DiskSnapshotManager implements ISnapshotManager {
     const snapshotDir = this.getSnapshotDir(handle);
     await restoreSnapshotPipeline(handle, snapshotDir);
   }
+
+  async restoreSnapshotFile(handle: SnapshotHandle, fileUri: string): Promise<void> {
+    const snapshotDir = this.getSnapshotDir(handle);
+    const { restoreSnapshotFilePipeline } = await import('./restore-pipeline');
+    await restoreSnapshotFilePipeline(handle, snapshotDir, fileUri);
+  }
 }

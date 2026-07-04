@@ -69,6 +69,7 @@ WORKSPACE_OPS_TOOL_SPEC: dict[str, Any] = {
                                 "- replacementContent: The new code to drop in. "
                                 "CRITICAL: Do NOT use placeholders like `// ... rest of code` in replacementContent. Every character in targetContent will be replaced. Placeholders will permanently corrupt the file. "
                                 "CRITICAL: Keep targetContent as narrow as possible. Do NOT target an entire 50-line function just to change one variable inside it. Target only the exact lines that need changing to avoid accidentally deleting surrounding code. "
+                                "CRITICAL: targetContent MUST match the file EXACTLY. Watch out for: missing/extra empty lines, indentation shifts (spaces vs tabs), and missing trailing spaces. ALWAYS read the file first to perfectly copy the text. "
                                 "- startLine/endLine: 1-indexed boundaries to limit the search. The tool searches for targetContent ONLY within these lines. "
                                 "- allowMultiple: boolean. If false, the tool throws an error if targetContent appears more than once in the range."
                             ),

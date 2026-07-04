@@ -17,6 +17,8 @@ interface Props {
   ideContextEnabled: boolean
   onToggleIdeContext: (enabled: boolean) => void
   onQueuedPromptApplied?: () => void
+  queuedEdit?: string
+  onQueuedEditApplied?: () => void
 }
 
 const InputArea: React.FC<Props> = ({
@@ -25,6 +27,8 @@ const InputArea: React.FC<Props> = ({
   ideContextEnabled,
   onToggleIdeContext,
   onQueuedPromptApplied,
+  queuedEdit,
+  onQueuedEditApplied,
 }) => {
   const [message, setMessage] = useState('')
   const [isFocused, setIsFocused] = useState(false)
@@ -69,8 +73,9 @@ const InputArea: React.FC<Props> = ({
       textareaRef.current.style.height = 'auto'
     }
 
+    const tempId = `msg-${Date.now()}`
     addMessage({
-      id: `msg-${Date.now()}`,
+      id: tempId,
       type: 'user',
       content: userMessage,
       timestamp: Date.now(),
@@ -85,6 +90,7 @@ const InputArea: React.FC<Props> = ({
         payload: {
           message: userMessage,
           ideContextEnabled,
+          tempId,
         },
       })
     } catch (error) {
@@ -165,6 +171,24 @@ const InputArea: React.FC<Props> = ({
       )
     })
   }, [queuedPrompt, onQueuedPromptApplied])
+
+  useEffect(() => {
+    if (!queuedEdit) {
+      return
+    }
+
+    setMessage(queuedEdit)
+    onQueuedEditApplied?.()
+
+    requestAnimationFrame(() => {
+      resizeTextarea()
+      textareaRef.current?.focus()
+      textareaRef.current?.setSelectionRange(
+        queuedEdit.length,
+        queuedEdit.length
+      )
+    })
+  }, [queuedEdit, onQueuedEditApplied])
 
   useEffect(() => {
     const handleOutsideClick = (event: MouseEvent) => {

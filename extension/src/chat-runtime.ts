@@ -254,13 +254,21 @@ export class VertexSwarmChatRuntime {
             activeTerminals: this.terminalService.getActiveTerminalContexts(),
           });
 
-          await this.streamClient.openChatStream(
+          const realMessageId = await this.streamClient.openChatStream(
             chatId,
             payload.message,
             workspaceSkeleton,
             ideContextEnabled,
             requestContext
           );
+
+          // Forward the real DB message_id so the webview can patch the temp local id
+          if (realMessageId && payload.tempId) {
+            this.post({
+              type: 'message-id-assigned',
+              payload: { tempId: payload.tempId as string, realId: realMessageId },
+            });
+          }
           if (this.currentChatId === chatId) {
             await this.sendChatList(token);
           }
@@ -405,6 +413,28 @@ export class VertexSwarmChatRuntime {
         break;
       }
 
+      case 'undo-snapshot-file': {
+        const payload = message.payload as any;
+        this.log(`undo requested for snapshot ${payload?.snapshotId} file ${payload?.originalUri}`);
+        if (payload?.snapshotId && payload?.sessionId && payload?.messageId && payload?.originalUri) {
+          try {
+            await this.snapshotManager.restoreSnapshotFile({
+              snapshotId: payload.snapshotId,
+              sessionId: payload.sessionId,
+              messageId: payload.messageId
+            }, payload.originalUri);
+            this.post({ type: 'event', payload: { type: 'output', content: `Undo successful for ${vscode.Uri.parse(payload.originalUri).fsPath.split(/[\\/]/).pop()}.` } });
+          } catch (e) {
+            const err = e instanceof Error ? e.message : String(e);
+            this.log(`undo file failed: ${err}`);
+            this.post({ type: 'error', payload: `Undo file failed: ${err}` });
+          }
+        } else {
+          this.log('undo file failed: missing snapshot details');
+        }
+        break;
+      }
+
       case 'review-snapshot': {
         const payload = message.payload as any;
         this.log(`review requested for snapshot file ${payload?.file}`);
@@ -437,6 +467,54 @@ export class VertexSwarmChatRuntime {
           const val = Math.max(1, Math.min(7, payload.snapshotRetentionDays));
           await config.update('snapshotRetentionDays', val, vscode.ConfigurationTarget.Global);
           this.post({ type: 'config-state', payload: { snapshotRetentionDays: val } });
+        }
+        break;
+      }
+
+      case 'truncate-messages': {
+        const payload = message.payload as any;
+        const { chatId, messageId, messageText } = payload;
+        this.log(`truncate-messages requested chat_id=${chatId} message_id=${messageId}`);
+        const token = await this.getValidToken();
+        if (!token || !chatId || !messageId) {
+          this.log('truncate-messages: missing token or ids');
+          break;
+        }
+        try {
+          const resp = await fetch(
+            `${this.backendUrl}/api/v1/chats/${chatId}/messages/truncate-after/${messageId}`,
+            {
+              method: 'DELETE',
+              headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+            }
+          );
+          if (!resp.ok) {
+            throw new Error(`Truncate failed: ${resp.status}`);
+          }
+          const result = await resp.json() as { sessionId: string; deletedCount: number };
+          this.log(`truncate-messages: deleted ${result.deletedCount} messages session_id=${result.sessionId}`);
+
+          // Restore snapshot for this turn (graceful if none exists)
+          try {
+            await this.snapshotManager.restoreSnapshot({
+              snapshotId: messageId,
+              sessionId: result.sessionId,
+              messageId,
+            });
+            this.log(`truncate-messages: snapshot restored for message_id=${messageId}`);
+          } catch (snapErr) {
+            this.log(`truncate-messages: no snapshot to restore (${snapErr}) — continuing`);
+          }
+
+          // Tell webview to drop the messages and pre-fill input
+          this.post({
+            type: 'messages-truncated',
+            payload: { messageId, messageText: messageText ?? '' },
+          });
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          this.log(`truncate-messages failed: ${msg}`);
+          this.post({ type: 'error', payload: `Edit failed: ${msg}` });
         }
         break;
       }

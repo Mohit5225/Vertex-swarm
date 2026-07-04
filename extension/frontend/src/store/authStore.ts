@@ -155,6 +155,22 @@ const handleExtensionMessage = (event: MessageEvent) => {
       )
       break
 
+    case 'message-id-assigned':
+      useChatStore
+        .getState()
+        .patchMessageId(message.payload.tempId, message.payload.realId)
+      break
+
+    case 'messages-truncated':
+      useChatStore.getState().truncateAfter(message.payload.messageId)
+      // We also need to emit a custom event on window so ChatPanel can pick up the queuedEdit text
+      window.dispatchEvent(
+        new CustomEvent('vertex-queued-edit', {
+          detail: { text: message.payload.messageText },
+        })
+      )
+      break
+
     case 'cancel-stream':
       useChatStore.getState().finishStreaming()
       break

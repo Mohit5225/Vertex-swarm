@@ -2079,6 +2079,83 @@ export class FileSystemService {
     }
 
     if (matches.length === 0) {
+      // Trick 1: Whitespace-Agnostic Matching Fallback
+      const strippedSearchArea = normalizedSearchArea.replace(/\s+/g, '');
+      const strippedTarget = normalizedTarget.replace(/\s+/g, '');
+      
+      if (strippedTarget === '') {
+        throw new Error(`Edit ${index} failed: 'targetContent' only contains whitespace.`);
+      }
+
+      let strippedMatchIndex = strippedSearchArea.indexOf(strippedTarget);
+      
+      if (strippedMatchIndex !== -1) {
+        // Find all matches in the stripped string
+        const strippedMatches: number[] = [];
+        let currIdx = strippedMatchIndex;
+        while (currIdx !== -1) {
+          strippedMatches.push(currIdx);
+          currIdx = strippedSearchArea.indexOf(strippedTarget, currIdx + 1);
+        }
+
+        if (strippedMatches.length > 1 && !allowMultiple) {
+          throw new Error(`Edit ${index} failed: Found ${strippedMatches.length} occurrences of 'targetContent' (ignoring whitespace). Make it more unique or set allowMultiple: true.`);
+        }
+
+        // Map stripped indices back to original indices
+        const mapStrippedToOriginal: number[] = [];
+        for (let i = 0; i < normalizedSearchArea.length; i++) {
+          if (!/\s/.test(normalizedSearchArea[i])) {
+            mapStrippedToOriginal.push(i);
+          }
+        }
+
+        const editsToApply: NormalizedTextEdit[] = [];
+        for (const sMatch of strippedMatches) {
+          const originalStartIndex = mapStrippedToOriginal[sMatch];
+          const strippedEndIndex = sMatch + strippedTarget.length - 1;
+          const originalEndIndex = mapStrippedToOriginal[strippedEndIndex];
+          
+          const textBeforeMatch = normalizedSearchArea.substring(0, originalStartIndex);
+          const linesBefore = textBeforeMatch.split('\n');
+          const lineOffset = linesBefore.length - 1;
+          const charOffset = linesBefore[linesBefore.length - 1].length;
+
+          const matchStartPos = new vscode.Position(
+            startPos.line + lineOffset, 
+            lineOffset === 0 ? startPos.character + charOffset : charOffset
+          );
+
+          const matchedText = normalizedSearchArea.substring(originalStartIndex, originalEndIndex + 1);
+          const matchedLines = matchedText.split('\n');
+          const targetLineCount = matchedLines.length - 1;
+          const targetCharOffset = matchedLines[matchedLines.length - 1].length;
+
+          let matchEndPos: vscode.Position;
+          if (targetLineCount === 0) {
+            matchEndPos = new vscode.Position(matchStartPos.line, matchStartPos.character + targetCharOffset);
+          } else {
+            matchEndPos = new vscode.Position(matchStartPos.line + targetLineCount, targetCharOffset);
+          }
+
+          editsToApply.push({
+            range: new vscode.Range(matchStartPos, matchEndPos),
+            newText: normalizedReplacement,
+            startOffset: document.offsetAt(matchStartPos),
+            endOffset: document.offsetAt(matchEndPos),
+            summary: {
+              startLine: matchStartPos.line + 1,
+              startCol: matchStartPos.character + 1,
+              endLine: matchEndPos.line + 1,
+              endCol: matchEndPos.character + 1,
+              textLength: normalizedReplacement.length,
+            },
+          });
+        }
+        
+        return editsToApply;
+      }
+
       throw new Error(`Edit ${index} failed: 'targetContent' not found between lines ${startLine}-${endLine}. Check exact string matching.`);
     }
 
