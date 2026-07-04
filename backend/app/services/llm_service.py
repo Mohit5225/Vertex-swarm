@@ -145,6 +145,7 @@ def _get_client(api_key: str | None = None) -> AsyncOpenAI:
     return AsyncOpenAI(
         base_url=base_url,
         api_key=api_key or settings.llm_api_key,
+        max_retries=3,
     )
 
 

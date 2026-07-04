@@ -572,8 +572,9 @@ async def send_message(
                         active_tool_guidance=active_tool_guidance,
                     )
 
-                async for event in stream_iterator:
-                    event_type = event.get("type")
+                try:
+                    async for event in stream_iterator:
+                        event_type = event.get("type")
 
                     if event_type == "usage":
                         usage_content = event.get("content")
@@ -790,6 +791,21 @@ async def send_message(
 
                         tool_call_requested = True
                         break
+
+                except Exception as stream_exc:
+                    logger.error("LLM stream error for chat %s:\n%s", chat_id, stream_exc, exc_info=True)
+                    run_failed = True
+                    stream_aborted = True
+                    await emit_trace_and_push(
+                        _build_event(
+                            "error",
+                            content="The LLM connection was unexpectedly dropped. Please try again.",
+                            metadata={"phase": "stream_error"},
+                            session_id=synthetic_session_id,
+                            chat_id=str(chat_id),
+                            message_id=request_message_id,
+                        )
+                    )
 
                 if stream_aborted:
                     break
