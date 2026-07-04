@@ -186,8 +186,8 @@ def _build_request_payload(
 
     if settings.llm_reasoning_enabled:
         payload["extra_body"] = {
-            "reasoning": {
-                "effort": settings.llm_reasoning_effort,
+            "thinking": {
+                "type": "enabled",
             }
         }
 
@@ -376,8 +376,9 @@ async def stream_chat_completion(
     Yields:
         Token chunks (str) as they stream from the model.
     """
-    from app.services.key_pool import key_pool
-    key_idx, api_key = await key_pool.next_key()
+    # from app.services.key_pool import key_pool
+    # key_idx, api_key = await key_pool.next_key()
+    api_key = settings.llm_api_key
     
     client = _get_client(api_key=api_key)
     stream = await client.chat.completions.create(
@@ -420,12 +421,14 @@ async def stream_chat_events(
       - {"type": "thinking", "content": "..."}
       - {"type": "tool_call", "tool_call_id": "...", "tool_name": "...", "args": {...}}
     """
-    from app.services.key_pool import key_pool
-    key_idx, api_key = await key_pool.next_key()
+    # from app.services.key_pool import key_pool
+    # key_idx, api_key = await key_pool.next_key()
+    api_key = settings.llm_api_key
     
     rate_limiter = _get_rate_limiter(api_key)
     client = _get_client(api_key=api_key)
-    logger.info("Using API key index %d from pool of size %d", key_idx, key_pool.pool_size)
+    # logger.info("Using API key index %d from pool of size %d", key_idx, key_pool.pool_size)
+    logger.info("Using single DeepSeek API key")
     
     payload = _build_request_payload(messages, workspace_skeleton, model, active_tool_guidance)
     _log_llm_context_snapshot(payload, context_log_metadata)

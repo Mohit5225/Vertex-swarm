@@ -12,7 +12,7 @@ interface Props {
 }
 
 const looksLikeMarkdown = (content: string) =>
-  /(^|\n)(#{1,6}\s|[-*+]\s|\d+\.\s|>\s|```|`[^`]+`|\|.+\|)/m.test(content)
+  /(^|\n)[ \t]*(#{1,6}\s|[-*+]\s|\d+\.\s|>\s|```|`[^`]+`|.*\|.*\|)/m.test(content)
 
 const normalizeAssistantContent = (content: string) => {
   const normalized = content.replace(/\r\n/g, '\n')

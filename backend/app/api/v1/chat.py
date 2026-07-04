@@ -22,7 +22,9 @@ from app.schemas.tool import ToolResultSchema
 from app.services.llm_service import stream_chat_events, format_tool_response
 from app.services.tool_memory import build_tool_memory_from_trace_events, format_tool_memory_for_prompt
 from app.services.prompt_loader import build_injected_guidance, load_categories, SUPPORTED_CATEGORIES
-
+from app.utils.token_profiler import TokenProfiler
+from app.services.llm_service import DEVELOPER_ASSISTANT_PERSONA
+from app.services.tool_schemas import WORKSPACE_OPS_TOOL_SPEC, TERMINAL_OPS_TOOL_SPEC, LOAD_TOOL_CONTEXT_TOOL_SPEC
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/v1/chats", tags=["chats"])
@@ -119,6 +121,7 @@ def _assistant_tool_call_message(
     tool_name: str,
     tool_call_id: str,
     tool_args: dict[str, Any],
+    assistant_reasoning_content: str = "",
 ) -> dict[str, Any]:
     tool_call_arguments = json.dumps(tool_args, separators=(",", ":"), sort_keys=True)
     assistant_message: dict[str, Any] = {
@@ -137,6 +140,10 @@ def _assistant_tool_call_message(
     }
     if not assistant_turn_content:
         assistant_message["content"] = None
+        
+    if assistant_reasoning_content:
+        assistant_message["reasoning_content"] = assistant_reasoning_content
+        
     return assistant_message
 
 
@@ -483,12 +490,21 @@ async def send_message(
                 message_id=request_message_id,
             )
 
+        profiler = TokenProfiler(request_message_id)
+        profiler.log_constant("dev_persona", DEVELOPER_ASSISTANT_PERSONA)
+        profiler.log_constant("tool_schemas", json.dumps([WORKSPACE_OPS_TOOL_SPEC, TERMINAL_OPS_TOOL_SPEC, LOAD_TOOL_CONTEXT_TOOL_SPEC]))
+        profiler.log_constant("ide_context", request_context_message)
+        profiler.log_constant("workspace_skeleton", req.workspace_skeleton)
+        profiler.log_constant("tool_memory", tool_memory_message)
+        profiler.log_constant("active_tool_guidance", active_tool_guidance)
+
         try:
             await emit_trace_and_push(build_status_event("Preparing conversation context...", "preparing_context"))
 
             while True:
                 llm_round += 1
                 assistant_turn_content = ""
+                assistant_reasoning_content = ""
                 tool_call_requested = False
                 stream_aborted = False
 
@@ -513,6 +529,8 @@ async def send_message(
                     "llm_message_count": len(llm_messages),
                     "last_message_role": llm_messages[-1].get("role") if llm_messages else None,
                 }
+
+                profiler.log_payload_snapshot(llm_round, llm_messages)
 
                 # Try primary model, fallback to secondary on rate limit
                 try:
@@ -557,6 +575,12 @@ async def send_message(
                 async for event in stream_iterator:
                     event_type = event.get("type")
 
+                    if event_type == "usage":
+                        usage_content = event.get("content")
+                        if isinstance(usage_content, dict):
+                            profiler.log_api_usage(llm_round, usage_content)
+                        continue
+
                     if event_type == "token":
                         token = str(event.get("content", ""))
                         if not token:
@@ -575,6 +599,11 @@ async def send_message(
 
                     if event_type == "thinking":
                         thinking_content = str(event.get("content", ""))
+                        if not thinking_content:
+                            continue
+                            
+                        assistant_reasoning_content += thinking_content
+
                         if not thinking_content.strip():
                             continue
 
@@ -654,6 +683,7 @@ async def send_message(
                                     tool_name,
                                     tool_call_id,
                                     tool_args,
+                                    assistant_reasoning_content,
                                 )
                             )
                             llm_messages.append(
@@ -730,12 +760,17 @@ async def send_message(
                             )
                         )
 
+                        profiler.log_turn(llm_round, "assistant_answer", assistant_turn_content)
+                        profiler.log_turn(llm_round, "assistant_reasoning", assistant_reasoning_content)
+                        profiler.log_turn(llm_round, f"tool_output_{tool_name}", tool_result.content)
+
                         llm_messages.append(
                             _assistant_tool_call_message(
                                 assistant_turn_content,
                                 tool_name,
                                 tool_call_id,
                                 tool_args,
+                                assistant_reasoning_content,
                             )
                         )
                         
@@ -794,6 +829,8 @@ async def send_message(
                         )
                     )
                 else:
+                    profiler.log_turn(llm_round, "assistant_answer", assistant_turn_content)
+                    profiler.log_turn(llm_round, "assistant_reasoning", assistant_reasoning_content)
                     await emit_trace_and_push(build_status_event("Final answer ready.", "completed"))
                 break
         except Exception as exc:
@@ -897,6 +934,7 @@ async def send_message(
                 request_message_id,
             )
 
+        profiler.dump("logs")
         await push_event({"type": "done", "messageId": str(asst_msg.message_id)})
 
     asyncio.create_task(run_agent_loop())

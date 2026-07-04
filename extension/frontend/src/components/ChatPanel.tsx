@@ -1,11 +1,11 @@
 import React, { useEffect, useRef, useState } from 'react'
 import { useAuthStore } from '../store/authStore'
-import { useChatStore } from '../store/chatStore'
+import { useChatStore, type ChatMessage } from '../store/chatStore'
 import MessageRenderer from './MessageRenderer'
 import InputArea from './InputArea'
 import ConfirmDialog from './ConfirmDialog'
 import { getVsCodeApi } from '../lib/vscode'
-import { Package, FileSignature, Search } from 'lucide-react'
+import { Package, FileSignature, Search, ChevronDown } from 'lucide-react'
 
 import { TOAST_STATUS_PHASES, buildAgentRunBlocks } from '../lib/agentRunBlocks'
 import { getEventPhase } from '../lib/sessionEvents'
@@ -56,6 +56,89 @@ const formatRelativeTime = (isoTimestamp: string) => {
 
   const diffDays = Math.round(diffHours / 24)
   return `${diffDays} day${diffDays === 1 ? '' : 's'} ago`
+}
+
+const LiveFileEditBar: React.FC<{ messages: ChatMessage[] }> = ({ messages }) => {
+  const [isExpanded, setIsExpanded] = useState(false)
+  const lastAgent = [...messages].reverse().find(m => m.type === 'agent')
+  if (!lastAgent?.events?.length) return null
+
+  const blocks = buildAgentRunBlocks(lastAgent.events, lastAgent.content)
+  let fileCount = 0, totalAdds = 0, totalDels = 0
+  const allDiffs: any[] = []
+
+  for (const block of blocks) {
+    if (block.kind !== 'process') continue
+    for (const step of block.steps) {
+      if (step.kind !== 'node') continue
+      if (!FILE_ACTIONS.has(step.node.action ?? '')) continue
+      const diffs: any[] = (step.node.resultDebug as any)?.data?.snapshot_diffs ?? []
+      for (const d of diffs) {
+        totalAdds += d.additions ?? 0
+        totalDels += d.deletions ?? 0
+        fileCount++
+        allDiffs.push(d)
+      }
+      if (diffs.length === 0) fileCount++
+    }
+  }
+
+  if (fileCount === 0) return null
+
+  return (
+    <div className="flex flex-col border-t border-white/[0.05] bg-[#0a0d14]/80">
+      <div 
+        className="flex items-center justify-between px-4 py-2 cursor-pointer hover:bg-white/[0.02] transition-colors"
+        onClick={() => setIsExpanded(!isExpanded)}
+      >
+        <div className="flex items-center gap-2">
+          <span className="text-[12px] font-medium text-[#c6d2e7]">
+            {fileCount} file{fileCount !== 1 ? 's' : ''} changed
+          </span>
+          {(totalAdds > 0 || totalDels > 0) && (
+            <div className="flex items-center gap-1.5 font-mono text-[11px]">
+              <span className="text-[#2dd4bf]">+{totalAdds}</span>
+              <span className="text-[#f43f5e]">-{totalDels}</span>
+            </div>
+          )}
+        </div>
+        <div className="flex items-center">
+          <span
+            className={`inline-flex h-5 w-5 items-center justify-center rounded-full text-[#6f81a1] transition ${
+              isExpanded ? 'rotate-180' : ''
+            }`}
+          >
+            <ChevronDown className="h-3.5 w-3.5" />
+          </span>
+        </div>
+      </div>
+      
+      {isExpanded && allDiffs.length > 0 && (
+        <div className="px-2 pb-2">
+          {allDiffs.map((d, i) => (
+            <div 
+              key={i} 
+              className="flex items-center justify-between px-3 py-1.5 rounded-md hover:bg-white/[0.03] transition-colors group cursor-pointer"
+              onClick={(e) => {
+                e.stopPropagation()
+                getVsCodeApi()?.postMessage({
+                  type: 'review-snapshot',
+                  payload: { file: d.file, originalUri: d.originalUri, snapshotPath: d.snapshotPath }
+                })
+              }}
+            >
+              <span className="text-[11px] text-[#91a0bb] font-mono truncate max-w-[250px] group-hover:text-[#c6d2e7] transition-colors">{d.file}</span>
+              <div className="flex items-center gap-2 opacity-70 group-hover:opacity-100 transition-opacity">
+                <span className="text-[10px] font-mono text-[#2dd4bf]">+{d.additions}</span>
+                <span className="text-[10px] font-mono text-[#f43f5e]">-{d.deletions}</span>
+                <span className="text-[10px] font-medium text-[#5e6ad2] ml-1">Review</span>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  )
 }
 
 const ChatPanel: React.FC = () => {
@@ -418,60 +501,7 @@ const ChatPanel: React.FC = () => {
           {/* Live file edit bar — shows during streaming (like Codex Image 2).
                Displays "N files changed +X -Y  Review" above the input area while agent is working.
                Disappears when streaming ends; replaced by the SnapshotCard inside the message. */}
-          {isStreaming && (() => {
-            const lastAgent = [...messages].reverse().find(m => m.type === 'agent')
-            if (!lastAgent?.events?.length) return null
-            const blocks = buildAgentRunBlocks(lastAgent.events, lastAgent.content)
-            let fileCount = 0, totalAdds = 0, totalDels = 0
-            let firstDiff: { file: string; originalUri: string; snapshotPath: string } | null = null
-            for (const block of blocks) {
-              if (block.kind !== 'process') continue
-              for (const step of block.steps) {
-                if (step.kind !== 'node') continue
-                if (!FILE_ACTIONS.has(step.node.action ?? '')) continue
-                const diffs: any[] = (step.node.resultDebug as any)?.data?.snapshot_diffs ?? []
-                for (const d of diffs) {
-                  totalAdds += d.additions ?? 0
-                  totalDels += d.deletions ?? 0
-                  fileCount++
-                  if (!firstDiff) firstDiff = d
-                }
-                // Count running nodes too (no diffs yet)
-                if (diffs.length === 0) fileCount++
-              }
-            }
-            if (fileCount === 0) return null
-            return (
-              <div 
-                className={`flex items-center justify-between border-t border-white/[0.05] bg-[#0a0d14]/80 px-4 py-2 ${firstDiff ? 'cursor-pointer hover:bg-white/[0.02] transition-colors' : ''}`}
-                onClick={() => {
-                  if (firstDiff) {
-                    getVsCodeApi()?.postMessage({
-                      type: 'review-snapshot',
-                      payload: { file: firstDiff!.file, originalUri: firstDiff!.originalUri, snapshotPath: firstDiff!.snapshotPath }
-                    })
-                  }
-                }}
-              >
-                <div className="flex items-center gap-2">
-                  <span className="text-[12px] font-medium text-[#c6d2e7]">
-                    {fileCount} file{fileCount !== 1 ? 's' : ''} changed
-                  </span>
-                  {(totalAdds > 0 || totalDels > 0) && (
-                    <div className="flex items-center gap-1.5 font-mono text-[11px]">
-                      <span className="text-[#2dd4bf]">+{totalAdds}</span>
-                      <span className="text-[#f43f5e]">-{totalDels}</span>
-                    </div>
-                  )}
-                </div>
-                {firstDiff && (
-                  <span className="text-[12px] font-medium text-[#c6d2e7] hover:text-white transition-colors">
-                    Review
-                  </span>
-                )}
-              </div>
-            )
-          })()}
+          {isStreaming && <LiveFileEditBar messages={messages} />}
 
           <div className="border-t chat-divider bg-[linear-gradient(180deg,rgba(255,255,255,0.02),transparent)] px-3 pb-3 pt-2 sm:px-4">
             <InputArea

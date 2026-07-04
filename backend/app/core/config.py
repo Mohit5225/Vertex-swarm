@@ -96,17 +96,24 @@ class Settings(BaseSettings):
     # OpenAI-compatible LLM provider
     # OpenRouter is the active path; Modal is retained for rollback.
     # ========================================
-    openrouter_base_url: str = "https://openrouter.ai/api/v1"
-    openrouter_api_key: str = ""
-    openrouter_api_key_2: str = ""
-    openrouter_api_key_3: str = ""
-    openrouter_api_key_4: str = ""
-    openrouter_api_key_5: str = ""
-    openrouter_api_key_6: str = ""
-    openrouter_model: str = "poolside/laguna-xs.2:free"
-    openrouter_fallback_model: str = "poolside/laguna-xs.2:free"
-    openrouter_reasoning_enabled: bool = True
-    openrouter_reasoning_effort: str = "low"
+    # openrouter_base_url: str = "https://openrouter.ai/api/v1"
+    # openrouter_api_key: str = ""
+    # openrouter_api_key_2: str = ""
+    # openrouter_api_key_3: str = ""
+    # openrouter_api_key_4: str = ""
+    # openrouter_api_key_5: str = ""
+    # openrouter_api_key_6: str = ""
+    # openrouter_model: str = "poolside/laguna-xs.2:free"
+    # openrouter_fallback_model: str = "poolside/laguna-xs.2:free"
+    # openrouter_reasoning_enabled: bool = True
+    # openrouter_reasoning_effort: str = "low"
+
+    deepseek_base_url: str = "https://api.deepseek.com"
+    deepseek_api_key: str = ""
+    deepseek_model: str = "deepseek-v4-flash"
+    deepseek_fallback_model: str = "deepseek-v4-flash"
+    deepseek_reasoning_enabled: bool = False
+    deepseek_reasoning_effort: str = "low"
 
     modal_base_url: str = "https://api.us-west-2.modal.direct/v1"
     modal_api_key: str = ""
@@ -117,51 +124,46 @@ class Settings(BaseSettings):
 
     @property
     def llm_base_url(self) -> str:
-        if self.openrouter_api_key.strip():
-            return self.openrouter_base_url
+        if self.deepseek_api_key.strip():
+            return self.deepseek_base_url
         return self.modal_base_url
 
     @property
     def llm_api_key_pool(self) -> list[str]:
-        """All configured OpenRouter keys (non-empty), in order."""
+        """All configured DeepSeek keys (non-empty), in order."""
         candidates = [
-            self.openrouter_api_key,
-            self.openrouter_api_key_2,
-            self.openrouter_api_key_3,
-            self.openrouter_api_key_4,
-            self.openrouter_api_key_5,
-            self.openrouter_api_key_6,
+            self.deepseek_api_key,
         ]
         return [k.strip() for k in candidates if k.strip()]
 
     @property
     def llm_api_key(self) -> str:
-        if self.openrouter_api_key.strip():
-            return self.openrouter_api_key
+        if self.deepseek_api_key.strip():
+            return self.deepseek_api_key
         return self.modal_api_key
 
     @property
     def llm_model(self) -> str:
-        if self.openrouter_api_key.strip():
-            return self.openrouter_model
+        if self.deepseek_api_key.strip():
+            return self.deepseek_model
         return self.modal_model
 
     @property
     def llm_fallback_model(self) -> str:
-        if self.openrouter_api_key.strip():
-            return self.openrouter_fallback_model
+        if self.deepseek_api_key.strip():
+            return self.deepseek_fallback_model
         return self.modal_fallback_model
 
     @property
     def llm_reasoning_enabled(self) -> bool:
-        if self.openrouter_api_key.strip():
-            return self.openrouter_reasoning_enabled
+        if self.deepseek_api_key.strip():
+            return self.deepseek_reasoning_enabled
         return self.modal_reasoning_enabled
 
     @property
     def llm_reasoning_effort(self) -> str:
-        if self.openrouter_api_key.strip():
-            return self.openrouter_reasoning_effort
+        if self.deepseek_api_key.strip():
+            return self.deepseek_reasoning_effort
         return self.modal_reasoning_effort
 
     @property

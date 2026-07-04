@@ -76,8 +76,8 @@ export class VertexSwarmChatRuntime {
   private streamClient: SSEStreamClient | null = null;
   private currentChatId: string | null = null;
   private streamCancellationRequested: boolean = false;
-  private authResetInProgress = false;
-  private refreshInFlight: Promise<StoredSession> | null = null;
+  private static authResetInProgress = false;
+  private static refreshInFlight: Promise<StoredSession> | null = null;
   private staticContext: { os: string; workspaceFolders: string[] } | null = null;
 
   constructor(options: VertexSwarmChatRuntimeOptions) {
@@ -359,15 +359,15 @@ export class VertexSwarmChatRuntime {
 
       case 'reset-chat': {
         this.log('resetting active chat state');
-        this.currentChatId = undefined;
-        this.streamClient = undefined;
+        this.currentChatId = null;
+        this.streamClient = null;
         await this.sendChatList();
         break;
       }
 
       case 'logout': {
         this.log('logout requested from webview');
-        this.currentChatId = undefined;
+        this.currentChatId = null;
         await vscode.commands.executeCommand('vertex-swarm.logout');
         break;
       }
@@ -450,10 +450,10 @@ export class VertexSwarmChatRuntime {
   public async handleLogout(reason?: string): Promise<void> {
     this.log(`handling logout${reason ? ` reason="${reason}"` : ''}`);
     const activeChatId = this.currentChatId;
-    this.currentChatId = undefined;
+    this.currentChatId = null;
     if (this.streamClient) {
       await this.streamClient.cancelStream(activeChatId ?? '');
-      this.streamClient = undefined;
+      this.streamClient = null;
     }
     this.postLoggedOut(reason);
   }
@@ -634,18 +634,18 @@ export class VertexSwarmChatRuntime {
         ? 'expired JWT'
         : 'expiring JWT';
 
-    if (this.refreshInFlight) {
+    if (VertexSwarmChatRuntime.refreshInFlight) {
       this.log(`joining in-flight silent refresh (${reason})`);
       this.logAuth(`joining in-flight silent refresh (${reason})`);
-      return this.refreshInFlight;
+      return VertexSwarmChatRuntime.refreshInFlight;
     }
 
-    this.refreshInFlight = this.refreshSessionWithStoredToken(session, reason)
+    VertexSwarmChatRuntime.refreshInFlight = this.refreshSessionWithStoredToken(session, reason)
       .finally(() => {
-        this.refreshInFlight = null;
+        VertexSwarmChatRuntime.refreshInFlight = null;
       });
 
-    return this.refreshInFlight;
+    return VertexSwarmChatRuntime.refreshInFlight;
   }
 
   private shouldRefreshSession(
@@ -1029,7 +1029,7 @@ export class VertexSwarmChatRuntime {
   }
 
   private async handleUnauthorized(): Promise<void> {
-    if (this.authResetInProgress) {
+    if (VertexSwarmChatRuntime.authResetInProgress) {
       return;
     }
 
@@ -1039,7 +1039,7 @@ export class VertexSwarmChatRuntime {
       return;
     }
 
-    this.authResetInProgress = true;
+    VertexSwarmChatRuntime.authResetInProgress = true;
     this.log('backend returned 401; clearing local session');
     this.logAuth('backend returned 401; clearing local session');
     await this.revokeStoredRefreshToken('forced unauthorized logout');
@@ -1052,7 +1052,7 @@ export class VertexSwarmChatRuntime {
         'Backend rejected the session token. Please sign in again.'
       );
     } finally {
-      this.authResetInProgress = false;
+      VertexSwarmChatRuntime.authResetInProgress = false;
     }
   }
 
