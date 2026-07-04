@@ -576,107 +576,194 @@ async def send_message(
                     async for event in stream_iterator:
                         event_type = event.get("type")
 
-                    if event_type == "usage":
-                        usage_content = event.get("content")
-                        if isinstance(usage_content, dict):
-                            profiler.log_api_usage(llm_round, usage_content)
-                        continue
-
-                    if event_type == "token":
-                        token = str(event.get("content", ""))
-                        if not token:
+                        if event_type == "usage":
+                            usage_content = event.get("content")
+                            if isinstance(usage_content, dict):
+                                profiler.log_api_usage(llm_round, usage_content)
                             continue
 
-                        assistant_turn_content += token
-                        full_response += token
-                        await push_event(
-                            _build_event(
-                                "token",
-                                content=token,
-                                metadata={"phase": "assistant_output"},
+                        if event_type == "token":
+                            token = str(event.get("content", ""))
+                            if not token:
+                                continue
+
+                            assistant_turn_content += token
+                            full_response += token
+                            await push_event(
+                                _build_event(
+                                    "token",
+                                    content=token,
+                                    metadata={"phase": "assistant_output"},
+                                )
                             )
-                        )
-                        continue
-
-                    if event_type == "thinking":
-                        thinking_content = str(event.get("content", ""))
-                        if not thinking_content:
                             continue
+
+                        if event_type == "thinking":
+                            thinking_content = str(event.get("content", ""))
+                            if not thinking_content:
+                                continue
                             
-                        assistant_reasoning_content += thinking_content
+                            assistant_reasoning_content += thinking_content
 
-                        if not thinking_content.strip():
+                            if not thinking_content.strip():
+                                continue
+
+                            await emit_trace_and_push(
+                                _build_event(
+                                    "thinking",
+                                    content=thinking_content,
+                                    metadata={"phase": "reasoning"},
+                                    session_id=synthetic_session_id,
+                                    chat_id=str(chat_id),
+                                    message_id=request_message_id,
+                                )
+                            )
                             continue
 
-                        await emit_trace_and_push(
-                            _build_event(
-                                "thinking",
-                                content=thinking_content,
-                                metadata={"phase": "reasoning"},
+                        if event_type == "tool_call":
+                            tool_name = event.get("tool_name")
+                            tool_call_id = event.get("tool_call_id")
+                            tool_args = event.get("args")
+
+                            if not isinstance(tool_name, str) or not isinstance(tool_call_id, str):
+                                logger.warning("Skipping malformed tool_call event: %s", event)
+                                continue
+
+                            if not isinstance(tool_args, dict):
+                                tool_args = {}
+
+                            # ── load_tool_context interception ──────────────────────────
+                            # This tool is handled entirely on the backend.
+                            # No round-trip to the extension needed.
+                            # Some models hallucinate a dotted variant; normalise it here.
+                            if tool_name in ("load_tool_context", "workspace_ops.load_tool_context"):
+                                requested = tool_args.get("categories", [])
+                                if not isinstance(requested, list):
+                                    requested = []
+                                valid = [c for c in requested if c in SUPPORTED_CATEGORIES]
+
+                                # Load and persist new categories into session
+                                loaded_prose = load_categories(valid)
+                                newly_loaded = list(loaded_prose.keys())
+
+                                # Merge with already-active categories
+                                merged = list(dict.fromkeys(existing_active_categories + newly_loaded))
+                                existing_active_categories = merged
+                                active_tool_guidance = build_injected_guidance(merged) or None
+
+                                # Persist to Redis immediately so next turn auto-injects
+                                try:
+                                    latest_state = await retrieve_session_state(synthetic_session_id)
+                                    if latest_state is not None:
+                                        latest_state.persisted.working_memory["active_tool_categories"] = merged
+                                        await store_session_state(synthetic_session_id, latest_state)
+                                except Exception:
+                                    logger.exception("Failed to persist active_tool_categories session_id=%s", synthetic_session_id)
+
+                                # Emit ephemeral UI notification
+                                if newly_loaded:
+                                    label = ", ".join(c.replace("_", " ").title() for c in newly_loaded)
+                                    await emit_trace_and_push(
+                                        build_status_event(
+                                            f"Loaded {label} guidance",
+                                            "tool_context_loaded",
+                                        )
+                                    )
+
+                                # Build a combined prose result to give to the LLM
+                                combined_prose = "\n\n---\n\n".join(loaded_prose.values())
+                                result_content = (
+                                    f"Tool guidance loaded for: {', '.join(newly_loaded)}.\n\n{combined_prose}"
+                                    if newly_loaded
+                                    else f"No new categories loaded. Already active: {', '.join(existing_active_categories) or 'none'}."
+                                )
+
+                                llm_messages.append(
+                                    _assistant_tool_call_message(
+                                        assistant_turn_content,
+                                        tool_name,
+                                        tool_call_id,
+                                        tool_args,
+                                        assistant_reasoning_content,
+                                    )
+                                )
+                                llm_messages.append(
+                                    {
+                                        "role": "tool",
+                                        "tool_call_id": tool_call_id,
+                                        "content": format_tool_response(
+                                             tool_status="success",
+                                             tool_content=result_content,
+                                         ),
+                                    }
+                                )
+                                tool_call_requested = True
+                                break
+                            # ── end load_tool_context ───────────────────────────────────
+
+                            tool_event = _build_event(
+                                "tool_call",
+                                metadata={"phase": "tool_requested"},
+                                tool_call_id=tool_call_id,
+                                tool_name=tool_name,
+                                args=tool_args,
                                 session_id=synthetic_session_id,
                                 chat_id=str(chat_id),
                                 message_id=request_message_id,
                             )
-                        )
-                        continue
+                            await emit_trace_and_push(tool_event)
 
-                    if event_type == "tool_call":
-                        tool_name = event.get("tool_name")
-                        tool_call_id = event.get("tool_call_id")
-                        tool_args = event.get("args")
+                            await emit_trace_and_push(
+                                build_status_event(
+                                    f"Waiting for {tool_name} result from the extension...",
+                                    "awaiting_tool_result",
+                                )
+                            )
 
-                        if not isinstance(tool_name, str) or not isinstance(tool_call_id, str):
-                            logger.warning("Skipping malformed tool_call event: %s", event)
-                            continue
+                            tool_result = await _wait_for_tool_result(
+                                synthetic_session_id,
+                                str(chat_id),
+                                request_message_id,
+                                tool_call_id,
+                            )
 
-                        if not isinstance(tool_args, dict):
-                            tool_args = {}
-
-                        # ── load_tool_context interception ──────────────────────────
-                        # This tool is handled entirely on the backend.
-                        # No round-trip to the extension needed.
-                        # Some models hallucinate a dotted variant; normalise it here.
-                        if tool_name in ("load_tool_context", "workspace_ops.load_tool_context"):
-                            requested = tool_args.get("categories", [])
-                            if not isinstance(requested, list):
-                                requested = []
-                            valid = [c for c in requested if c in SUPPORTED_CATEGORIES]
-
-                            # Load and persist new categories into session
-                            loaded_prose = load_categories(valid)
-                            newly_loaded = list(loaded_prose.keys())
-
-                            # Merge with already-active categories
-                            merged = list(dict.fromkeys(existing_active_categories + newly_loaded))
-                            existing_active_categories = merged
-                            active_tool_guidance = build_injected_guidance(merged) or None
-
-                            # Persist to Redis immediately so next turn auto-injects
-                            try:
-                                latest_state = await retrieve_session_state(synthetic_session_id)
-                                if latest_state is not None:
-                                    latest_state.persisted.working_memory["active_tool_categories"] = merged
-                                    await store_session_state(synthetic_session_id, latest_state)
-                            except Exception:
-                                logger.exception("Failed to persist active_tool_categories session_id=%s", synthetic_session_id)
-
-                            # Emit ephemeral UI notification
-                            if newly_loaded:
-                                label = ", ".join(c.replace("_", " ").title() for c in newly_loaded)
+                            if tool_result is None:
+                                run_failed = True
+                                stream_aborted = True
                                 await emit_trace_and_push(
-                                    build_status_event(
-                                        f"Loaded {label} guidance",
-                                        "tool_context_loaded",
+                                    _build_event(
+                                        "error",
+                                        content=f"Timed out waiting for tool result: {tool_name}",
+                                        metadata={"phase": "tool_timeout"},
+                                        session_id=synthetic_session_id,
+                                        chat_id=str(chat_id),
+                                        message_id=request_message_id,
                                     )
                                 )
+                                break
 
-                            # Build a combined prose result to give to the LLM
-                            combined_prose = "\n\n---\n\n".join(loaded_prose.values())
-                            result_content = (
-                                f"Tool guidance loaded for: {', '.join(newly_loaded)}.\n\n{combined_prose}"
-                                if newly_loaded
-                                else f"No new categories loaded. Already active: {', '.join(existing_active_categories) or 'none'}."
+                            tool_result_event = _build_event(
+                                "tool_result",
+                                metadata={
+                                    "phase": "tool_result",
+                                    "status": tool_result.status,
+                                    "execution_time_ms": tool_result.execution_time_ms,
+                                    "error_code": tool_result.error_code,
+                                },
+                                **tool_result.model_dump(),
                             )
+                            await emit_trace_and_push(tool_result_event)
+
+                            await emit_trace_and_push(
+                                build_status_event(
+                                    f"Tool result received from {tool_name}. Continuing reasoning...",
+                                    "tool_result_received",
+                                )
+                            )
+
+                            profiler.log_turn(llm_round, "assistant_answer", assistant_turn_content)
+                            profiler.log_turn(llm_round, "assistant_reasoning", assistant_reasoning_content)
+                            profiler.log_turn(llm_round, f"tool_output_{tool_name}", tool_result.content)
 
                             llm_messages.append(
                                 _assistant_tool_call_message(
@@ -687,125 +774,32 @@ async def send_message(
                                     assistant_reasoning_content,
                                 )
                             )
+                        
                             llm_messages.append(
                                 {
                                     "role": "tool",
                                     "tool_call_id": tool_call_id,
                                     "content": format_tool_response(
-                                         tool_status="success",
-                                         tool_content=result_content,
-                                     ),
+                                        tool_status=tool_result.status,
+                                        tool_content=tool_result.content,
+                                        error_code=tool_result.error_code,
+                                        tool_data=tool_result.data,
+                                        tool_conflict=tool_result.conflict,
+                                    ),
                                 }
                             )
+
                             tool_call_requested = True
                             break
-                        # ── end load_tool_context ───────────────────────────────────
 
-                        tool_event = _build_event(
-                            "tool_call",
-                            metadata={"phase": "tool_requested"},
-                            tool_call_id=tool_call_id,
-                            tool_name=tool_name,
-                            args=tool_args,
-                            session_id=synthetic_session_id,
-                            chat_id=str(chat_id),
-                            message_id=request_message_id,
-                        )
-                        await emit_trace_and_push(tool_event)
-
-                        await emit_trace_and_push(
-                            build_status_event(
-                                f"Waiting for {tool_name} result from the extension...",
-                                "awaiting_tool_result",
-                            )
-                        )
-
-                        tool_result = await _wait_for_tool_result(
-                            synthetic_session_id,
-                            str(chat_id),
-                            request_message_id,
-                            tool_call_id,
-                        )
-
-                        if tool_result is None:
-                            run_failed = True
-                            stream_aborted = True
-                            await emit_trace_and_push(
-                                _build_event(
-                                    "error",
-                                    content=f"Timed out waiting for tool result: {tool_name}",
-                                    metadata={"phase": "tool_timeout"},
-                                    session_id=synthetic_session_id,
-                                    chat_id=str(chat_id),
-                                    message_id=request_message_id,
-                                )
-                            )
-                            break
-
-                        tool_result_event = _build_event(
-                            "tool_result",
-                            metadata={
-                                "phase": "tool_result",
-                                "status": tool_result.status,
-                                "execution_time_ms": tool_result.execution_time_ms,
-                                "error_code": tool_result.error_code,
-                            },
-                            **tool_result.model_dump(),
-                        )
-                        await emit_trace_and_push(tool_result_event)
-
-                        await emit_trace_and_push(
-                            build_status_event(
-                                f"Tool result received from {tool_name}. Continuing reasoning...",
-                                "tool_result_received",
-                            )
-                        )
-
-                        profiler.log_turn(llm_round, "assistant_answer", assistant_turn_content)
-                        profiler.log_turn(llm_round, "assistant_reasoning", assistant_reasoning_content)
-                        profiler.log_turn(llm_round, f"tool_output_{tool_name}", tool_result.content)
-
-                        llm_messages.append(
-                            _assistant_tool_call_message(
-                                assistant_turn_content,
-                                tool_name,
-                                tool_call_id,
-                                tool_args,
-                                assistant_reasoning_content,
-                            )
-                        )
-                        
-                        llm_messages.append(
-                            {
-                                "role": "tool",
-                                "tool_call_id": tool_call_id,
-                                "content": format_tool_response(
-                                    tool_status=tool_result.status,
-                                    tool_content=tool_result.content,
-                                    error_code=tool_result.error_code,
-                                    tool_data=tool_result.data,
-                                    tool_conflict=tool_result.conflict,
-                                ),
-                            }
-                        )
-
-                        tool_call_requested = True
+                    if stream_aborted:
                         break
 
                 except Exception as stream_exc:
                     logger.error("LLM stream error for chat %s:\n%s", chat_id, stream_exc, exc_info=True)
                     run_failed = True
                     stream_aborted = True
-                    await emit_trace_and_push(
-                        _build_event(
-                            "error",
-                            content="The LLM connection was unexpectedly dropped. Please try again.",
-                            metadata={"phase": "stream_error"},
-                            session_id=synthetic_session_id,
-                            chat_id=str(chat_id),
-                            message_id=request_message_id,
-                        )
-                    )
+                    await emit_trace_and_push(_build_event("error", content="The LLM connection was unexpectedly dropped. Please try again.", metadata={"phase": "stream_error"}, session_id=synthetic_session_id, chat_id=str(chat_id), message_id=request_message_id))
 
                 if stream_aborted:
                     break
