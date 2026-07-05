@@ -270,3 +270,119 @@ LOAD_TOOL_CONTEXT_TOOL_SPEC: dict[str, Any] = {
         },
     },
 }
+PLAN_TOOL_SPEC: dict[str, Any] = {
+    "type": "function",
+    "function": {
+        "name": "plan_tool",
+        "description": (
+            "Presents an implementation plan to the user for approval before making invasive/multi-step "
+            "code changes. Use action='present' the first time you have a complete plan ready. Use "
+            "action='revise' if the user commented on or rejected a previous plan and you are submitting "
+            "a corrected version — requires the prior plan_id. Do NOT use this tool for single-file edits, "
+            "small patches, or read-only exploration. CRITICAL: All action-specific arguments MUST be "
+            "nested INSIDE the `payload` object, not at the top level."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "action": {
+                    "type": "string",
+                    "enum": ["present", "revise"],
+                    "description": "'revise' requires payload.plan_id; 'present' must omit it. Harness rejects any call where these disagree — never infer intent from a mismatch."
+                },
+                "request_id": {
+                    "type": "string",
+                    "description": "Correlation id for logging/tracing. Not a dedup key — present/revise and init/update are full-replacement and already safe to retry.",
+                },
+                "payload": {
+                    "type": "object",
+                    "properties": {
+                        "plan_id": {
+                            "type": "string",
+                            "description": "Required for action='revise'. The plan_id from the previous plan_tool call being revised. Omit for action='present'.",
+                        },
+                        "title": {
+                            "type": "string",
+                            "description": "Short title for the plan.",
+                        },
+                        "plan_markdown": {
+                            "type": "string",
+                            "description": (
+                                "Full plan content in markdown, full replacement each call — do not diff "
+                                "against a previous version. Structure with clear headers: Goal, "
+                                "Approach, Files affected, Steps, Risks/open questions."
+                            ),
+                        },
+                    },
+                    "required": ["title", "plan_markdown"],
+                    "additionalProperties": False,
+                },
+            },
+            "required": ["action", "request_id", "payload"],
+            "additionalProperties": False,
+        },
+    },
+}
+
+TODO_TOOL_SPEC: dict[str, Any] = {
+    "type": "function",
+    "function": {
+        "name": "todo_tool",
+        "description": (
+            "Tracks and updates the execution checklist derived from an approved plan. Only call this "
+            "after the user has approved a plan_tool call (or for any task requiring 3+ distinct steps even "
+            "without a formal plan). action='init' creates the full checklist once, at the start of "
+            "execution — every item status='pending'. action='update' resends the ENTIRE list with "
+            "statuses changed; this is always a full replacement, never a partial patch. Mark exactly one "
+            "item 'in_progress' at a time; mark it 'done' before starting the next. CRITICAL: All "
+            "action-specific arguments MUST be nested INSIDE the `payload` object, not at the top level."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "action": {
+                    "type": "string",
+                    "enum": ["init", "update"],
+                },
+                "request_id": {
+                    "type": "string",
+                    "description": "Correlation id for logging/tracing. Not a dedup key — present/revise and init/update are full-replacement and already safe to retry.",
+                },
+                "payload": {
+                    "type": "object",
+                    "properties": {
+                        "plan_id": {
+                            "type": "string",
+                            "description": (
+                                "The plan_id this checklist was derived from. Required for action='init'. "
+                                "Omit if there was no formal plan_tool call (small multi-step task)."
+                            ),
+                        },
+                        "todos": {
+                            "type": "array",
+                            "description": "Full task list — complete replacement every call, not a diff. Aim for 3-15 meaningful steps; do not split into micro-tasks.",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "id": {"type": "string", "description": "Stable 4-char id, unchanged across updates."},
+                                    "content": {"type": "string", "description": "Imperative task description."},
+                                    "activeForm": {"type": "string", "description": "Present-continuous form shown while in_progress."},
+                                    "status": {
+                                        "type": "string",
+                                        "enum": ["pending", "in_progress", "done"],
+                                    },
+                                },
+                                "required": ["id", "content", "activeForm", "status"],
+                                "additionalProperties": False,
+                            },
+                        },
+                    },
+                    "required": ["todos"],
+                    "additionalProperties": False,
+                },
+            },
+            "required": ["action", "request_id", "payload"],
+            "additionalProperties": False,
+        },
+    },
+}

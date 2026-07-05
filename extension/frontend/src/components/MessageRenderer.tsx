@@ -8,6 +8,8 @@ import { Copy, Edit2 } from 'lucide-react'
 import { buildAgentRunBlocks } from '../lib/agentRunBlocks'
 import { describePendingMessage } from '../lib/trace'
 import { getVsCodeApi } from '../lib/vscode'
+import PlanCard from './PlanCard'
+import TodoWidget from './TodoWidget'
 
 interface Props {
   message: ChatMessage
@@ -62,10 +64,11 @@ const renderAssistantText = (content: string) => (
 const MessageRenderer: React.FC<Props> = ({ message }) => {
   const isUser = message.type === 'user'
   const isSystem = message.type === 'system'
-  const { activeMessageId, isStreaming, currentChatId } = useChatStore((state) => ({
+  const { activeMessageId, isStreaming, currentChatId, planReadyForMessageId } = useChatStore((state) => ({
     activeMessageId: state.activeMessageId,
     isStreaming: state.isStreaming,
     currentChatId: state.currentChatId,
+    planReadyForMessageId: state.planReadyForMessageId,
   }))
   const isStreamingMessage =
     message.type === 'agent' && isStreaming && activeMessageId === message.id
@@ -75,6 +78,11 @@ const MessageRenderer: React.FC<Props> = ({ message }) => {
   const blocks = useMemo(
     () => (shouldRenderProcess ? buildAgentRunBlocks(message.events || [], message.content) : []),
     [message.events, message.content, shouldRenderProcess]
+  )
+  
+  const hasPlanPermissionRequest = useMemo(
+    () => message.events?.some((e) => e.type === 'plan_permission_request'),
+    [message.events]
   )
 
   const renderedAssistantContent = message.content ? renderAssistantText(message.content) : null
@@ -105,12 +113,12 @@ const MessageRenderer: React.FC<Props> = ({ message }) => {
     <div
       className={`flex py-2 pr-0 ${
         isUser ? 'justify-end' : 'justify-start'
-      } animate-fade-up group relative`}
+      } animate-fade-up`}
     >
       <div
         className={`min-w-0 ${
           isUser
-            ? 'ml-auto w-fit max-w-[78%]'
+            ? 'ml-auto w-fit max-w-[78%] group relative'
             : 'w-full max-w-none'
         }`}
       >
@@ -179,6 +187,15 @@ const MessageRenderer: React.FC<Props> = ({ message }) => {
 
                 return null
               })}
+
+              {Boolean(message.events?.length) && <TodoWidget events={message.events!} />}
+
+              {hasPlanPermissionRequest && (
+                <PlanCard
+                  isReady={planReadyForMessageId === message.id}
+                  isPast={planReadyForMessageId !== null && planReadyForMessageId !== message.id}
+                />
+              )}
             </div>
           ) : (
             <>
@@ -234,7 +251,6 @@ const MessageRenderer: React.FC<Props> = ({ message }) => {
             </button>
           </div>
         )}
-
       </div>
     </div>
   )

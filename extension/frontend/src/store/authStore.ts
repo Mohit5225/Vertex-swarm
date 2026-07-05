@@ -175,6 +175,14 @@ const handleExtensionMessage = (event: MessageEvent) => {
       useChatStore.getState().finishStreaming()
       break
 
+    case 'plan-ready':
+      // The plan tab is now open in the editor. Associate it with the active
+      // message so the PlanCard can show the "Proceed" button.
+      useChatStore.getState().setPlanReadyForMessageId(
+        useChatStore.getState().activeMessageId
+      )
+      break
+
     case 'error':
       clearRestoreTimers()
       if (

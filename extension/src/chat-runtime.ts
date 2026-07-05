@@ -8,6 +8,7 @@ import { WorkspaceStore } from './workspace-store';
 import { DiskSnapshotManager } from './snapshot/snapshot-manager';
 import { TerminalService } from './tools/terminal-service';
 import { createRequestContext } from './request-context';
+import { PlanDocumentProvider } from './plan-document-provider';
 import type {
   WebviewToExtensionMessage,
   SessionEvent,
@@ -52,6 +53,7 @@ export interface VertexSwarmChatRuntimeOptions {
   authLog?: (message: string) => void;
   postMessage: (message: object) => void;
   backendUrl?: string;
+  planDocumentProvider?: PlanDocumentProvider;
 }
 
 export class VertexSwarmChatRuntime {
@@ -66,6 +68,7 @@ export class VertexSwarmChatRuntime {
   private readonly outputChannel: vscode.OutputChannel;
   private readonly authLog?: (message: string) => void;
   private readonly postMessage: (message: object) => void;
+  private readonly planDocumentProvider?: PlanDocumentProvider;
   private readonly fileSystemService: FileSystemService;
   private readonly terminalService: TerminalService;
   private readonly workspaceStore: WorkspaceStore;
@@ -88,6 +91,7 @@ export class VertexSwarmChatRuntime {
     this.outputChannel = options.outputChannel;
     this.authLog = options.authLog;
     this.postMessage = options.postMessage;
+    this.planDocumentProvider = options.planDocumentProvider;
     this.fileSystemService = new FileSystemService();
     this.terminalService = new TerminalService(
       (msg) => this.log(msg),
@@ -157,6 +161,13 @@ export class VertexSwarmChatRuntime {
         break;
       }
 
+      case 'open-plan': {
+        if (this.currentChatId) {
+          void this.planDocumentProvider?.openPlanTab(this.currentChatId);
+        }
+        break;
+      }
+
       case 'load-chat-list': {
         this.log('webview requested chat list');
         await this.sendChatList();
@@ -207,6 +218,17 @@ export class VertexSwarmChatRuntime {
             token,
             (event: SessionEvent) => {
               this.log(this.describeEvent(event));
+
+              if (event.type === 'plan_chunk') {
+                this.planDocumentProvider?.appendPlanChunk(chatId, event.content);
+                return;
+              }
+              if (event.type === 'plan_ready') {
+                void this.planDocumentProvider?.openPlanTab(chatId);
+                this.post({ type: 'plan-ready', payload: {} });
+                return;
+              }
+
               this.post({ type: 'event', payload: event });
               if (event.type === 'tool_call') {
                 void this.handleToolCallEvent(event);

@@ -349,6 +349,11 @@ export class SSEStreamClient {
       'status',
       'tool_call',
       'tool_result',
+      'plan_permission_request',
+      'plan_chunk',
+      'plan_ready',
+      'todo_init',
+      'todo_update',
     ].includes(value);
   }
 }

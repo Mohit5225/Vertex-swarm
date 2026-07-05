@@ -10,6 +10,11 @@ const KNOWN_EVENT_TYPES: SessionEvent['type'][] = [
   'status',
   'tool_call',
   'tool_result',
+  'plan_permission_request',
+  'plan_chunk',
+  'plan_ready',
+  'todo_init',
+  'todo_update',
 ]
 
 const asRecord = (value: unknown): UnknownRecord | undefined =>

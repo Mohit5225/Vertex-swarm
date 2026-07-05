@@ -5,6 +5,7 @@ import { VertexSwarmSidebarProvider } from './webview-provider';
 import { VertexSwarmChatParticipant } from './chat-participant';
 import { SnapshotContentProvider, SNAPSHOT_SCHEME } from './snapshot/snapshot-content-provider';
 import { SnapshotGarbageCollector } from './snapshot/garbage-collector';
+import { PlanDocumentProvider } from './plan-document-provider';
 import * as path from 'path';
 import * as os from 'os';
 
@@ -74,6 +75,12 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   chatParticipant.iconPath = vscode.Uri.joinPath(context.extensionUri, 'media', 'icon.svg');
   context.subscriptions.push(chatParticipant);
 
+  // Register the plan document provider
+  const planDocumentProvider = new PlanDocumentProvider();
+  context.subscriptions.push(
+    vscode.workspace.registerTextDocumentContentProvider(PlanDocumentProvider.scheme, planDocumentProvider)
+  );
+
   // Register the sidebar WebviewView provider
   const sidebarProvider = new VertexSwarmSidebarProvider(
     context.extensionUri,
@@ -81,7 +88,8 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     oauthHandler,
     context,
     outputChannel,
-    logAuthToOutput
+    logAuthToOutput,
+    planDocumentProvider
   );
 
   context.subscriptions.push(

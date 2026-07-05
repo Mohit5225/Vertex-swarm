@@ -1,6 +1,8 @@
 {
   "name": "vertex-swarm-extension",
   "displayName": "Vertex Swarm",
+  "publisher": "mohit-murjani",
+  "license": "SEE LICENSE IN LICENSE.txt",
   "description": "LLM-powered agent execution in VS Code",
   "version": "0.0.1",
   "engines": {

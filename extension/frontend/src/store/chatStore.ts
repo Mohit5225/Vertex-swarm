@@ -3,6 +3,7 @@ import { create } from 'zustand'
 export interface SessionEvent {
   id: string
   type: 'thinking' | 'code' | 'output' | 'error' | 'status' | 'tool_call' | 'tool_result'
+      | 'plan_permission_request' | 'plan_chunk' | 'plan_ready' | 'todo_init' | 'todo_update'
   content?: string
   timestamp?: number
   metadata?: Record<string, unknown>
@@ -34,6 +35,7 @@ interface ChatState {
   messages: ChatMessage[]
   isStreaming: boolean
   error: string | null
+  planReadyForMessageId: string | null
 
   // Actions
   setCurrentChatId: (id: string | null) => void
@@ -53,6 +55,7 @@ interface ChatState {
   clearMessages: () => void
   patchMessageId: (tempId: string, realId: string) => void
   truncateAfter: (messageId: string) => void
+  setPlanReadyForMessageId: (messageId: string | null) => void
 }
 
 const appendEventContent = (currentContent: string, event: SessionEvent): string => {
@@ -172,6 +175,7 @@ export const useChatStore = create<ChatState>((set) => ({
   messages: [],
   isStreaming: false,
   error: null,
+  planReadyForMessageId: null,
 
   setCurrentChatId: (id: string | null) => {
     set((state) => {
@@ -226,8 +230,9 @@ export const useChatStore = create<ChatState>((set) => ({
       activeMessageId: null,
       isStreaming: false,
       error: null,
-      messages: messages.map((message) => ({
+      messages: messages.map((message: any) => ({
         ...message,
+        id: message.messageId || message.id,
         events: message.events || [],
       })),
     })
@@ -324,6 +329,9 @@ export const useChatStore = create<ChatState>((set) => ({
       const sameAsPrevious =
         Boolean(lastEvent) &&
         lastEvent?.type === normalizedEvent.type &&
+        lastEvent?.type !== 'todo_update' &&
+        lastEvent?.type !== 'todo_init' &&
+        lastEvent?.type !== 'plan_permission_request' &&
         normalizeEventComparisonContent(lastEvent?.content) ===
           normalizeEventComparisonContent(normalizedEvent.content)
 
@@ -374,6 +382,8 @@ export const useChatStore = create<ChatState>((set) => ({
       messages: state.messages.map((m) =>
         m.id === tempId ? { ...m, id: realId, dbMessageId: realId } : m
       ),
+      activeMessageId: state.activeMessageId === tempId ? realId : state.activeMessageId,
+      planReadyForMessageId: state.planReadyForMessageId === tempId ? realId : state.planReadyForMessageId,
     }))
   },
 
@@ -384,7 +394,7 @@ export const useChatStore = create<ChatState>((set) => ({
       )
       if (idx === -1) return state
       return {
-        messages: state.messages.slice(0, idx + 1),
+        messages: state.messages.slice(0, idx),
         isStreaming: false,
         activeMessageId: null,
         error: null,
@@ -401,6 +411,11 @@ export const useChatStore = create<ChatState>((set) => ({
       error: null,
       isStreaming: false,
       chats: state.chats,
+      planReadyForMessageId: null,
     }))
+  },
+
+  setPlanReadyForMessageId: (messageId: string | null) => {
+    set({ planReadyForMessageId: messageId })
   },
 }))

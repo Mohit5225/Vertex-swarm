@@ -9,7 +9,9 @@ from fastapi import APIRouter, Depends, HTTPException, status, Request
 import asyncio
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
-from sqlalchemy import desc, select, delete
+from sqlalchemy import desc, select
+
+# pyrefly: ignore [missing-import]
 from openai import RateLimitError, APIError
 
 from app.auth.dependencies import AuthenticatedUser, get_current_user
@@ -24,7 +26,7 @@ from app.services.tool_memory import build_tool_memory_from_trace_events, format
 from app.services.prompt_loader import build_injected_guidance, load_categories, SUPPORTED_CATEGORIES
 from app.utils.token_profiler import TokenProfiler
 from app.services.llm_service import DEVELOPER_ASSISTANT_PERSONA
-from app.services.tool_schemas import WORKSPACE_OPS_TOOL_SPEC, TERMINAL_OPS_TOOL_SPEC, LOAD_TOOL_CONTEXT_TOOL_SPEC
+from app.services.tool_schemas import WORKSPACE_OPS_TOOL_SPEC, TERMINAL_OPS_TOOL_SPEC, LOAD_TOOL_CONTEXT_TOOL_SPEC, PLAN_TOOL_SPEC, TODO_TOOL_SPEC
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/v1/chats", tags=["chats"])
@@ -464,6 +466,8 @@ async def send_message(
         trace_events: list[dict[str, Any]] = []
         run_failed = False
         llm_round = 0
+        in_plan_mode = False
+        plan_buffer = ""
 
         async def push_event(event: dict[str, Any]) -> None:
             redis_client = await get_redis()
@@ -492,7 +496,13 @@ async def send_message(
 
         profiler = TokenProfiler(request_message_id)
         profiler.log_constant("dev_persona", DEVELOPER_ASSISTANT_PERSONA)
-        profiler.log_constant("tool_schemas", json.dumps([WORKSPACE_OPS_TOOL_SPEC, TERMINAL_OPS_TOOL_SPEC, LOAD_TOOL_CONTEXT_TOOL_SPEC]))
+        profiler.log_constant("tool_schemas", json.dumps([
+            WORKSPACE_OPS_TOOL_SPEC, 
+            TERMINAL_OPS_TOOL_SPEC, 
+            LOAD_TOOL_CONTEXT_TOOL_SPEC,
+            PLAN_TOOL_SPEC,
+            TODO_TOOL_SPEC
+        ]))
         profiler.log_constant("ide_context", request_context_message)
         profiler.log_constant("workspace_skeleton", req.workspace_skeleton)
         profiler.log_constant("tool_memory", tool_memory_message)
@@ -582,9 +592,16 @@ async def send_message(
                                 profiler.log_api_usage(llm_round, usage_content)
                             continue
 
+
+
                         if event_type == "token":
                             token = str(event.get("content", ""))
                             if not token:
+                                continue
+                                
+                            if in_plan_mode:
+                                plan_buffer += token
+                                await push_event(_build_event("plan_chunk", content=token))
                                 continue
 
                             assistant_turn_content += token
@@ -701,6 +718,104 @@ async def send_message(
                                 break
                             # ── end load_tool_context ───────────────────────────────────
 
+                            # ── plan_tool interception ──────────────────────────────────
+                            if tool_name == "plan_tool":
+                                action = tool_args.get("action")
+                                payload = tool_args.get("payload", {})
+                                
+                                # 1. Emit tool_call to trace so UI shows the accordion
+                                tool_event = _build_event(
+                                    "tool_call",
+                                    metadata={"phase": "tool_requested"},
+                                    tool_call_id=tool_call_id,
+                                    tool_name=tool_name,
+                                    args=tool_args,
+                                    session_id=synthetic_session_id,
+                                    chat_id=str(chat_id),
+                                    message_id=request_message_id,
+                                )
+                                await emit_trace_and_push(tool_event)
+
+                                if action == "revise" and not payload.get("plan_id"):
+                                    result_content = "Error: 'revise' action requires a 'plan_id' in the payload."
+                                    error_event = _build_event("tool_result", metadata={"phase": "tool_result", "status": "error", "error_code": "validation_error"}, status="error", content=result_content, error_code="validation_error", tool_call_id=tool_call_id)
+                                    await emit_trace_and_push(error_event)
+                                    llm_messages.append(_assistant_tool_call_message(assistant_turn_content, tool_name, tool_call_id, tool_args, assistant_reasoning_content))
+                                    llm_messages.append({"role": "tool", "tool_call_id": tool_call_id, "content": format_tool_response(tool_status="error", tool_content=result_content, error_code="validation_error")})
+                                    tool_call_requested = True
+                                    break
+                                elif action == "present" and payload.get("plan_id"):
+                                    result_content = "Error: 'present' action must NOT include a 'plan_id' in the payload."
+                                    error_event = _build_event("tool_result", metadata={"phase": "tool_result", "status": "error", "error_code": "validation_error"}, status="error", content=result_content, error_code="validation_error", tool_call_id=tool_call_id)
+                                    await emit_trace_and_push(error_event)
+                                    llm_messages.append(_assistant_tool_call_message(assistant_turn_content, tool_name, tool_call_id, tool_args, assistant_reasoning_content))
+                                    llm_messages.append({"role": "tool", "tool_call_id": tool_call_id, "content": format_tool_response(tool_status="error", tool_content=result_content, error_code="validation_error")})
+                                    tool_call_requested = True
+                                    break
+                                
+                                title = payload.get("title", "Implementation Plan")
+                                plan_markdown = payload.get("plan_markdown", "")
+                                new_plan_id = payload.get("plan_id") if action == "revise" else f"plan_{chat_id}_{request_message_id}"
+                                
+                                # 2. Emit plan_permission_request to trace so it persists in DB
+                                await emit_trace_and_push(_build_event("plan_permission_request", reason=title, title=title, action=action, plan_id=new_plan_id))
+                                
+                                # 3. Chunk markdown (only needs push_event, handled by extension runtime)
+                                chunk_size = 4000
+                                for i in range(0, len(plan_markdown), chunk_size):
+                                    chunk = plan_markdown[i:i+chunk_size]
+                                    await push_event(_build_event("plan_chunk", content=chunk))
+                                
+                                await push_event(_build_event("plan_ready", plan_id=new_plan_id))
+                                
+                                # 4. Emit tool_result to close the UI accordion
+                                result_content = "Plan presented to user. Waiting for user approval."
+                                success_event = _build_event("tool_result", metadata={"phase": "tool_result", "status": "success"}, status="success", content=result_content, tool_call_id=tool_call_id)
+                                await emit_trace_and_push(success_event)
+                                
+                                llm_messages.append(_assistant_tool_call_message(assistant_turn_content, tool_name, tool_call_id, tool_args, assistant_reasoning_content))
+                                llm_messages.append({"role": "tool", "tool_call_id": tool_call_id, "content": format_tool_response(tool_status="success", tool_content=result_content)})
+                                
+                                tool_call_requested = True
+                                break
+                            # ── end plan_tool ───────────────────────────────────────────
+
+                            # ── todo_tool interception ──────────────────────────────────
+                            if tool_name == "todo_tool":
+                                action = tool_args.get("action")
+                                payload = tool_args.get("payload", {})
+                                
+                                # 1. Emit tool_call
+                                tool_event = _build_event(
+                                    "tool_call",
+                                    metadata={"phase": "tool_requested"},
+                                    tool_call_id=tool_call_id,
+                                    tool_name=tool_name,
+                                    args=tool_args,
+                                    session_id=synthetic_session_id,
+                                    chat_id=str(chat_id),
+                                    message_id=request_message_id,
+                                )
+                                await emit_trace_and_push(tool_event)
+                                
+                                todos = payload.get("todos", [])
+                                if action == "init":
+                                    await emit_trace_and_push(_build_event("todo_init", plan_id=payload.get("plan_id"), todos=todos))
+                                elif action == "update":
+                                    await emit_trace_and_push(_build_event("todo_update", todos=todos))
+                                    
+                                # 2. Emit tool_result
+                                result_content = "Todo list updated successfully."
+                                success_event = _build_event("tool_result", metadata={"phase": "tool_result", "status": "success"}, status="success", content=result_content, tool_call_id=tool_call_id)
+                                await emit_trace_and_push(success_event)
+                                
+                                llm_messages.append(_assistant_tool_call_message(assistant_turn_content, tool_name, tool_call_id, tool_args, assistant_reasoning_content))
+                                llm_messages.append({"role": "tool", "tool_call_id": tool_call_id, "content": format_tool_response(tool_status="success", tool_content=result_content)})
+                                
+                                tool_call_requested = True
+                                break
+                            # ── end todo_tool ───────────────────────────────────────────
+
                             tool_event = _build_event(
                                 "tool_call",
                                 metadata={"phase": "tool_requested"},
@@ -803,6 +918,8 @@ async def send_message(
 
                 if stream_aborted:
                     break
+                    
+
 
                 if tool_call_requested:
                     logger.info(
@@ -814,6 +931,9 @@ async def send_message(
                     )
                     continue
 
+                if not assistant_turn_content.strip():
+                    assistant_turn_content = "[Internal system note: the model returned an empty text response or only emitted state tags.]"
+
                 llm_messages.append(
                     {
                         "role": "assistant",
@@ -821,7 +941,7 @@ async def send_message(
                     }
                 )
 
-                if not assistant_turn_content.strip():
+                if assistant_turn_content.startswith("[Internal system note"):
                     run_failed = True
                     empty_response_message = (
                         "Model stream completed without a final assistant answer after tool execution."
@@ -1219,7 +1339,7 @@ async def truncate_messages_after(
         delete_result = await db.execute(
             delete(MessageORM).where(
                 MessageORM.chat_id == chat_id,
-                MessageORM.created_at > anchor_created_at,
+                MessageORM.created_at >= anchor_created_at,
             )
         )
         deleted_count = delete_result.rowcount
@@ -1243,4 +1363,4 @@ async def truncate_messages_after(
         "messageId": str(message_id),
         "sessionId": session_id,
         "deletedCount": deleted_count,
-    }
+    }

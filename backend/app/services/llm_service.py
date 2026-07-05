@@ -2,6 +2,7 @@
 import asyncio
 import json
 import logging
+import re
 import time
 from typing import Any, AsyncIterator, Dict, List
 from uuid import uuid4
@@ -9,7 +10,7 @@ from uuid import uuid4
 from openai import AsyncOpenAI
 
 from app.core.config import settings
-from app.services.tool_schemas import WORKSPACE_OPS_TOOL_SPEC, TERMINAL_OPS_TOOL_SPEC, LOAD_TOOL_CONTEXT_TOOL_SPEC
+from app.services.tool_schemas import WORKSPACE_OPS_TOOL_SPEC, TERMINAL_OPS_TOOL_SPEC, LOAD_TOOL_CONTEXT_TOOL_SPEC, PLAN_TOOL_SPEC, TODO_TOOL_SPEC
 
 logger = logging.getLogger(__name__)
 context_logger = logging.getLogger("app.context")
@@ -103,19 +104,23 @@ think what the task requires.
 focus on what context already provides.
 if something is clearly ambigious you can ask user about what is confusion and ask for clarifcation before proceeding.
 but if issue is something which you can solve yourself with your intelligence , context , tools you may try to solve the confusion coming from lack of context ,that does not mean fix the issues of codebase on your own or make changes in codebase without explicit approval , just reason about what could be source of confusion
-AVAILABLE TOOL CATEGORIES:
+AVAILABLE TOOL CATEGORIES (Require load_tool_context first):
 - workspace_ops: file reading, editing, searching, creating, deleting, renaming
 - terminal_ops: shell commands, process management, diagnostics
 
+STANDALONE TOOLS (Self-contained, use directly without load_tool_context):
+- plan_tool: MUST be used to present an implementation plan before making invasive/multi-step code changes. You must wait for the user to approve the plan before proceeding.
+- todo_tool: MUST be used after plan approval (or for any multi-step task) to track execution progress. Initialize all steps as 'pending', then update them one by one to 'in_progress' and 'done' as you work.
+
 Rules you always follow:
 - Reason step-by-step before acting
-- NEVER GUESS TOOL SYNTAX. The tool schemas are nested. You MUST call `load_tool_context` first to get the exact rules and examples, otherwise your tool calls will crash.
+- For workspace_ops and terminal_ops, NEVER GUESS TOOL SYNTAX. You MUST call `load_tool_context` first to get the exact rules.
+- For plan_tool and todo_tool, the schemas are self-contained. Use them directly based on their descriptions.
 - Be direct and precise — no filler, no padding
 - Reference specific line numbers and function names when discussing code
 - Prefer showing working code over describing it
 - NEVER return an empty or silent response
 - devotedly follow the correct tool related rules so tools can be executed do not hallucinate tool schemas and tool rules
-
 """
 def _build_system_prompt(
     workspace_skeleton: str | None = None,
@@ -181,7 +186,13 @@ def _build_request_payload(
         "model": _model_name(model),
         "messages": full_messages,
         "stream": True,
-        "tools": [WORKSPACE_OPS_TOOL_SPEC, TERMINAL_OPS_TOOL_SPEC, LOAD_TOOL_CONTEXT_TOOL_SPEC],
+        "tools": [
+            WORKSPACE_OPS_TOOL_SPEC, 
+            TERMINAL_OPS_TOOL_SPEC, 
+            LOAD_TOOL_CONTEXT_TOOL_SPEC,
+            PLAN_TOOL_SPEC,
+            TODO_TOOL_SPEC
+        ],
         "tool_choice": "auto",
     }
 
@@ -524,20 +535,10 @@ async def stream_chat_events(
 
             text_fragments = _extract_text_fragments(delta)
             if text_fragments:
-                fragment_chars = sum(len(fragment) for fragment in text_fragments)
-                total_text_chars += fragment_chars
-                logger.info(
-                    "LLM stream chunk #%d text_fragments=%d text_chars=%d cumulative_text_chars=%d",
-                    chunk_count,
-                    len(text_fragments),
-                    fragment_chars,
-                    total_text_chars,
-                )
-
-            for token in text_fragments:
-                if token:
+                for fragment in text_fragments:
+                    total_text_chars += len(fragment)
                     text_fragment_count += 1
-                    yield {"type": "token", "content": token}
+                    yield {"type": "token", "content": fragment}
     except Exception as stream_exc:
         logger.error(
             "LLM stream iteration failed after %d chunks: %s",

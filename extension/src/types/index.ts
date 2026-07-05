@@ -5,7 +5,8 @@
 
 export interface SessionEvent {
   id: string;
-  type: 'thinking' | 'code' | 'output' | 'error' | 'status' | 'tool_call' | 'tool_result';
+  type: 'thinking' | 'code' | 'output' | 'error' | 'status' | 'tool_call' | 'tool_result'
+      | 'plan_permission_request' | 'plan_chunk' | 'plan_ready' | 'todo_init' | 'todo_update';
   content: string;
   timestamp: number;
   metadata?: Record<string, unknown>;
@@ -91,7 +92,8 @@ export type ExtensionToWebviewMessage =
   | { type: 'cancel-stream'; payload: { sessionId: string } }
   | { type: 'config-state'; payload: { snapshotRetentionDays: number } }
   | { type: 'message-id-assigned'; payload: { tempId: string; realId: string } }
-  | { type: 'messages-truncated'; payload: { messageId: string; messageText: string } };
+  | { type: 'messages-truncated'; payload: { messageId: string; messageText: string } }
+  | { type: 'plan-ready'; payload: Record<string, never> };
 
 // Messages FROM Webview TO Extension Host
 export type WebviewToExtensionMessage =
