@@ -32,7 +32,7 @@ const normalizeAssistantContent = (content: string) => {
   const averageSegmentLength =
     segments.length > 0
       ? segments.reduce((total, segment) => total + segment.length, 0) /
-        segments.length
+      segments.length
       : 0
   const looksFragmented =
     segments.length >= 4 && averageSegmentLength > 0 && averageSegmentLength < 28
@@ -79,7 +79,7 @@ const MessageRenderer: React.FC<Props> = ({ message }) => {
     () => (shouldRenderProcess ? buildAgentRunBlocks(message.events || [], message.content) : []),
     [message.events, message.content, shouldRenderProcess]
   )
-  
+
   const hasPlanPermissionRequest = useMemo(
     () => message.events?.some((e) => e.type === 'plan_permission_request'),
     [message.events]
@@ -111,26 +111,22 @@ const MessageRenderer: React.FC<Props> = ({ message }) => {
 
   return (
     <div
-      className={`flex py-2 pr-0 ${
-        isUser ? 'justify-end' : 'justify-start'
-      } animate-fade-up`}
+      className={`flex py-2 pr-0 ${isUser ? 'justify-end' : 'justify-start'
+        } animate-fade-up`}
     >
       <div
-        className={`min-w-0 ${
-          isUser
-            ? 'ml-auto w-fit max-w-[78%] group relative'
-            : 'w-full max-w-none'
-        }`}
+        className={`min-w-0 ${isUser
+          ? 'ml-auto w-fit max-w-[78%] group relative'
+          : 'w-full max-w-none'
+          }`}
       >
         <div
-          className={`mb-1.5 flex items-center gap-2 text-[11px] font-medium ${
-            isUser ? 'justify-end text-[#91a0bb]' : 'text-[#7f91b4]'
-          }`}
+          className={`mb-1.5 flex items-center gap-2 text-[11px] font-medium ${isUser ? 'justify-end text-[#91a0bb]' : 'text-[#7f91b4]'
+            }`}
         >
           <span
-            className={`h-1.5 w-1.5 rounded-full ${
-              isUser ? 'bg-[#8b9ebf]' : 'bg-[#5e6ad2]'
-            }`}
+            className={`h-1.5 w-1.5 rounded-full ${isUser ? 'bg-[#8b9ebf]' : 'bg-[#5e6ad2]'
+              }`}
           />
           <span>{isUser ? 'You' : 'Agent'}</span>
         </div>
@@ -145,11 +141,10 @@ const MessageRenderer: React.FC<Props> = ({ message }) => {
                   return (
                     <div
                       key={block.id}
-                      className={`whitespace-pre-wrap break-words text-[15px] leading-7 ${
-                        block.tone === 'code'
-                          ? 'font-medium text-[#d9e6fb]'
-                          : 'text-[#edf3ff]'
-                      }`}
+                      className={`break-words text-[55px] leading-7 ${block.tone === 'code'
+                        ? 'font-medium text-[#d9e6fb]'
+                        : 'text-[#edf3ff]'
+                        }`}
                     >
                       {renderAssistantText(block.text)}
                     </div>
@@ -160,13 +155,12 @@ const MessageRenderer: React.FC<Props> = ({ message }) => {
                   return (
                     <div
                       key={block.id}
-                      className={`rounded-2xl px-3 py-2.5 text-[13px] leading-6 ${
-                        block.tone === 'error'
-                          ? 'bg-[#f27d75]/10 text-[#ffbeb8]'
-                          : block.tone === 'warning'
-                            ? 'bg-[#f1cb78]/10 text-[#f3d69a]'
-                            : 'bg-white/[0.03] text-[#9fb0cd]'
-                      }`}
+                      className={`rounded-2xl px-3 py-2.5 text-[13px] leading-6 ${block.tone === 'error'
+                        ? 'bg-[#f27d75]/10 text-[#ffbeb8]'
+                        : block.tone === 'warning'
+                          ? 'bg-[#f1cb78]/10 text-[#f3d69a]'
+                          : 'bg-white/[0.03] text-[#9fb0cd]'
+                        }`}
                     >
                       {block.text}
                     </div>
