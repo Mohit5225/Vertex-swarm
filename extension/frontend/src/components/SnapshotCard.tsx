@@ -16,9 +16,10 @@ interface SnapshotCardProps {
   sessionId: string;   // The chat/session ID
   messageId: string;   // The message_id used as the snapshot directory key
   diffs: DiffStat[];
+  isHistorical?: boolean;
 }
 
-export const SnapshotCard: React.FC<SnapshotCardProps> = ({ snapshotId, sessionId, messageId, diffs }) => {
+export const SnapshotCard: React.FC<SnapshotCardProps> = ({ snapshotId, sessionId, messageId, diffs, isHistorical }) => {
   const totalAdditions = diffs.reduce((acc, d) => acc + d.additions, 0);
   const totalDeletions = diffs.reduce((acc, d) => acc + d.deletions, 0);
   const fileCount = diffs.length;
@@ -67,12 +68,14 @@ export const SnapshotCard: React.FC<SnapshotCardProps> = ({ snapshotId, sessionI
           <span className="text-[11px] font-mono text-[#f43f5e] mr-1">-{totalDeletions}</span>
         </div>
         <div className="flex items-center gap-2">
-          <button
-            onClick={handleUndo}
-            className="flex items-center gap-1.5 rounded-md px-2 py-1 text-[11px] font-medium text-[#c6d2e7] hover:bg-white/[0.1] transition-colors"
-          >
-            <Undo2 className="h-3 w-3" /> Undo
-          </button>
+          {!isHistorical && (
+            <button
+              onClick={handleUndo}
+              className="flex items-center gap-1.5 rounded-md px-2 py-1 text-[11px] font-medium text-[#c6d2e7] hover:bg-white/[0.1] transition-colors"
+            >
+              <Undo2 className="h-3 w-3" /> Undo
+            </button>
+          )}
           <button
             onClick={handleReview}
             className="flex items-center gap-1.5 rounded-md bg-[#5e6ad2]/20 px-2 py-1 text-[11px] font-medium text-[#9eb1ff] border border-[#5e6ad2]/30 hover:bg-[#5e6ad2]/30 transition-colors"

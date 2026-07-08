@@ -72,6 +72,7 @@ const MessageRenderer: React.FC<Props> = ({ message }) => {
   }))
   const isStreamingMessage =
     message.type === 'agent' && isStreaming && activeMessageId === message.id
+  const isHistorical = message.type === 'agent' && !isStreamingMessage
   const pendingLabel = describePendingMessage(message)
   const shouldRenderProcess =
     message.type === 'agent' && Boolean(message.events?.length)
@@ -182,14 +183,17 @@ const MessageRenderer: React.FC<Props> = ({ message }) => {
                 return null
               })}
 
-              {Boolean(message.events?.length) && <TodoWidget events={message.events!} />}
+              {Boolean(message.events?.length) && <TodoWidget events={message.events!} isHistorical={isHistorical} />}
 
-              {hasPlanPermissionRequest && (
-                <PlanCard
-                  isReady={planReadyForMessageId === message.id}
-                  isPast={planReadyForMessageId !== null && planReadyForMessageId !== message.id}
-                />
-              )}
+              {hasPlanPermissionRequest && (() => {
+                let planStatus: 'generating' | 'ready' | 'executed' = 'generating';
+                if (planReadyForMessageId === message.id) {
+                  planStatus = 'ready';
+                } else if (isHistorical) {
+                  planStatus = 'executed';
+                }
+                return <PlanCard status={planStatus} />;
+              })()}
             </div>
           ) : (
             <>

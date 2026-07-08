@@ -10,20 +10,16 @@ interface TodoItem {
 
 interface Props {
   events: SessionEvent[]
+  isHistorical?: boolean
 }
 
-const TodoWidget: React.FC<Props> = ({ events }) => {
+const TodoWidget: React.FC<Props> = ({ events, isHistorical }) => {
   const items = useMemo(() => {
     let currentItems: TodoItem[] = []
 
     for (const event of events) {
-      if (event.type === 'todo_init' && event.metadata?.items) {
+      if ((event.type === 'todo_init' || event.type === 'todo_update') && event.metadata?.items) {
         currentItems = event.metadata.items as TodoItem[]
-      } else if (event.type === 'todo_update' && event.metadata) {
-        const { id, status } = event.metadata
-        currentItems = currentItems.map((item) =>
-          item.id === id ? { ...item, status: status as TodoItem['status'] } : item
-        )
       }
     }
 
@@ -49,7 +45,11 @@ const TodoWidget: React.FC<Props> = ({ events }) => {
               {item.status === 'completed' ? (
                 <CheckCircle2 size={16} className="text-green-500" />
               ) : item.status === 'in_progress' ? (
-                <Clock size={16} className="animate-pulse text-blue-400" />
+                isHistorical ? (
+                  <Circle size={16} className="text-red-500" />
+                ) : (
+                  <Clock size={16} className="animate-pulse text-blue-400" />
+                )
               ) : item.status === 'failed' ? (
                 <Circle size={16} className="text-red-500" />
               ) : (
@@ -61,7 +61,7 @@ const TodoWidget: React.FC<Props> = ({ events }) => {
                 item.status === 'completed'
                   ? 'text-[#9fb0cd] line-through'
                   : item.status === 'in_progress'
-                  ? 'font-medium text-blue-100'
+                  ? (isHistorical ? 'text-red-400' : 'font-medium text-blue-100')
                   : item.status === 'failed'
                   ? 'text-red-400'
                   : 'text-[#9fb0cd]'

@@ -421,7 +421,8 @@ const NodeAccordion: React.FC<{
   node: ToolExecutionNode
   expanded: boolean
   onToggle: () => void
-}> = ({ node, expanded, onToggle }) => {
+  isHistorical?: boolean
+}> = ({ node, expanded, onToggle, isHistorical }) => {
   const Icon = actionIcon(node.action)
   const requestLabel = node.requestDebug ? 'Input' : 'Request'
   const resultLabel = node.resultDebug ? 'Output' : 'Result'
@@ -522,6 +523,7 @@ const NodeAccordion: React.FC<{
           snapshotId={(node.resultDebug as any).data.snapshot_id}
           sessionId={(node.resultDebug as any).data.snapshot_session_id}
           messageId={(node.resultDebug as any).data.snapshot_id}
+          isHistorical={isHistorical}
         />
       )}
     </div>
@@ -534,7 +536,8 @@ const GroupAccordion: React.FC<{
   expandedNodes: Record<string, boolean>
   onToggleGroup: () => void
   onToggleNode: (nodeId: string) => void
-}> = ({ item, expanded, expandedNodes, onToggleGroup, onToggleNode }) => {
+  isHistorical?: boolean
+}> = ({ item, expanded, expandedNodes, onToggleGroup, onToggleNode, isHistorical }) => {
   const Icon = actionIcon(item.action)
 
   // Aggregate diffs across all nodes in this group
@@ -583,6 +586,7 @@ const GroupAccordion: React.FC<{
           snapshotId={snapshotId}
           sessionId={sessionId}
           messageId={messageId}
+          isHistorical={isHistorical}
         />
       )}
 
@@ -594,6 +598,7 @@ const GroupAccordion: React.FC<{
               node={node}
               expanded={expandedNodes[node.id] ?? false}
               onToggle={() => onToggleNode(node.id)}
+              isHistorical={isHistorical}
             />
           ))}
         </div>
@@ -606,12 +611,24 @@ const AgentTimeline: React.FC<Props> = ({ block, isStreamingMessage, isActiveBlo
   const [expandedGroups, setExpandedGroups] = useState<Record<string, boolean>>({})
   const [expandedNodes, setExpandedNodes] = useState<Record<string, boolean>>({})
   const [expandedFileOps, setExpandedFileOps] = useState<Record<string, boolean>>({})
-  const items = useMemo(() => groupTimelineItems(block.steps), [block.steps])
+  
+  const isHistorical = !isStreamingMessage;
+  const sanitizedSteps = useMemo(() => {
+    if (!isHistorical) return block.steps;
+    return block.steps.map(step => {
+      if (step.kind === 'node' && step.node.state === 'running') {
+        return { ...step, node: { ...step.node, state: 'error' as const } }; // Treat zombie running states as interrupted
+      }
+      return step;
+    });
+  }, [block.steps, isHistorical]);
+
+  const items = useMemo(() => groupTimelineItems(sanitizedSteps), [sanitizedSteps])
   const scrollRef = useRef<HTMLDivElement>(null)
 
-  const isRunning = block.steps.some(
+  const isRunning = !isHistorical && (sanitizedSteps.some(
     step => step.kind === 'node' && step.node.state === 'running'
-  ) || Boolean(isStreamingMessage && isActiveBlock)
+  ) || Boolean(isStreamingMessage && isActiveBlock))
 
   const [processExpanded, setProcessExpanded] = useState<boolean>(isRunning)
 
@@ -627,11 +644,11 @@ const AgentTimeline: React.FC<Props> = ({ block, isStreamingMessage, isActiveBlo
 
   // Split steps: file-mutation ops rendered inline; everything else in accordion
   const fileOpNodes: ToolExecutionNode[] = []
-  const hasNonFileOpSteps = block.steps.some(
+  const hasNonFileOpSteps = sanitizedSteps.some(
     step => step.kind === 'thinking' || (step.kind === 'node' && !FILE_OPS.has(step.node.action ?? ''))
   )
 
-  for (const step of block.steps) {
+  for (const step of sanitizedSteps) {
     if (step.kind === 'node' && FILE_OPS.has(step.node.action ?? '')) {
       fileOpNodes.push(step.node)
     }
@@ -742,6 +759,7 @@ const AgentTimeline: React.FC<Props> = ({ block, isStreamingMessage, isActiveBlo
                         [nodeId]: !(current[nodeId] ?? false),
                       }))
                     }
+                    isHistorical={isHistorical}
                   />
                 ) : (
                   <NodeAccordion
@@ -754,6 +772,7 @@ const AgentTimeline: React.FC<Props> = ({ block, isStreamingMessage, isActiveBlo
                         [item.node.id]: !(current[item.node.id] ?? false),
                       }))
                     }
+                    isHistorical={isHistorical}
                   />
                 )
               })}
@@ -769,6 +788,7 @@ const AgentTimeline: React.FC<Props> = ({ block, isStreamingMessage, isActiveBlo
           snapshotId={turnSnapshotId}
           sessionId={turnSessionId}
           messageId={turnMessageId}
+          isHistorical={isHistorical}
         />
       )}
     </div>

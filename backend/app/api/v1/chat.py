@@ -29,6 +29,8 @@ from app.services.llm_service import DEVELOPER_ASSISTANT_PERSONA
 from app.services.tool_schemas import WORKSPACE_OPS_TOOL_SPEC, TERMINAL_OPS_TOOL_SPEC, LOAD_TOOL_CONTEXT_TOOL_SPEC, PLAN_TOOL_SPEC, TODO_TOOL_SPEC
 logger = logging.getLogger(__name__)
 
+ACTIVE_AGENT_TASKS: dict[str, asyncio.Task] = {}
+
 router = APIRouter(prefix="/api/v1/chats", tags=["chats"])
 
 
@@ -800,9 +802,9 @@ async def send_message(
                                 
                                 todos = payload.get("todos", [])
                                 if action == "init":
-                                    await emit_trace_and_push(_build_event("todo_init", plan_id=payload.get("plan_id"), todos=todos))
+                                    await emit_trace_and_push(_build_event("todo_init", metadata={"plan_id": payload.get("plan_id"), "items": todos}))
                                 elif action == "update":
-                                    await emit_trace_and_push(_build_event("todo_update", todos=todos))
+                                    await emit_trace_and_push(_build_event("todo_update", metadata={"items": todos}))
                                     
                                 # 2. Emit tool_result
                                 result_content = "Todo list updated successfully."
@@ -815,6 +817,66 @@ async def send_message(
                                 tool_call_requested = True
                                 break
                             # ── end todo_tool ───────────────────────────────────────────
+
+                            # ── web_search interception ─────────────────────────────────
+                            if tool_name == "web_search":
+                                query = tool_args.get("query")
+                                num_results = tool_args.get("num_results", 5)
+                                
+                                tool_event = _build_event(
+                                    "tool_call",
+                                    metadata={"phase": "tool_requested"},
+                                    tool_call_id=tool_call_id,
+                                    tool_name=tool_name,
+                                    args=tool_args,
+                                    session_id=synthetic_session_id,
+                                    chat_id=str(chat_id),
+                                    message_id=request_message_id,
+                                )
+                                await emit_trace_and_push(tool_event)
+
+                                logger.info(f"Executing web_search for query: {query}")
+                                await emit_trace_and_push(build_status_event(f"Searching web for '{query}'...", "searching_web"))
+
+                                try:
+                                    def do_search():
+                                        from exa_py import Exa
+                                        exa = Exa(api_key="7d26b0ee-f163-4528-9b28-528926d4a6c0")
+                                        return exa.search(
+                                            query,
+                                            type="auto",
+                                            num_results=num_results,
+                                            contents={"highlights": True}
+                                        )
+                                    search_res = await asyncio.to_thread(do_search)
+                                    
+                                    results_list = []
+                                    for r in search_res.results:
+                                        results_list.append({
+                                            "title": r.title,
+                                            "url": r.url,
+                                            "highlights": r.highlights
+                                        })
+                                    result_content = json.dumps(results_list, ensure_ascii=False)
+                                    logger.info(f"Web search successful for query: {query}")
+                                    success_event = _build_event("tool_result", metadata={"phase": "tool_result", "status": "success"}, status="success", content="Web search successful", tool_call_id=tool_call_id)
+                                    await emit_trace_and_push(success_event)
+                                    
+                                    llm_messages.append(_assistant_tool_call_message(assistant_turn_content, tool_name, tool_call_id, tool_args, assistant_reasoning_content))
+                                    llm_messages.append({"role": "tool", "tool_call_id": tool_call_id, "content": format_tool_response(tool_status="success", tool_content=result_content)})
+                                    
+                                    tool_call_requested = True
+                                    break
+                                except Exception as e:
+                                    logger.error(f"Web search failed: {e}", exc_info=True)
+                                    result_content = f"Web search failed: {str(e)}"
+                                    error_event = _build_event("tool_result", metadata={"phase": "tool_result", "status": "error", "error_code": "search_error"}, status="error", content=result_content, error_code="search_error", tool_call_id=tool_call_id)
+                                    await emit_trace_and_push(error_event)
+                                    llm_messages.append(_assistant_tool_call_message(assistant_turn_content, tool_name, tool_call_id, tool_args, assistant_reasoning_content))
+                                    llm_messages.append({"role": "tool", "tool_call_id": tool_call_id, "content": format_tool_response(tool_status="error", tool_content=result_content, error_code="search_error")})
+                                    tool_call_requested = True
+                                    break
+                            # ── end web_search ──────────────────────────────────────────
 
                             tool_event = _build_event(
                                 "tool_call",
@@ -963,6 +1025,20 @@ async def send_message(
                     profiler.log_turn(llm_round, "assistant_reasoning", assistant_reasoning_content)
                     await emit_trace_and_push(build_status_event("Final answer ready.", "completed"))
                 break
+        except asyncio.CancelledError:
+            run_failed = True
+            logger.info("Agent loop cancelled for chat %s", chat_id)
+            await emit_trace_and_push(
+                _build_event(
+                    "status",
+                    content="User cancelled the operation.",
+                    metadata={"phase": "cancelled", "cancelledBy": "user"},
+                    session_id=synthetic_session_id,
+                    chat_id=str(chat_id),
+                    message_id=request_message_id,
+                )
+            )
+            # Do NOT re-raise so we fall through and persist the partial response/trace to DB
         except Exception as exc:
             run_failed = True
             error_details = str(exc)
@@ -1065,9 +1141,20 @@ async def send_message(
             )
 
         profiler.dump("logs")
-        await push_event({"type": "done", "messageId": str(asst_msg.message_id)})
+        try:
+            await push_event({"type": "done", "messageId": str(asst_msg.message_id)})
+        except Exception:
+            logger.exception("Failed to push done event")
 
-    asyncio.create_task(run_agent_loop())
+    async def _run_agent_loop_with_cleanup():
+        try:
+            await run_agent_loop()
+        finally:
+            if ACTIVE_AGENT_TASKS.get(str(chat_id)) == asyncio.current_task():
+                del ACTIVE_AGENT_TASKS[str(chat_id)]
+
+    task = asyncio.create_task(_run_agent_loop_with_cleanup())
+    ACTIVE_AGENT_TASKS[str(chat_id)] = task
     
     return {"status": "accepted", "message_id": request_message_id}
 
@@ -1279,6 +1366,11 @@ async def cancel_chat_stream(
         )
         db.add(cancellation_message)
         await db.commit()
+
+    task = ACTIVE_AGENT_TASKS.get(str(chat_id))
+    if task and not task.done():
+        logger.info("Cancelling active agent task for chat_id=%s", chat_id)
+        task.cancel()
 
     logger.info(
         "chat stream cancelled user_id=%s chat_id=%s reason=%s message_id=%s",

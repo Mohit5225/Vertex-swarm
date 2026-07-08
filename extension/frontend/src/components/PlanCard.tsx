@@ -3,11 +3,12 @@ import { FileText, Play } from 'lucide-react'
 import { getVsCodeApi } from '../lib/vscode'
 
 interface Props {
-  isReady: boolean
-  isPast: boolean
+  status: 'generating' | 'ready' | 'executed'
 }
 
-const PlanCard: React.FC<Props> = ({ isReady, isPast }) => {
+const PlanCard: React.FC<Props> = ({ status }) => {
+  const isReady = status === 'ready';
+  const isPast = status === 'executed';
   const handleProceed = () => {
     // Send a message to the extension to proceed
     getVsCodeApi()?.postMessage({

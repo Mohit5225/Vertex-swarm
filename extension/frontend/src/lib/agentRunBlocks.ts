@@ -133,9 +133,10 @@ const summarizeToolExecution = ({
   requestDebug?: unknown
   resultDebug?: unknown
 }) => {
+  const args = requestArgs(requestDebug)
   const payload = requestPayload(requestDebug)
   const data = resultData(resultDebug)
-  const query = stringValue(payload?.query, data?.query)
+  const query = stringValue(payload?.query, data?.query, args?.query)
   const filePattern = stringValue(payload?.filePattern, data?.filePattern)
   const path = stringValue(payload?.path, data?.path, data?.target)
   const oldPath = stringValue(payload?.oldPath, payload?.old_path, data?.oldPath)
@@ -155,6 +156,10 @@ const summarizeToolExecution = ({
   }
 
   if (state === 'error') {
+    if (toolName === 'web_search') {
+      return query ? `Web search failed for "${query}"` : 'Web search failed'
+    }
+
     switch (action) {
       case 'search_text':
         return query ? `Search failed for "${query}"` : 'Search failed'
@@ -175,6 +180,15 @@ const summarizeToolExecution = ({
       default:
         return toolName ? `${toolName} failed` : 'Tool execution failed'
     }
+  }
+
+  if (toolName === 'web_search') {
+    if (query) {
+      return state === 'running'
+        ? `Searching web for "${query}"`
+        : `Searched web for "${query}"`
+    }
+    return state === 'running' ? 'Running web search' : 'Completed web search'
   }
 
   switch (action) {

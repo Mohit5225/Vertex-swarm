@@ -74,6 +74,8 @@ const LiveFileEditBar: React.FC<{ messages: ChatMessage[] }> = ({ messages }) =>
   if (messages.length === 0) return null
   const lastMessage = messages[messages.length - 1]
   if (lastMessage.type !== 'agent' || !lastMessage.events?.length) return null
+  if (Date.now() - (lastMessage.timestamp || 0) > 1000 * 60 * 60) return null // Hide if older than 1 hour
+
   const lastAgent = lastMessage
 
   const blocks = buildAgentRunBlocks(lastAgent.events || [], lastAgent.content)

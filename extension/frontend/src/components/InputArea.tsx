@@ -104,17 +104,13 @@ const InputArea: React.FC<Props> = ({
       return
     }
 
-    // Add a cancellation event to the conversation so the LLM knows it was stopped
-    const { addEvent } = useChatStore.getState()
-    addEvent({
-      id: `evt-cancel-${Date.now()}`,
-      type: 'status',
-      content: 'User cancelled the operation.',
+    // Add a cancellation system message so the UI matches the backend persistence
+    const { addMessage } = useChatStore.getState()
+    addMessage({
+      id: `msg-cancel-${Date.now()}`,
+      type: 'system',
+      content: 'User cancelled the operation. Reason: user-requested',
       timestamp: Date.now(),
-      metadata: {
-        phase: 'cancelled',
-        cancelledBy: 'user',
-      },
     })
 
     setError(null)

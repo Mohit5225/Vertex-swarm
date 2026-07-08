@@ -10,7 +10,7 @@ from uuid import uuid4
 from openai import AsyncOpenAI
 
 from app.core.config import settings
-from app.services.tool_schemas import WORKSPACE_OPS_TOOL_SPEC, TERMINAL_OPS_TOOL_SPEC, LOAD_TOOL_CONTEXT_TOOL_SPEC, PLAN_TOOL_SPEC, TODO_TOOL_SPEC
+from app.services.tool_schemas import WORKSPACE_OPS_TOOL_SPEC, TERMINAL_OPS_TOOL_SPEC, LOAD_TOOL_CONTEXT_TOOL_SPEC, PLAN_TOOL_SPEC, TODO_TOOL_SPEC, WEB_SEARCH_TOOL_SPEC
 
 logger = logging.getLogger(__name__)
 context_logger = logging.getLogger("app.context")
@@ -191,7 +191,8 @@ def _build_request_payload(
             TERMINAL_OPS_TOOL_SPEC, 
             LOAD_TOOL_CONTEXT_TOOL_SPEC,
             PLAN_TOOL_SPEC,
-            TODO_TOOL_SPEC
+            TODO_TOOL_SPEC,
+            WEB_SEARCH_TOOL_SPEC
         ],
         "tool_choice": "auto",
     }
