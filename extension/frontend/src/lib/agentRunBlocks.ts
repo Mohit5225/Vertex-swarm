@@ -428,7 +428,7 @@ export const buildAgentRunBlocks = (events: SessionEvent[], content?: string): A
 
       const block = ensureProcessBlock()
       const lastStep = block.steps[block.steps.length - 1]
-      
+
       if (lastStep?.kind === 'thinking') {
         lastStep.text = `${lastStep.text}${text}`
       } else {

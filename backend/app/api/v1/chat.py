@@ -27,7 +27,7 @@ from app.services.prompt_loader import build_injected_guidance, load_categories,
 from app.services.websearch import search_web
 from app.utils.token_profiler import TokenProfiler
 from app.services.llm_service import DEVELOPER_ASSISTANT_PERSONA
-from app.services.tool_schemas import WORKSPACE_OPS_TOOL_SPEC, TERMINAL_OPS_TOOL_SPEC, LOAD_TOOL_CONTEXT_TOOL_SPEC, PLAN_TOOL_SPEC, TODO_TOOL_SPEC
+from app.services.tool_schemas import WORKSPACE_OPS_TOOL_SPEC, TERMINAL_OPS_TOOL_SPEC, LOAD_TOOL_CONTEXT_TOOL_SPEC, PLAN_TOOL_SPEC, TODO_TOOL_SPEC, WEB_SEARCH_TOOL_SPEC
 logger = logging.getLogger(__name__)
 
 ACTIVE_AGENT_TASKS: dict[str, asyncio.Task] = {}
@@ -504,7 +504,8 @@ async def send_message(
             TERMINAL_OPS_TOOL_SPEC, 
             LOAD_TOOL_CONTEXT_TOOL_SPEC,
             PLAN_TOOL_SPEC,
-            TODO_TOOL_SPEC
+            TODO_TOOL_SPEC,
+            WEB_SEARCH_TOOL_SPEC
         ]))
         profiler.log_constant("ide_context", request_context_message)
         profiler.log_constant("workspace_skeleton", req.workspace_skeleton)

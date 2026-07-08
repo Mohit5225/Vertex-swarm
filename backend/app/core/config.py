@@ -106,6 +106,8 @@ class Settings(BaseSettings):
     # openrouter_model: str = "poolside/laguna-xs.2:free"
     # openrouter_fallback_model: str = "poolside/laguna-xs.2:free"
     # openrouter_reasoning_enabled: bool = True
+
+    
     # openrouter_reasoning_effort: str = "low"
 
     deepseek_base_url: str = "https://api.deepseek.com"

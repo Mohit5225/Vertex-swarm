@@ -8,6 +8,7 @@ export class SSEStreamClient {
   private eventSource: EventSource | null = null;
   private isConnected = false;
   private abortController: AbortController | null = null;
+  private reader: ReadableStreamDefaultReader<Uint8Array> | null = null;
   private eventCounter = 0;
 
   constructor(
@@ -117,13 +118,13 @@ export class SSEStreamClient {
       throw new Error('Response has no body');
     }
 
-    const reader = response.body.getReader();
+    this.reader = response.body.getReader();
     const decoder = new TextDecoder();
     let buffer = '';
 
     try {
       while (true) {
-        const { done, value } = await reader.read();
+        const { done, value } = await this.reader.read();
 
         if (done) {
           this.onClose();
@@ -158,7 +159,7 @@ export class SSEStreamClient {
                 eventData.type === 'done'
               ) {
                 if (onDone) onDone();
-                await reader.cancel().catch(() => undefined);
+                await this.reader.cancel().catch(() => undefined);
                 this.cleanup();
                 this.onClose();
                 return;
@@ -185,6 +186,9 @@ export class SSEStreamClient {
   async cancelStream(_sessionId: string): Promise<void> {
     try {
       this.abortController?.abort();
+      if (this.reader) {
+        await this.reader.cancel().catch(() => undefined);
+      }
     } catch (error) {
       console.error('Failed to send cancel request:', error);
     } finally {
@@ -197,6 +201,7 @@ export class SSEStreamClient {
    */
   private cleanup(): void {
     this.abortController = null;
+    this.reader = null;
     if (this.eventSource) {
       this.eventSource.close();
       this.eventSource = null;

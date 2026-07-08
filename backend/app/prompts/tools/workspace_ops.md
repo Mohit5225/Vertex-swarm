@@ -43,15 +43,24 @@ Determine your reading strategy based on the overall objective. Sequential readi
 
 ---
 
-### CODE DISCOVERY PROTOCOL (GREP FIRST, READ SECOND)
+### CODE DISCOVERY PROTOCOL (MANDATORY GREP FIRST, READ SECOND)
+
+**CRITICAL HARD CONSTRAINT: YOU MUST USE `search_text` FIRST.**
+Unless you already know the exact file and line numbers you need to modify, you are **STRICTLY PROHIBITED** from using `read_file` or `bulk_files_read` to explore code.
+
+Why `search_text` is your most important tool:
+1. **Precise Line Numbers:** It gives you the exact lines where a function, class, or symbol lives. You need this to edit the file accurately anyway.
+2. **Token Efficiency:** A single `search_text` call costs ~20 tokens. A blind `read_file` or `bulk_files_read` costs hundreds or thousands of tokens, bloats your context, and degrades your intelligence.
+3. **Targeted Context:** Reading full files fills your memory with irrelevant code. Search text gives you exactly the relevant snippets across the codebase instantly.
+4. **Prevents Guessing:** Never guess where a function is located based on directory names. Always grep for it.
 
 | Query Type | What To Do |
 |---|---|
-| Task requires multiple files | use `workspace_ops` with action: `bulk_files_read`. Group your required paths to save roundtrips and execute faster. |
-| Task requires only one file | use `workspace_ops` with action: `read_file` directly. Ideal for focused, single-file changes. |
-| Find function / class / symbol | use `workspace_ops` with action: `search_text` first (costs ~20 tokens), then action HIGHLY ENCOURAGED TO LOOK FOR WHAT YOU NEED WITH `search_text`, THIS GIVE YOU PRECISE LINES FOR WHAT YOU ARE LOOKING FOR use it extensively whenever you need to precisely locate code, symbols, or patterns : `read_file` or `bulk_files_read` on the returned lines/files |
-| Broad feature exploration | use `workspace_ops` with action: `list_dir` → action: `search_text` with regex → action: `bulk_files_read` on key files |
-| Find all call sites | use `workspace_ops` with action: `search_text` and payload: `{query: 'fn_name(', filePattern: '**/*.py'}` |
+| Find function / class / symbol | **MANDATORY**: use `workspace_ops` action `search_text` first to locate code. Then use `read_file` or `bulk_files_read` ONLY on the targeted returned files. |
+| Broad feature exploration | `list_dir` → `search_text` with regex → `bulk_files_read` ONLY on the key files discovered. |
+| Find all call sites | use `search_text` with payload: `{query: 'fn_name(', filePattern: '**/*.py'}` |
+| Task requires multiple files | **ONLY** if you ALREADY KNOW the exact paths beforehand, use `bulk_files_read`. |
+| Task requires only one file | **ONLY** if you ALREADY KNOW the exact path beforehand, use `read_file`. |
 
 To save roundtrips, search for multiple unrelated terms at once by providing `multiple_queries`:
 ```json
@@ -65,8 +74,6 @@ To save roundtrips, search for multiple unrelated terms at once by providing `mu
   }
 }
 ```
-
-Token cost: `workspace_ops` action `search_text` ~20 tokens, action `read_file` ~70 tokens. Blind reads = 600 tokens. Always grep first.
 
 ---
 

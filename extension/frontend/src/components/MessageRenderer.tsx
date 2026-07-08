@@ -14,33 +14,8 @@ interface Props {
   message: ChatMessage
 }
 
-const looksLikeMarkdown = (content: string) =>
-  /(^|\n)[ \t]*(#{1,6}\s|[-*+]\s|\d+\.\s|>\s|```|`[^`]+`|.*\|.*\|)/m.test(content)
-
 const normalizeAssistantContent = (content: string) => {
-  const normalized = content.replace(/\r\n/g, '\n')
-
-  if (looksLikeMarkdown(normalized)) {
-    return normalized
-  }
-
-  const segments = normalized
-    .split(/\n{2,}/)
-    .map((segment) => segment.trim())
-    .filter(Boolean)
-  const averageSegmentLength =
-    segments.length > 0
-      ? segments.reduce((total, segment) => total + segment.length, 0) /
-      segments.length
-      : 0
-  const looksFragmented =
-    segments.length >= 4 && averageSegmentLength > 0 && averageSegmentLength < 28
-
-  if (!looksFragmented) {
-    return normalized.replace(/(?<!\n)\n(?!\n)/g, ' ')
-  }
-
-  return segments.join(' ').replace(/\s+([,.;:!?])/g, '$1')
+  return content.replace(/\r\n/g, '\n')
 }
 
 const StreamingCursor = () => (
@@ -141,7 +116,7 @@ const MessageRenderer: React.FC<Props> = ({ message }) => {
                   return (
                     <div
                       key={block.id}
-                      className={`break-words text-[55px] leading-7 ${block.tone === 'code'
+                      className={`break-words text-[15px] leading-7 ${block.tone === 'code'
                         ? 'font-medium text-[#d9e6fb]'
                         : 'text-[#edf3ff]'
                         }`}
