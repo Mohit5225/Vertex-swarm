@@ -9,7 +9,6 @@ import { buildAgentRunBlocks } from '../lib/agentRunBlocks'
 import { describePendingMessage } from '../lib/trace'
 import { getVsCodeApi } from '../lib/vscode'
 import PlanCard from './PlanCard'
-import TodoWidget from './TodoWidget'
 
 interface Props {
   message: ChatMessage
@@ -182,8 +181,6 @@ const MessageRenderer: React.FC<Props> = ({ message }) => {
 
                 return null
               })}
-
-              {Boolean(message.events?.length) && <TodoWidget events={message.events!} isHistorical={isHistorical} />}
 
               {hasPlanPermissionRequest && (() => {
                 let planStatus: 'generating' | 'ready' | 'executed' = 'generating';

@@ -9,6 +9,20 @@ export interface SessionEvent {
   metadata?: Record<string, unknown>
 }
 
+export interface TodoItem {
+  id: string
+  content: string
+  activeForm: string
+  status: 'pending' | 'in_progress' | 'done'
+}
+
+export interface TodoState {
+  items: TodoItem[]
+  planId?: string
+  sourceMessageId?: string
+  lastUpdatedAt: number
+}
+
 export interface ChatMessage {
   id: string
   /** Real DB UUID — only set for user messages sent live (not loaded from history) */
@@ -36,6 +50,7 @@ interface ChatState {
   isStreaming: boolean
   error: string | null
   planReadyForMessageId: string | null
+  currentTodo: TodoState | null
 
   // Actions
   setCurrentChatId: (id: string | null) => void
@@ -56,6 +71,63 @@ interface ChatState {
   patchMessageId: (tempId: string, realId: string) => void
   truncateAfter: (messageId: string) => void
   setPlanReadyForMessageId: (messageId: string | null) => void
+}
+
+const isTodoItem = (value: unknown): value is TodoItem => {
+  if (!value || typeof value !== 'object') {
+    return false
+  }
+
+  const item = value as Record<string, unknown>
+  return (
+    typeof item.id === 'string' &&
+    typeof item.content === 'string' &&
+    typeof item.activeForm === 'string' &&
+    (item.status === 'pending' || item.status === 'in_progress' || item.status === 'done')
+  )
+}
+
+const extractTodoStateFromEvent = (
+  event: SessionEvent,
+  sourceMessageId?: string
+): TodoState | null => {
+  if (event.type !== 'todo_init' && event.type !== 'todo_update') {
+    return null
+  }
+
+  const rawItems = event.metadata?.items
+  if (!Array.isArray(rawItems)) {
+    return null
+  }
+
+  const items = rawItems.filter(isTodoItem)
+  if (items.length === 0) {
+    return null
+  }
+
+  return {
+    items,
+    planId:
+      typeof event.metadata?.plan_id === 'string' ? event.metadata.plan_id : undefined,
+    sourceMessageId,
+    lastUpdatedAt: event.timestamp || Date.now(),
+  }
+}
+
+const extractTodoStateFromMessages = (messages: ChatMessage[]): TodoState | null => {
+  for (let messageIndex = messages.length - 1; messageIndex >= 0; messageIndex -= 1) {
+    const message = messages[messageIndex]
+    const events = message.events || []
+
+    for (let eventIndex = events.length - 1; eventIndex >= 0; eventIndex -= 1) {
+      const todoState = extractTodoStateFromEvent(events[eventIndex], message.id)
+      if (todoState) {
+        return todoState
+      }
+    }
+  }
+
+  return null
 }
 
 const appendEventContent = (currentContent: string, event: SessionEvent): string => {
@@ -176,6 +248,7 @@ export const useChatStore = create<ChatState>((set) => ({
   isStreaming: false,
   error: null,
   planReadyForMessageId: null,
+  currentTodo: null,
 
   setCurrentChatId: (id: string | null) => {
     set((state) => {
@@ -224,17 +297,20 @@ export const useChatStore = create<ChatState>((set) => ({
     messages: ChatMessage[],
     ideContextEnabled = false
   ) => {
+    const normalizedMessages = messages.map((message: any) => ({
+      ...message,
+      id: message.messageId || message.id,
+      events: message.events || [],
+    }))
+
     set({
       currentChatId: chatId,
       currentIdeContextEnabled: ideContextEnabled,
       activeMessageId: null,
       isStreaming: false,
       error: null,
-      messages: messages.map((message: any) => ({
-        ...message,
-        id: message.messageId || message.id,
-        events: message.events || [],
-      })),
+      messages: normalizedMessages,
+      currentTodo: extractTodoStateFromMessages(normalizedMessages),
     })
   },
 
@@ -253,6 +329,7 @@ export const useChatStore = create<ChatState>((set) => ({
 
   addMessage: (message: ChatMessage) => {
     set((state) => ({
+      currentTodo: message.type === 'user' ? null : state.currentTodo,
       messages: [
         ...state.messages,
         {
@@ -353,9 +430,12 @@ export const useChatStore = create<ChatState>((set) => ({
         events: nextEvents,
       }
 
+      const todoState = extractTodoStateFromEvent(normalizedEvent, targetMessage.id)
+
       return {
         messages,
         activeMessageId,
+        currentTodo: todoState ?? state.currentTodo,
       }
     })
   },
@@ -384,6 +464,10 @@ export const useChatStore = create<ChatState>((set) => ({
       ),
       activeMessageId: state.activeMessageId === tempId ? realId : state.activeMessageId,
       planReadyForMessageId: state.planReadyForMessageId === tempId ? realId : state.planReadyForMessageId,
+      currentTodo:
+        state.currentTodo?.sourceMessageId === tempId
+          ? { ...state.currentTodo, sourceMessageId: realId }
+          : state.currentTodo,
     }))
   },
 
@@ -393,11 +477,13 @@ export const useChatStore = create<ChatState>((set) => ({
         (m) => m.id === messageId || m.dbMessageId === messageId
       )
       if (idx === -1) return state
+      const messages = state.messages.slice(0, idx)
       return {
-        messages: state.messages.slice(0, idx),
+        messages,
         isStreaming: false,
         activeMessageId: null,
         error: null,
+        currentTodo: extractTodoStateFromMessages(messages),
       }
     })
   },
@@ -412,6 +498,7 @@ export const useChatStore = create<ChatState>((set) => ({
       isStreaming: false,
       chats: state.chats,
       planReadyForMessageId: null,
+      currentTodo: null,
     }))
   },
 

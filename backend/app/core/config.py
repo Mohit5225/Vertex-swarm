@@ -122,6 +122,11 @@ class Settings(BaseSettings):
     modal_reasoning_enabled: bool = False
     modal_reasoning_effort: str = "low"
 
+    # ========================================
+    # Web search (Exa)
+    # ========================================
+    exa_api_key: str = ""
+
     @property
     def llm_base_url(self) -> str:
         if self.deepseek_api_key.strip():

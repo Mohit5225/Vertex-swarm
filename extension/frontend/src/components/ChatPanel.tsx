@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState } from 'react'
+import React, { useEffect, useMemo, useRef, useState } from 'react'
 import { useAuthStore } from '../store/authStore'
 import { useChatStore, type ChatMessage } from '../store/chatStore'
 import MessageRenderer from './MessageRenderer'
@@ -6,6 +6,7 @@ import InputArea from './InputArea'
 import ConfirmDialog from './ConfirmDialog'
 import { getVsCodeApi } from '../lib/vscode'
 import { Package, ChevronDown, Undo2 } from 'lucide-react'
+import TodoWidget from './TodoWidget'
 
 import { TOAST_STATUS_PHASES, buildAgentRunBlocks } from '../lib/agentRunBlocks'
 import { getEventPhase } from '../lib/sessionEvents'
@@ -244,7 +245,7 @@ const LiveFileEditBar: React.FC<{ messages: ChatMessage[] }> = ({ messages }) =>
 
 const ChatPanel: React.FC = () => {
   const { user, logout } = useAuthStore()
-  const { clearMessages, messages, isStreaming, error, chats, currentChatId } =
+  const { clearMessages, messages, isStreaming, error, chats, currentChatId, currentTodo } =
     useChatStore()
   const {
     currentIdeContextEnabled,
@@ -270,6 +271,18 @@ const ChatPanel: React.FC = () => {
     : messages.length > 0
       ? 'Ready'
       : 'Idle'
+
+  const showTodoBar = useMemo(() => {
+    if (!currentTodo?.items.length) {
+      return false
+    }
+
+    if (isStreaming) {
+      return true
+    }
+
+    return Date.now() - currentTodo.lastUpdatedAt < 1000 * 60 * 60
+  }, [currentTodo, isStreaming])
 
   useEffect(() => {
     // Only smooth scroll if there are messages and we're not streaming super fast, 
@@ -609,6 +622,9 @@ const ChatPanel: React.FC = () => {
 
           {/* Live file edit bar — shows changes from the active or most recent agent turn.
                Disappears when the user sends a new message. */}
+          {showTodoBar && currentTodo && (
+            <TodoWidget items={currentTodo.items} isStreaming={isStreaming} />
+          )}
           <LiveFileEditBar messages={messages} />
 
           <div className="border-t chat-divider bg-[linear-gradient(180deg,rgba(255,255,255,0.02),transparent)] px-3 pb-3 pt-2 sm:px-4">

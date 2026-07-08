@@ -10,7 +10,9 @@ TODO_TOOL_SPEC: dict[str, Any] = {
             "without a formal plan). action='init' creates the full checklist once, at the start of "
             "execution — every item status='pending'. action='update' resends the ENTIRE list with "
             "statuses changed; this is always a full replacement, never a partial patch. Mark exactly one "
-            "item 'in_progress' at a time; mark it 'done' before starting the next. CRITICAL: All "
+            "item 'in_progress' at a time; mark it 'done' before starting the next. This tool drives a "
+            "persistent execution widget in the UI, so keep the same item ids/order across updates and "
+            "update the widget with this tool instead of restating the checklist in normal assistant prose. CRITICAL: All "
             "action-specific arguments MUST be nested INSIDE the `payload` object, not at the top level."
         ),
         "parameters": {

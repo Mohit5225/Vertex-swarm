@@ -24,6 +24,7 @@ from app.schemas.tool import ToolResultSchema
 from app.services.llm_service import stream_chat_events, format_tool_response
 from app.services.tool_memory import build_tool_memory_from_trace_events, format_tool_memory_for_prompt
 from app.services.prompt_loader import build_injected_guidance, load_categories, SUPPORTED_CATEGORIES
+from app.services.websearch import search_web
 from app.utils.token_profiler import TokenProfiler
 from app.services.llm_service import DEVELOPER_ASSISTANT_PERSONA
 from app.services.tool_schemas import WORKSPACE_OPS_TOOL_SPEC, TERMINAL_OPS_TOOL_SPEC, LOAD_TOOL_CONTEXT_TOOL_SPEC, PLAN_TOOL_SPEC, TODO_TOOL_SPEC
@@ -839,24 +840,7 @@ async def send_message(
                                 await emit_trace_and_push(build_status_event(f"Searching web for '{query}'...", "searching_web"))
 
                                 try:
-                                    def do_search():
-                                        from exa_py import Exa
-                                        exa = Exa(api_key="7d26b0ee-f163-4528-9b28-528926d4a6c0")
-                                        return exa.search(
-                                            query,
-                                            type="auto",
-                                            num_results=num_results,
-                                            contents={"highlights": True}
-                                        )
-                                    search_res = await asyncio.to_thread(do_search)
-                                    
-                                    results_list = []
-                                    for r in search_res.results:
-                                        results_list.append({
-                                            "title": r.title,
-                                            "url": r.url,
-                                            "highlights": r.highlights
-                                        })
+                                    results_list = await search_web(query, num_results=num_results)
                                     result_content = json.dumps(results_list, ensure_ascii=False)
                                     logger.info(f"Web search successful for query: {query}")
                                     success_event = _build_event("tool_result", metadata={"phase": "tool_result", "status": "success"}, status="success", content="Web search successful", tool_call_id=tool_call_id)
