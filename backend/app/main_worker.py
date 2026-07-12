@@ -2,6 +2,7 @@ import asyncio
 import json
 import logging
 import sys
+from pathlib import Path
 from typing import Dict, Any
 
 from app.config import WorkerConfig
@@ -26,11 +27,16 @@ class WorkerNode:
                 raise ValueError("base_path is required")
 
             self.config = WorkerConfig(
-                base_path=base_path,
+                base_path=Path(base_path),
                 llm_key=params.get("llm_key", ""),
                 exa_key=params.get("exa_key", ""),
                 entitlement_token=params.get("entitlement_token", ""),
                 platform=params.get("platform", sys.platform),
+                llm_base_url=params.get("llm_base_url", "https://api.deepseek.com/v1"),
+                llm_model=params.get("llm_model", "deepseek-chat"),
+                llm_fallback_model=params.get("llm_fallback_model", "deepseek-chat"),
+                llm_reasoning_enabled=params.get("llm_reasoning_enabled", False),
+                llm_reasoning_effort=params.get("llm_reasoning_effort", "low"),
             )
             
             # TODO: Add Entitlement JWT validation here if needed

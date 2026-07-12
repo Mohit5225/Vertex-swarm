@@ -9,7 +9,7 @@ from uuid import uuid4
 
 from openai import AsyncOpenAI
 
-from app.core.config import settings
+from app.config import WorkerConfig
 from app.services.tool_schemas import WORKSPACE_OPS_TOOL_SPEC, TERMINAL_OPS_TOOL_SPEC, LOAD_TOOL_CONTEXT_TOOL_SPEC, PLAN_TOOL_SPEC, TODO_TOOL_SPEC, WEB_SEARCH_TOOL_SPEC
 
 logger = logging.getLogger(__name__)
@@ -146,11 +146,11 @@ def _build_system_prompt(
     return "\n\n".join(parts)
 
 
-def _get_client(api_key: str | None = None) -> AsyncOpenAI:
-    base_url = _normalize_base_url(settings.llm_base_url)
+def _get_client(base_url: str, api_key: str) -> AsyncOpenAI:
+    normalized_base_url = _normalize_base_url(base_url)
     return AsyncOpenAI(
-        base_url=base_url,
-        api_key=api_key or settings.llm_api_key,
+        base_url=normalized_base_url,
+        api_key=api_key,
         max_retries=3,
     )
 
@@ -168,12 +168,13 @@ def _normalize_base_url(base_url: str) -> str:
     return normalized_base_url.rstrip("/")
 
 
-def _model_name(model: str | None = None) -> str:
-    return model or settings.llm_model
+def _model_name(config: WorkerConfig, model: str | None = None) -> str:
+    return model or config.llm_model
 
 
 def _build_request_payload(
     messages: List[Dict[str, Any]],
+    config: WorkerConfig,
     workspace_skeleton: str | None = None,
     model: str | None = None,
     active_tool_guidance: str | None = None,
@@ -184,7 +185,7 @@ def _build_request_payload(
     ]
 
     payload: Dict[str, Any] = {
-        "model": _model_name(model),
+        "model": _model_name(config, model),
         "messages": full_messages,
         "stream": True,
         "tools": [
@@ -198,7 +199,7 @@ def _build_request_payload(
         "tool_choice": "auto",
     }
 
-    if settings.llm_reasoning_enabled:
+    if config.llm_reasoning_enabled:
         payload["extra_body"] = {
             "thinking": {
                 "type": "enabled",
@@ -378,6 +379,7 @@ def _finalize_pending_tool_calls(
 
 async def stream_chat_completion(
     messages: List[Dict[str, Any]],
+    config: WorkerConfig,
     workspace_skeleton: str | None = None,
 ) -> AsyncIterator[str]:
     """
@@ -390,13 +392,11 @@ async def stream_chat_completion(
     Yields:
         Token chunks (str) as they stream from the model.
     """
-    # from app.services.key_pool import key_pool
-    # key_idx, api_key = await key_pool.next_key()
-    api_key = settings.llm_api_key
+    api_key = config.llm_key
     
-    client = _get_client(api_key=api_key)
+    client = _get_client(base_url=config.llm_base_url, api_key=api_key)
     stream = await client.chat.completions.create(
-        **_build_request_payload(messages, workspace_skeleton)
+        **_build_request_payload(messages, config, workspace_skeleton)
     )
 
     async for chunk in stream:
@@ -414,6 +414,7 @@ async def stream_chat_completion(
 
 async def stream_chat_events(
     messages: List[Dict[str, Any]],
+    config: WorkerConfig,
     workspace_skeleton: str | None = None,
     model: str | None = None,
     context_log_metadata: Dict[str, Any] | None = None,
@@ -428,23 +429,20 @@ async def stream_chat_events(
     Args:
         messages: Chat messages list
         workspace_skeleton: Optional workspace context
-        model: Optional model override (defaults to settings.llm_model)
+        model: Optional model override (defaults to config.llm_model)
 
     Yields event dicts with:
       - {"type": "token", "content": "..."}
       - {"type": "thinking", "content": "..."}
       - {"type": "tool_call", "tool_call_id": "...", "tool_name": "...", "args": {...}}
     """
-    # from app.services.key_pool import key_pool
-    # key_idx, api_key = await key_pool.next_key()
-    api_key = settings.llm_api_key
+    api_key = config.llm_key
     
     rate_limiter = _get_rate_limiter(api_key)
-    client = _get_client(api_key=api_key)
-    # logger.info("Using API key index %d from pool of size %d", key_idx, key_pool.pool_size)
-    logger.info("Using single DeepSeek API key")
+    client = _get_client(base_url=config.llm_base_url, api_key=api_key)
+    logger.info("Using LLM key from config")
     
-    payload = _build_request_payload(messages, workspace_skeleton, model, active_tool_guidance)
+    payload = _build_request_payload(messages, config, workspace_skeleton, model, active_tool_guidance)
     _log_llm_context_snapshot(payload, context_log_metadata)
     
     # Log request details for debugging

@@ -4,7 +4,6 @@ from __future__ import annotations
 import asyncio
 from typing import Any
 
-from app.core.config import settings
 
 
 def _normalize_search_results(search_response: Any) -> list[dict[str, Any]]:
@@ -20,8 +19,8 @@ def _normalize_search_results(search_response: Any) -> list[dict[str, Any]]:
     return results
 
 
-async def search_web(query: str, num_results: int = 5) -> list[dict[str, Any]]:
-    if not settings.exa_api_key.strip():
+async def search_web(query: str, exa_api_key: str | None, num_results: int = 5) -> list[dict[str, Any]]:
+    if not exa_api_key or not exa_api_key.strip():
         raise RuntimeError("EXA_API_KEY is not configured")
 
     safe_num_results = max(1, min(int(num_results), 10))
@@ -29,7 +28,7 @@ async def search_web(query: str, num_results: int = 5) -> list[dict[str, Any]]:
     def do_search():
         from exa_py import Exa
 
-        exa = Exa(api_key=settings.exa_api_key.strip())
+        exa = Exa(api_key=exa_api_key.strip())
         return exa.search(
             query,
             type="auto",

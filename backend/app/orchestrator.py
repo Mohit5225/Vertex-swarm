@@ -9,7 +9,6 @@ import asyncio
 from openai import RateLimitError, APIError
 
 
-from app.core.config import settings
 from app.config import WorkerConfig
 from app.nats_client import NATSClient
 from app.file_store import FileStore
@@ -287,7 +286,7 @@ async def _run_agent_loop_impl(
     
     req_workspace_skeleton = context.get("workspace_skeleton", None)
     
-    state_str = await orchestrator.nats.kv_get("SESSIONS", f"session:{chat_id}")
+    state_str = await orchestrator.nats.kv_get("SESSIONS", f"session.{chat_id}")
     existing_active_categories = []
     existing_tool_memory = {}
     if state_str:
@@ -425,6 +424,7 @@ async def _run_agent_loop_impl(
             try:
                 stream_iterator = stream_chat_events(
                     llm_messages,
+                    config=orchestrator.config,
                     workspace_skeleton=req_workspace_skeleton,
                     context_log_metadata={
                         **llm_context_log_base,
@@ -441,7 +441,7 @@ async def _run_agent_loop_impl(
                     synthetic_session_id,
                     request_message_id,
                     orchestrator.config.llm_model,
-                    settings.llm_fallback_model,
+                    orchestrator.config.llm_fallback_model,
                 )
                 await emit_trace_and_push(
                     build_status_event(
@@ -451,11 +451,12 @@ async def _run_agent_loop_impl(
                 )
                 stream_iterator = stream_chat_events(
                     llm_messages,
+                    config=orchestrator.config,
                     workspace_skeleton=req_workspace_skeleton,
-                    model=settings.llm_fallback_model,
+                    model=orchestrator.config.llm_fallback_model,
                     context_log_metadata={
                         **llm_context_log_base,
-                        "model": settings.llm_fallback_model,
+                        "model": orchestrator.config.llm_fallback_model,
                         "is_fallback": True,
                     },
                     active_tool_guidance=active_tool_guidance,
@@ -549,12 +550,12 @@ async def _run_agent_loop_impl(
 
                             # Persist to NATS and FileStore immediately so next turn auto-injects
                             try:
-                                state_str = await orchestrator.nats.kv_get("SESSIONS", f"session:{chat_id}")
+                                state_str = await orchestrator.nats.kv_get("SESSIONS", f"session.{chat_id}")
                                 if state_str:
                                     state = json.loads(state_str)
                                     if "working_memory" not in state: state["working_memory"] = {}
                                     state["working_memory"]["active_tool_categories"] = merged
-                                    await orchestrator.nats.kv_set("SESSIONS", f"session:{chat_id}", json.dumps(state))
+                                    await orchestrator.nats.kv_set("SESSIONS", f"session.{chat_id}", json.dumps(state))
                                     await orchestrator.file_store.write_session(chat_id, state)
                             except Exception:
                                 logger.exception("Failed to persist active_tool_categories session_id=%s", synthetic_session_id)
@@ -719,7 +720,7 @@ async def _run_agent_loop_impl(
                             await emit_trace_and_push(build_status_event(f"Searching web for '{query}'...", "searching_web"))
 
                             try:
-                                results_list = await search_web(query, num_results=num_results)
+                                results_list = await search_web(query, orchestrator.config.exa_key, num_results=num_results)
                                 result_content = json.dumps(results_list, ensure_ascii=False)
                                 logger.info(f"Web search successful for query: {query}")
                                 success_event = _build_event("tool_result", metadata={"phase": "tool_result", "status": "success"}, status="success", content="Web search successful", tool_call_id=tool_call_id)
@@ -953,7 +954,7 @@ async def _run_agent_loop_impl(
     )
 
     try:
-        state_str = await orchestrator.nats.kv_get("SESSIONS", f"session:{chat_id}")
+        state_str = await orchestrator.nats.kv_get("SESSIONS", f"session.{chat_id}")
         if not state_str:
             logger.warning(
                 "tool memory persistence skipped session missing user_id=%s chat_id=%s session_id=%s message_id=%s",
@@ -968,7 +969,7 @@ async def _run_agent_loop_impl(
             previous_tool_memory = state["working_memory"].get("tool_memory")
             updated_tool_memory = build_tool_memory_from_trace_events(previous_tool_memory, trace_events)
             state["working_memory"]["tool_memory"] = updated_tool_memory
-            await orchestrator.nats.kv_set("SESSIONS", f"session:{chat_id}", json.dumps(state))
+            await orchestrator.nats.kv_set("SESSIONS", f"session.{chat_id}", json.dumps(state))
             await orchestrator.file_store.write_session(chat_id, state)
 
             logger.info(
