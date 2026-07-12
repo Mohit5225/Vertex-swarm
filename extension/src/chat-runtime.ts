@@ -1,7 +1,7 @@
 import * as vscode from 'vscode';
 import { TokenManager, type StoredSession } from './token-manager';
 import { OAuthHandler } from './oauth-handler';
-import { SSEStreamClient } from './sse-client/stream';
+import { VertexProcessManager } from './process-manager';
 import { FileSystemService } from './tools/file-system-service';
 import { ToolExecutor } from './tools/tool-executor';
 import { WorkspaceStore } from './workspace-store';
@@ -76,7 +76,7 @@ export class VertexSwarmChatRuntime {
   private readonly toolExecutor: ToolExecutor;
   private readonly processedToolCallIds = new Set<string>();
 
-  private streamClient: SSEStreamClient | null = null;
+  private processManager = new VertexProcessManager();
   private currentChatId: string | null = null;
   private streamCancellationRequested: boolean = false;
   private static authResetInProgress = false;
@@ -104,8 +104,6 @@ export class VertexSwarmChatRuntime {
       this.fileSystemService,
       this.terminalService,
       this.snapshotManager,
-      this.backendUrl,
-      (tokenOptions) => this.getValidToken(tokenOptions),
       (message: string) => this.log(message)
     );
   }
@@ -213,41 +211,10 @@ export class VertexSwarmChatRuntime {
             return;
           }
 
-          this.streamClient = new SSEStreamClient(
-            this.backendUrl,
-            token,
-            (event: SessionEvent) => {
-              this.log(this.describeEvent(event));
-
-              if (event.type === 'plan_chunk') {
-                this.planDocumentProvider?.appendPlanChunk(chatId, event.content);
-                return;
-              }
-              if (event.type === 'plan_ready') {
-                void this.planDocumentProvider?.openPlanTab(chatId);
-                this.post({ type: 'plan-ready', payload: {} });
-                return;
-              }
-
-              this.post({ type: 'event', payload: event });
-              if (event.type === 'tool_call') {
-                void this.handleToolCallEvent(event);
-              }
-            },
-            (error: string) => {
-              this.log(`stream error ${error}`);
-              if (this.isUnauthorizedError(error)) {
-                void this.handleUnauthorized();
-                return;
-              }
-
-              this.post({ type: 'error', payload: error });
-            },
-            () => {
-              this.log(`stream closed chat_id=${chatId}`);
-              this.post({ type: 'cancel-stream', payload: { sessionId: chatId } });
-            }
-          );
+          if (!this.processManager.rpcClient) {
+            this.post({ type: 'error', payload: 'Backend not running' });
+            return;
+          }
 
           const activeEditor = vscode.window.activeTextEditor;
           const requestContext = createRequestContext({
@@ -276,19 +243,21 @@ export class VertexSwarmChatRuntime {
             activeTerminals: this.terminalService.getActiveTerminalContexts(),
           });
 
-          const realMessageId = await this.streamClient.openChatStream(
-            chatId,
-            payload.message,
-            workspaceSkeleton,
-            ideContextEnabled,
-            requestContext
-          );
+          this.processManager.rpcClient.sendNotification('session/start', {
+            chat_id: chatId,
+            message: payload.message,
+            ide_context_enabled: ideContextEnabled,
+            workspace_skeleton: workspaceSkeleton,
+            request_context: requestContext
+          });
 
           // Forward the real DB message_id so the webview can patch the temp local id
-          if (realMessageId && payload.tempId) {
+          // For local architecture, we might just assume tempId is sufficient for now
+          // or have the backend send a specific message_id assignment event.
+          if (payload.tempId) {
             this.post({
               type: 'message-id-assigned',
-              payload: { tempId: payload.tempId as string, realId: realMessageId },
+              payload: { tempId: payload.tempId as string, realId: payload.tempId as string },
             });
           }
           if (this.currentChatId === chatId) {
@@ -348,35 +317,15 @@ export class VertexSwarmChatRuntime {
       }
 
       case 'cancel-stream': {
+        this.streamCancellationRequested = true;
         const payload = message.payload as StreamCancelPayload;
         this.log(`cancel stream requested session_id=${payload.sessionId}`);
-        this.streamCancellationRequested = true;
-        if (this.streamClient) {
-          await this.streamClient.cancelStream(payload.sessionId);
-        }
-
-        // Notify backend that stream was cancelled so LLM context is aware
-        try {
-          const token = await this.getValidToken();
-          if (token && payload.sessionId) {
-            const response = await fetch(
-              `${this.backendUrl}/api/v1/chats/${payload.sessionId}/cancel`,
-              {
-                method: 'POST',
-                headers: {
-                  'Authorization': `Bearer ${token}`,
-                  'Content-Type': 'application/json',
-                },
-              }
-            );
-            if (!response.ok) {
-              this.log(`failed to notify backend of cancellation status=${response.status}`);
-            } else {
-              this.log(`backend acknowledged cancellation chat_id=${payload.sessionId}`);
-            }
+        if (payload.sessionId) {
+          if (this.processManager.rpcClient) {
+            this.processManager.rpcClient.sendNotification('session/cancel', {
+              chat_id: payload.sessionId
+            });
           }
-        } catch (error) {
-          this.log(`error notifying backend of cancellation: ${error instanceof Error ? error.message : String(error)}`);
         }
         break;
       }
@@ -390,7 +339,6 @@ export class VertexSwarmChatRuntime {
       case 'reset-chat': {
         this.log('resetting active chat state');
         this.currentChatId = null;
-        this.streamClient = null;
         await this.sendChatList();
         break;
       }
@@ -551,9 +499,10 @@ export class VertexSwarmChatRuntime {
     this.log(`handling logout${reason ? ` reason="${reason}"` : ''}`);
     const activeChatId = this.currentChatId;
     this.currentChatId = null;
-    if (this.streamClient) {
-      await this.streamClient.cancelStream(activeChatId ?? '');
-      this.streamClient = null;
+    this.currentChatId = null;
+    if (this.processManager) {
+      this.processManager.dispose();
+      this.processManager = new VertexProcessManager();
     }
     this.postLoggedOut(reason);
   }
@@ -613,6 +562,36 @@ export class VertexSwarmChatRuntime {
     if (session.status !== 'valid') {
       this.postLoggedOut();
       return false;
+    }
+
+    if (!this.processManager.rpcClient) {
+      try {
+        await this.processManager.start(this.context, this.outputChannel, session.token);
+        
+        this.processManager.rpcClient!.on('stream/event', (params: any) => {
+          if (params.chat_id === this.currentChatId) {
+            this.log(this.describeEvent(params.event));
+            if (params.event.type === 'plan_chunk') {
+              this.planDocumentProvider?.appendPlanChunk(params.chat_id, params.event.content);
+              return;
+            }
+            if (params.event.type === 'plan_ready') {
+              void this.planDocumentProvider?.openPlanTab(params.chat_id);
+              this.post({ type: 'plan-ready', payload: {} });
+              return;
+            }
+            this.post({ type: 'event', payload: params.event });
+            if (params.event.type === 'tool_call') {
+              void this.handleToolCallEvent(params.event);
+            }
+          }
+        });
+      } catch (e: any) {
+        this.log(`Failed to start process manager: ${e.message}`);
+        vscode.window.showErrorMessage(`Failed to start Vertex backend: ${e.message}`);
+        this.postLoggedOut(e.message);
+        return false;
+      }
     }
 
     this.postAuthenticated(session);
@@ -1251,7 +1230,16 @@ export class VertexSwarmChatRuntime {
     this.processedToolCallIds.add(payload.tool_call_id);
 
     try {
-      await this.toolExecutor.handle(payload);
+      const result = await this.toolExecutor.handle(payload);
+      if (this.processManager.rpcClient) {
+        this.processManager.rpcClient.sendNotification('tool/result', {
+          chat_id: payload.chat_id,
+          tool_call_id: payload.tool_call_id,
+          status: result.status,
+          content: result.content,
+          data: result.data || {}
+        });
+      }
     } catch (error) {
       this.processedToolCallIds.delete(payload.tool_call_id);
       const errorMessage = error instanceof Error ? error.message : String(error);

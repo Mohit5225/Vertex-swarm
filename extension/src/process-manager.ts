@@ -3,17 +3,20 @@ import * as cp from 'child_process';
 import * as path from 'path';
 import * as os from 'os';
 import * as net from 'net';
+import * as fs from 'fs';
+import { RpcClient } from './rpc-client';
 
 export class VertexProcessManager implements vscode.Disposable {
   private natsProcess: cp.ChildProcess | null = null;
-  public backendProcess: cp.ChildProcess | null = null; // Public so we can access stdin/stdout in future
+  public backendProcess: cp.ChildProcess | null = null;
+  public rpcClient: RpcClient | null = null;
   private basePath: string;
 
   constructor() {
     this.basePath = path.join(os.homedir(), '.vertex-swarm');
   }
 
-  async start(context: vscode.ExtensionContext, outputChannel: vscode.OutputChannel): Promise<void> {
+  async start(context: vscode.ExtensionContext, outputChannel: vscode.OutputChannel, token: string): Promise<void> {
     const platform = os.platform();
     let binPlatform = platform;
     if (platform === 'win32') binPlatform = 'win32';
@@ -48,8 +51,61 @@ export class VertexProcessManager implements vscode.Disposable {
     await this.waitForNats();
     outputChannel.appendLine(`[ProcessManager] NATS is listening on 4222`);
 
-    // In a future phase, we will spawn the python worker here.
-    // this.backendProcess = cp.spawn(workerPath, [], { stdio: ['pipe', 'pipe', 'pipe'] });
+    // Spawn the Python worker
+    if (context.extensionMode === vscode.ExtensionMode.Development) {
+      outputChannel.appendLine(`[ProcessManager] Spawning Python Worker (Development Mode)...`);
+      const devPythonExe = platform === 'win32' 
+        ? path.join(context.extensionUri.fsPath, '..', '.venv', 'Scripts', 'python.exe')
+        : path.join(context.extensionUri.fsPath, '..', '.venv', 'bin', 'python');
+      
+      const devWorkerPath = path.join(context.extensionUri.fsPath, '..', 'backend', 'app', 'main_worker.py');
+
+      if (!fs.existsSync(devPythonExe)) {
+        vscode.window.showErrorMessage(`Local virtual environment not found at: ${devPythonExe}`);
+        outputChannel.appendLine(`[ProcessManager] Error: Local virtual environment not found at ${devPythonExe}`);
+      } else {
+        outputChannel.appendLine(`[ProcessManager] Python Executable: ${devPythonExe}`);
+        outputChannel.appendLine(`[ProcessManager] Worker Script: ${devWorkerPath}`);
+        this.backendProcess = cp.spawn(devPythonExe, [devWorkerPath], { stdio: ['pipe', 'pipe', 'pipe'] });
+      }
+    } else {
+      outputChannel.appendLine(`[ProcessManager] Spawning Python Worker (Production Mode)...`);
+      this.backendProcess = cp.spawn(workerPath, [], { stdio: ['pipe', 'pipe', 'pipe'] });
+    }
+
+    if (this.backendProcess) {
+      this.backendProcess.stderr?.on('data', (data) => {
+        outputChannel.appendLine(`[Worker Error] ${data.toString().trim()}`);
+      });
+      this.backendProcess.on('error', (err) => {
+        outputChannel.appendLine(`[ProcessManager] Worker spawn error: ${err.message}`);
+      });
+      this.backendProcess.on('exit', (code) => {
+        outputChannel.appendLine(`[ProcessManager] Worker exited with code ${code}`);
+      });
+
+      this.rpcClient = new RpcClient(this.backendProcess);
+      
+      // Perform handshake
+      try {
+        outputChannel.appendLine(`[ProcessManager] Sending initialize JSON-RPC handshake...`);
+        const initResult = await this.rpcClient.sendRequest('initialize', {
+          protocol_version: '1.0',
+          base_path: this.basePath,
+          entitlement_token: token,
+          platform: platform
+        });
+        
+        if (initResult.status === 'ready') {
+            outputChannel.appendLine(`[ProcessManager] Handshake complete. Backend is ready!`);
+        } else {
+            outputChannel.appendLine(`[ProcessManager] Warning: Unexpected handshake result: ${JSON.stringify(initResult)}`);
+        }
+      } catch (err: any) {
+        outputChannel.appendLine(`[ProcessManager] Handshake failed: ${err.message || err.code || err}`);
+        throw new Error(`Worker initialization failed: ${err.message || err.code || err}`);
+      }
+    }
     
     // Register exit handlers to clean up if the parent process dies abruptly
     process.on('exit', () => this.dispose());
@@ -87,14 +143,15 @@ export class VertexProcessManager implements vscode.Disposable {
     });
   }
 
-  dispose(): void {
-    if (this.natsProcess) {
-      this.natsProcess.kill();
-      this.natsProcess = null;
+  public dispose() {
+    if (this.rpcClient) {
+      this.rpcClient.dispose();
     }
     if (this.backendProcess) {
       this.backendProcess.kill();
-      this.backendProcess = null;
+    }
+    if (this.natsProcess) {
+      this.natsProcess.kill();
     }
   }
 }

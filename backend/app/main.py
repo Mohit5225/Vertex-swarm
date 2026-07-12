@@ -92,44 +92,44 @@ async def lifespan(app: FastAPI):
     # Startup
     logger.info("🚀 Backend startup sequence")
 
-    try:
-        logger.info("Creating database tables...")
-        async with async_engine.begin() as conn:
-            await conn.run_sync(Base.metadata.create_all)
-            await conn.execute(
-                text(
-                    "ALTER TABLE chats "
-                    "ADD COLUMN IF NOT EXISTS ide_context_enabled BOOLEAN NOT NULL DEFAULT FALSE"
-                )
-            )
-        logger.info("✅ Database tables ready")
-    except Exception as exc:
-        logger.error(f"❌ Database table creation failed: {exc}")
-        raise
+    # try:
+    #     logger.info("Creating database tables...")
+    #     async with async_engine.begin() as conn:
+    #         await conn.run_sync(Base.metadata.create_all)
+    #         await conn.execute(
+    #             text(
+    #                 "ALTER TABLE chats "
+    #                 "ADD COLUMN IF NOT EXISTS ide_context_enabled BOOLEAN NOT NULL DEFAULT FALSE"
+    #             )
+    #         )
+    #     logger.info("✅ Database tables ready")
+    # except Exception as exc:
+    #     logger.error(f"❌ Database table creation failed: {exc}")
+    #     raise
 
-    try:
-        logger.info("Initializing Redis cache...")
-        await init_redis()
-        logger.info("✅ Redis initialized")
-    except Exception as exc:
-        logger.error(f"❌ Redis initialization failed: {exc}")
-        raise
+    # try:
+    #     logger.info("Initializing Redis cache...")
+    #     await init_redis()
+    #     logger.info("✅ Redis initialized")
+    # except Exception as exc:
+    #     logger.error(f"❌ Redis initialization failed: {exc}")
+    #     raise
     
-    try:
-        logger.info("Initializing agent vitality tracker...")
-        await init_vitality_tracker()
-        logger.info("✅ Agent vitality tracker initialized")
-    except Exception as exc:
-        logger.error(f"❌ Vitality tracker initialization failed: {exc}")
-        raise
+    # try:
+    #     logger.info("Initializing agent vitality tracker...")
+    #     await init_vitality_tracker()
+    #     logger.info("✅ Agent vitality tracker initialized")
+    # except Exception as exc:
+    #     logger.error(f"❌ Vitality tracker initialization failed: {exc}")
+    #     raise
     
-    try:
-        logger.info("Initializing session archival job...")
-        await init_archival_job()
-        logger.info("✅ Session archival job initialized")
-    except Exception as exc:
-        logger.error(f"❌ Archival job initialization failed: {exc}")
-        raise
+    # try:
+    #     logger.info("Initializing session archival job...")
+    #     await init_archival_job()
+    #     logger.info("✅ Session archival job initialized")
+    # except Exception as exc:
+    #     logger.error(f"❌ Archival job initialization failed: {exc}")
+    #     raise
     
     logger.info("✅ All background services started")
     
@@ -138,26 +138,26 @@ async def lifespan(app: FastAPI):
     # Shutdown
     logger.info("🛑 Backend shutdown sequence")
     
-    try:
-        logger.info("Stopping session archival job...")
-        await close_archival_job()
-        logger.info("✅ Archival job stopped")
-    except Exception as exc:
-        logger.error(f"Error stopping archival job: {exc}")
+    # try:
+    #     logger.info("Stopping session archival job...")
+    #     await close_archival_job()
+    #     logger.info("✅ Archival job stopped")
+    # except Exception as exc:
+    #     logger.error(f"Error stopping archival job: {exc}")
     
-    try:
-        logger.info("Stopping agent vitality tracker...")
-        await close_vitality_tracker()
-        logger.info("✅ Vitality tracker stopped")
-    except Exception as exc:
-        logger.error(f"Error stopping vitality tracker: {exc}")
+    # try:
+    #     logger.info("Stopping agent vitality tracker...")
+    #     await close_vitality_tracker()
+    #     logger.info("✅ Vitality tracker stopped")
+    # except Exception as exc:
+    #     logger.error(f"Error stopping vitality tracker: {exc}")
     
-    try:
-        logger.info("Closing Redis...")
-        await close_redis()
-        logger.info("✅ Redis closed")
-    except Exception as exc:
-        logger.error(f"Error closing Redis: {exc}")
+    # try:
+    #     logger.info("Closing Redis...")
+    #     await close_redis()
+    #     logger.info("✅ Redis closed")
+    # except Exception as exc:
+    #     logger.error(f"Error closing Redis: {exc}")
     
     logger.info("✅ Shutdown complete")
 

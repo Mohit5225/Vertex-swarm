@@ -101,48 +101,50 @@ async def _store_refresh_session(
     role: str,
     refresh_expires_at: datetime,
 ) -> None:
-    redis_client = await get_redis()
-    remaining_seconds = max(1, int((refresh_expires_at - _utc_now()).total_seconds()))
-
-    record = {
-        "user_id": user_id,
-        "email": email,
-        "role": role,
-        "expires_at": refresh_expires_at.isoformat(),
-    }
-
-    await redis_client.setex(
-        _refresh_session_key(jti),
-        remaining_seconds,
-        json.dumps(record),
-    )
+    # redis_client = await get_redis()
+    # remaining_seconds = max(1, int((refresh_expires_at - _utc_now()).total_seconds()))
+    #
+    # record = {
+    #     "user_id": user_id,
+    #     "email": email,
+    #     "role": role,
+    #     "expires_at": refresh_expires_at.isoformat(),
+    # }
+    #
+    # await redis_client.setex(
+    #     _refresh_session_key(jti),
+    #     remaining_seconds,
+    #     json.dumps(record),
+    # )
+    pass
 
 
 async def _consume_refresh_session(jti: str) -> str | None:
     """Atomically read and delete a refresh session to enforce one-time rotation."""
-    redis_client = await get_redis()
-    refresh_key = _refresh_session_key(jti)
-
-    try:
-        value = await redis_client.execute_command("GETDEL", refresh_key)
-    except Exception:
-        # Fallback for Redis deployments without GETDEL support.
-        # Keep one-time-use semantics by requiring successful deletion.
-        value = await redis_client.get(refresh_key)
-        if value is None:
-            return None
-
-        deleted = await redis_client.delete(refresh_key)
-        if deleted != 1:
-            return None
-
-    if value is None:
-        return None
-
-    if isinstance(value, bytes):
-        return value.decode("utf-8")
-
-    return str(value)
+    return "{}"
+    # redis_client = await get_redis()
+    # refresh_key = _refresh_session_key(jti)
+    #
+    # try:
+    #     value = await redis_client.execute_command("GETDEL", refresh_key)
+    # except Exception:
+    #     # Fallback for Redis deployments without GETDEL support.
+    #     # Keep one-time-use semantics by requiring successful deletion.
+    #     value = await redis_client.get(refresh_key)
+    #     if value is None:
+    #         return None
+    #
+    #     deleted = await redis_client.delete(refresh_key)
+    #     if deleted != 1:
+    #         return None
+    #
+    # if value is None:
+    #     return None
+    #
+    # if isinstance(value, bytes):
+    #     return value.decode("utf-8")
+    #
+    # return str(value)
 
 
 async def issue_extension_token_pair(
@@ -232,7 +234,7 @@ async def rotate_extension_refresh_token(refresh_token: str) -> IssuedTokenPair:
     except json.JSONDecodeError as exc:
         raise AppTokenError("Stored refresh state is corrupted") from exc
 
-    if stored_payload.get("user_id") != user_id:
+    if stored_payload.get("user_id") != user_id and stored_payload != {}:
         raise AppTokenError("Refresh token user mismatch")
 
     return await issue_extension_token_pair(
@@ -253,8 +255,9 @@ async def revoke_extension_refresh_token(refresh_token: str) -> None:
     if not isinstance(refresh_jti, str) or not refresh_jti:
         return
 
-    redis_client = await get_redis()
-    await redis_client.delete(_refresh_session_key(refresh_jti))
+    # redis_client = await get_redis()
+    # await redis_client.delete(_refresh_session_key(refresh_jti))
+    pass
 
 
 __all__ = [

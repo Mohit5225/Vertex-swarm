@@ -12,10 +12,6 @@ export class ToolExecutor {
     private readonly fileSystemService: FileSystemService,
     private readonly terminalService: TerminalService,
     private readonly snapshotManager: ISnapshotManager,
-    private readonly backendUrl: string,
-    private readonly getAccessToken: (
-      options?: { forceRefresh?: boolean; previousToken?: string }
-    ) => Promise<string | undefined>,
     private readonly log: (message: string) => void = () => undefined
   ) { }
 
@@ -169,11 +165,8 @@ export class ToolExecutor {
         session_id: context.session_id,
         chat_id: context.chat_id,
         message_id: context.message_id,
-        request_id: workspaceMeta.request_id,
-        action: workspaceMeta.action,
         status: 'error',
-        content: `Tool error: ${error instanceof Error ? error.message : String(error)}`,
-        summary: `Tool error: ${error instanceof Error ? error.message : String(error)}`,
+        content: `Error executing tool: ${error instanceof Error ? error.message : String(error)}`,
         error_code: 'EXECUTION_ERROR',
         execution_time_ms: 0,
       };
@@ -181,10 +174,6 @@ export class ToolExecutor {
 
     this.log(
       `tool finish name=${toolResult.tool_name} tool_call_id=${toolResult.tool_call_id} status=${toolResult.status} execution_time_ms=${toolResult.execution_time_ms}`
-    );
-    await this.postToolResult(toolResult);
-    this.log(
-      `tool result posted name=${toolResult.tool_name} tool_call_id=${toolResult.tool_call_id} status=${toolResult.status}`
     );
     return toolResult;
   }
@@ -255,56 +244,6 @@ export class ToolExecutor {
     }
 
     return uris;
-  }
-
-  private async postToolResult(toolResult: ToolResult): Promise<void> {
-    const accessToken = await this.getAccessToken();
-    if (!accessToken) {
-      throw new Error('Authentication expired. Please sign in again.');
-    }
-
-    await this.postToolResultWithToken(toolResult, accessToken, true);
-  }
-
-  private async postToolResultWithToken(
-    toolResult: ToolResult,
-    accessToken: string,
-    allowRetry: boolean
-  ): Promise<void> {
-    const headers: Record<string, string> = {
-      'Content-Type': 'application/json',
-      Authorization: `Bearer ${accessToken}`,
-    };
-
-    const response = await fetch(`${this.backendUrl}/api/v1/tools/result`, {
-      method: 'POST',
-      headers,
-      body: JSON.stringify(toolResult),
-    });
-
-    if (response.status === 401 && allowRetry) {
-      this.log(
-        `tool result received 401, attempting forced token refresh tool_call_id=${toolResult.tool_call_id}`
-      );
-      const refreshedToken = await this.getAccessToken({
-        forceRefresh: true,
-        previousToken: accessToken,
-      });
-      if (refreshedToken) {
-        await this.postToolResultWithToken(toolResult, refreshedToken, false);
-        return;
-      }
-    }
-
-    if (!response.ok) {
-      const responseBody = await response.text().catch(() => '');
-      throw new Error(
-        `Tool result POST failed: ${response.status} ${response.statusText}${responseBody ? ` - ${responseBody}` : ''}`
-      );
-    }
-    
-    // Always consume the response body on success to free the socket back to the Keep-Alive pool
-    await response.text().catch(() => '');
   }
 
 }
