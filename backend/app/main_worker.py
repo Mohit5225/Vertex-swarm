@@ -1,0 +1,161 @@
+import asyncio
+import json
+import logging
+import sys
+from typing import Dict, Any
+
+from app.config import WorkerConfig
+from app.nats_client import NATSClient
+from app.stdio_transport import StdioTransport
+from app.orchestrator import LLMOrchestrator
+
+logger = logging.getLogger(__name__)
+
+class WorkerNode:
+    def __init__(self):
+        self.stdio = StdioTransport()
+        self.config: WorkerConfig | None = None
+        self.nats: NATSClient | None = None
+        self.orchestrator: LLMOrchestrator | None = None
+        self.active_sessions: Dict[str, asyncio.Task] = {}
+
+    async def handle_initialize(self, msg_id: int, params: Dict[str, Any]):
+        try:
+            base_path = params.get("base_path")
+            if not base_path:
+                raise ValueError("base_path is required")
+
+            self.config = WorkerConfig(
+                base_path=base_path,
+                llm_key=params.get("llm_key", ""),
+                exa_key=params.get("exa_key", ""),
+                entitlement_token=params.get("entitlement_token", ""),
+                platform=params.get("platform", sys.platform),
+            )
+            
+            # TODO: Add Entitlement JWT validation here if needed
+
+            # Initialize NATS
+            self.nats = NATSClient()
+            await self.nats.connect("nats://127.0.0.1:4222")
+
+            # Initialize Orchestrator
+            self.orchestrator = LLMOrchestrator(self.config, self.nats)
+            # Re-use the existing StdioTransport to avoid stream conflicts
+            self.orchestrator.stdio = self.stdio
+
+            # Respond success
+            await self.stdio.write_message({
+                "jsonrpc": "2.0",
+                "id": msg_id,
+                "result": {
+                    "protocol_version": "1.0",
+                    "status": "ready",
+                    "nats_url": "nats://127.0.0.1:4222"
+                }
+            })
+            logger.info("Worker initialized successfully.")
+        except Exception as e:
+            logger.exception("Initialization failed")
+            await self.stdio.write_message({
+                "jsonrpc": "2.0",
+                "id": msg_id,
+                "error": {
+                    "code": -32000,
+                    "message": f"Initialization failed: {str(e)}"
+                }
+            })
+
+    async def handle_session_start(self, params: Dict[str, Any]):
+        if not self.orchestrator:
+            return
+
+        chat_id = params.get("chat_id")
+        message = params.get("message")
+        if not chat_id or not message:
+            return
+            
+        if chat_id in self.active_sessions:
+            logger.warning(f"Session {chat_id} is already running.")
+            return
+
+        async def run_session():
+            try:
+                await self.orchestrator.handle_session_start(chat_id, message, params)
+            except asyncio.CancelledError:
+                logger.info(f"Session {chat_id} cancelled.")
+            except Exception:
+                logger.exception(f"Session {chat_id} failed.")
+            finally:
+                self.active_sessions.pop(chat_id, None)
+
+        task = asyncio.create_task(run_session())
+        self.active_sessions[chat_id] = task
+
+    async def handle_session_cancel(self, params: Dict[str, Any]):
+        chat_id = params.get("chat_id")
+        if chat_id in self.active_sessions:
+            self.active_sessions[chat_id].cancel()
+            logger.info(f"Cancelled session {chat_id}.")
+
+    async def handle_tool_result(self, params: Dict[str, Any]):
+        if not self.orchestrator:
+            return
+            
+        chat_id = params.get("chat_id")
+        tool_call_id = params.get("tool_call_id")
+        if not chat_id or not tool_call_id:
+            return
+            
+        from app.schemas.tool import ToolResultSchema
+        try:
+            result = ToolResultSchema(**params)
+            await self.orchestrator.handle_tool_result(result)
+        except Exception as e:
+            logger.error(f"Failed to parse tool result: {e}")
+
+    async def run(self):
+        logger.info("Worker started. Waiting for messages on stdio.")
+        while True:
+            try:
+                msg = await self.stdio.read_message()
+                if not msg:
+                    logger.info("EOF received on stdio. Exiting.")
+                    break
+
+                method = msg.get("method")
+                params = msg.get("params", {})
+
+                if method == "initialize":
+                    await self.handle_initialize(msg.get("id", 1), params)
+                elif method == "session/start":
+                    await self.handle_session_start(params)
+                elif method == "session/cancel":
+                    await self.handle_session_cancel(params)
+                elif method == "tool/result":
+                    await self.handle_tool_result(params)
+                else:
+                    logger.warning(f"Unknown method: {method}")
+
+            except Exception as e:
+                logger.exception("Error processing message")
+
+        # Cleanup
+        for task in self.active_sessions.values():
+            task.cancel()
+        if self.nats:
+            await self.nats.close()
+
+if __name__ == "__main__":
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+        stream=sys.stderr
+    )
+    worker = WorkerNode()
+    
+    # We use ProactorEventLoop on Windows for subprocess support if needed, but asyncio.run is usually fine
+    try:
+        asyncio.run(worker.run())
+    except KeyboardInterrupt:
+        pass
