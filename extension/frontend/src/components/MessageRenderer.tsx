@@ -84,6 +84,10 @@ const MessageRenderer: React.FC<Props> = ({ message }) => {
     )
   }
 
+  if (isHistorical && !message.content && blocks.length === 0 && !hasPlanPermissionRequest) {
+    return null
+  }
+
   return (
     <div
       className={`flex py-2 pr-0 ${isUser ? 'justify-end' : 'justify-start'

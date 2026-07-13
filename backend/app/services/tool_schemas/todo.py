@@ -12,15 +12,18 @@ TODO_TOOL_SPEC: dict[str, Any] = {
             "statuses changed; this is always a full replacement, never a partial patch. Mark exactly one "
             "item 'in_progress' at a time; mark it 'done' before starting the next. This tool drives a "
             "persistent execution widget in the UI, so keep the same item ids/order across updates and "
-            "update the widget with this tool instead of restating the checklist in normal assistant prose. CRITICAL: All "
-            "action-specific arguments MUST be nested INSIDE the `payload` object, not at the top level."
+            "update the widget with this tool instead of restating the checklist in normal assistant prose. "
+            "When the checklist is fully completed, you MUST ask the user for permission to clear the widget. "
+            "If they grant permission, use action='clear' to dismiss the widget. "
+            "CRITICAL: All action-specific arguments MUST be nested INSIDE the `payload` object, not at the top level."
         ),
         "parameters": {
             "type": "object",
             "properties": {
                 "action": {
                     "type": "string",
-                    "enum": ["init", "update"],
+                    "enum": ["init", "update", "clear"],
+                    "description": "init creates the list, update modifies statuses, clear removes the widget from the UI."
                 },
                 "request_id": {
                     "type": "string",

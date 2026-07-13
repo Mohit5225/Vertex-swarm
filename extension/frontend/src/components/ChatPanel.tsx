@@ -245,7 +245,7 @@ const LiveFileEditBar: React.FC<{ messages: ChatMessage[] }> = ({ messages }) =>
 
 const ChatPanel: React.FC = () => {
   const { config, logout } = useConfigStore()
-  const { clearMessages, messages, isStreaming, error, chats, currentChatId, currentTodo } =
+  const { clearMessages, messages, isStreaming, error, chats, currentChatId, currentTodo, clearTodo } =
     useChatStore()
   const {
     currentIdeContextEnabled,
@@ -622,7 +622,7 @@ const ChatPanel: React.FC = () => {
           {/* Live file edit bar — shows changes from the active or most recent agent turn.
                Disappears when the user sends a new message. */}
           {showTodoBar && currentTodo && (
-            <TodoWidget items={currentTodo.items} isStreaming={isStreaming} />
+            <TodoWidget items={currentTodo.items} isStreaming={isStreaming} onClose={clearTodo} />
           )}
           <LiveFileEditBar messages={messages} />
 

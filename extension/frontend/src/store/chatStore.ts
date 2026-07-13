@@ -71,6 +71,7 @@ interface ChatState {
   patchMessageId: (tempId: string, realId: string) => void
   truncateAfter: (messageId: string) => void
   setPlanReadyForMessageId: (messageId: string | null) => void
+  clearTodo: () => void
 }
 
 const isTodoItem = (value: unknown): value is TodoItem => {
@@ -120,6 +121,9 @@ const extractTodoStateFromMessages = (messages: ChatMessage[]): TodoState | null
     const events = message.events || []
 
     for (let eventIndex = events.length - 1; eventIndex >= 0; eventIndex -= 1) {
+      if (events[eventIndex].type === 'todo_clear') {
+        return null
+      }
       const todoState = extractTodoStateFromEvent(events[eventIndex], message.id)
       if (todoState) {
         return todoState
@@ -329,7 +333,7 @@ export const useChatStore = create<ChatState>((set) => ({
 
   addMessage: (message: ChatMessage) => {
     set((state) => ({
-      currentTodo: message.type === 'user' ? null : state.currentTodo,
+      currentTodo: state.currentTodo,
       messages: [
         ...state.messages,
         {
@@ -435,7 +439,7 @@ export const useChatStore = create<ChatState>((set) => ({
       return {
         messages,
         activeMessageId,
-        currentTodo: todoState ?? state.currentTodo,
+        currentTodo: normalizedEvent.type === 'todo_clear' ? null : (todoState ?? state.currentTodo),
       }
     })
   },
@@ -504,5 +508,9 @@ export const useChatStore = create<ChatState>((set) => ({
 
   setPlanReadyForMessageId: (messageId: string | null) => {
     set({ planReadyForMessageId: messageId })
+  },
+
+  clearTodo: () => {
+    set({ currentTodo: null })
   },
 }))

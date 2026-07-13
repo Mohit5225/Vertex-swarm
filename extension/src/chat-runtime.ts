@@ -571,6 +571,9 @@ export class VertexSwarmChatRuntime {
               this.post({ type: 'plan-ready', payload: {} });
               return;
             }
+            if (params.event.type === 'done') {
+              this.post({ type: 'cancel-stream' });
+            }
             this.post({ type: 'event', payload: params.event });
             if (params.event.type === 'tool_call') {
               void this.handleToolCallEvent(params.event);
