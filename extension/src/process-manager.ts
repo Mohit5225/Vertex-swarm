@@ -9,15 +9,38 @@ import { RpcClient } from './rpc-client';
 
 export class VertexProcessManager implements vscode.Disposable {
   private natsProcess: cp.ChildProcess | null = null;
-  public backendProcess: cp.ChildProcess | null = null;
-  public rpcClient: RpcClient | null = null;
+  private _backendProcess: cp.ChildProcess | null = null;
+  private _rpcClient: RpcClient | null = null;
   private basePath: string;
+  private natsPort: number = 4222;
+  private hasRegisteredExitHandler: boolean = false;
+  private startPromise: Promise<void> | null = null;
+
+  public get backendProcess() { return this._backendProcess; }
+  public get rpcClient() { return this._rpcClient; }
 
   constructor() {
     this.basePath = path.join(os.homedir(), '.vertex-swarm');
   }
 
   async start(
+    context: vscode.ExtensionContext, 
+    outputChannel: vscode.OutputChannel, 
+    config: VertexConfig,
+    entitlementToken: string
+  ): Promise<void> {
+    if (this.startPromise) {
+      return this.startPromise;
+    }
+    
+    this.startPromise = this._start(context, outputChannel, config, entitlementToken).finally(() => {
+      this.startPromise = null;
+    });
+    
+    return this.startPromise;
+  }
+
+  private async _start(
     context: vscode.ExtensionContext, 
     outputChannel: vscode.OutputChannel, 
     config: VertexConfig,
@@ -35,15 +58,18 @@ export class VertexProcessManager implements vscode.Disposable {
     const natsPath = vscode.Uri.joinPath(context.extensionUri, 'bin', binPlatform, natsExe).fsPath;
     const workerPath = vscode.Uri.joinPath(context.extensionUri, 'bin', binPlatform, workerExe).fsPath;
 
-    const natsDataDir = path.join(this.basePath, 'nats-data');
-
     // Spawn NATS if not already running
     if (!this.natsProcess || this.natsProcess.exitCode !== null) {
+      this.natsPort = await this.getFreePort(4222);
+      
+      const natsDataDir = path.join(this.basePath, `nats-data-${this.natsPort}`);
+      
+      outputChannel.appendLine(`[ProcessManager] Selected NATS port: ${this.natsPort}`);
       outputChannel.appendLine(`[ProcessManager] Spawning NATS: ${natsPath}`);
       this.natsProcess = cp.spawn(natsPath, [
         '--jetstream', 
         '--store_dir', natsDataDir, 
-        '--port', '4222'
+        '--port', this.natsPort.toString()
       ], { stdio: 'pipe' });
 
       this.natsProcess.on('error', (err) => {
@@ -55,8 +81,8 @@ export class VertexProcessManager implements vscode.Disposable {
       });
 
       // Wait for NATS to be ready
-      await this.waitForNats();
-      outputChannel.appendLine(`[ProcessManager] NATS is listening on 4222`);
+      await this.waitForNats(this.natsPort);
+      outputChannel.appendLine(`[ProcessManager] NATS is listening on ${this.natsPort}`);
     } else {
       outputChannel.appendLine(`[ProcessManager] NATS is already running.`);
     }
@@ -78,7 +104,7 @@ export class VertexProcessManager implements vscode.Disposable {
         outputChannel.appendLine(`[ProcessManager] Python Executable: ${devPythonExe}`);
         outputChannel.appendLine(`[ProcessManager] Worker Module: app.main_worker`);
         const backendDir = path.join(context.extensionUri.fsPath, '..', 'backend');
-        this.backendProcess = cp.spawn(devPythonExe, ['-m', 'app.main_worker'], { 
+        this._backendProcess = cp.spawn(devPythonExe, ['-m', 'app.main_worker'], { 
           stdio: ['pipe', 'pipe', 'pipe'],
           cwd: backendDir,
           env: { ...process.env, PYTHONPATH: backendDir }
@@ -86,30 +112,30 @@ export class VertexProcessManager implements vscode.Disposable {
       }
     } else {
       outputChannel.appendLine(`[ProcessManager] Spawning Python Worker (Production Mode)...`);
-      this.backendProcess = cp.spawn(workerPath, [], { stdio: ['pipe', 'pipe', 'pipe'] });
+      this._backendProcess = cp.spawn(workerPath, [], { stdio: ['pipe', 'pipe', 'pipe'] });
     }
 
-    if (this.backendProcess) {
-      this.backendProcess.stderr?.on('data', (data) => {
+    if (this._backendProcess) {
+      this._backendProcess.stderr?.on('data', (data) => {
         outputChannel.appendLine(`[Worker Error] ${data.toString().trim()}`);
       });
-      this.backendProcess.on('error', (err) => {
+      this._backendProcess.on('error', (err) => {
         outputChannel.appendLine(`[ProcessManager] Worker spawn error: ${err.message}`);
       });
-      this.backendProcess.on('exit', (code) => {
+      this._backendProcess.on('exit', (code) => {
         outputChannel.appendLine(`[ProcessManager] Worker exited with code ${code}`);
-        this.rpcClient = null;
-        this.backendProcess = null;
+        this._rpcClient = null;
+        this._backendProcess = null;
       });
 
-      this.rpcClient = new RpcClient(this.backendProcess);
+      this._rpcClient = new RpcClient(this._backendProcess);
       
       // Perform handshake (30s timeout)
       try {
         outputChannel.appendLine(`[ProcessManager] Sending initialize JSON-RPC handshake...`);
         const timeoutMs = 30_000;
         const initResult = await Promise.race([
-          this.rpcClient.sendRequest('initialize', {
+          this._rpcClient.sendRequest('initialize', {
             protocol_version: '1.0',
             base_path: this.basePath,
             llm_key: config.llmKey,
@@ -117,7 +143,8 @@ export class VertexProcessManager implements vscode.Disposable {
             llm_base_url: config.llmBaseUrl,
             llm_model: config.llmModel,
             entitlement_token: entitlementToken,
-            platform: platform
+            platform: platform,
+            nats_port: this.natsPort
           }),
           new Promise((_, reject) =>
             setTimeout(() => reject(new Error(`Worker handshake timed out after ${timeoutMs / 1000}s`)), timeoutMs)
@@ -125,21 +152,28 @@ export class VertexProcessManager implements vscode.Disposable {
         ]);
         
         if (initResult.status === 'ready') {
-            outputChannel.appendLine(`[ProcessManager] Handshake complete. Backend is ready!`);
+            outputChannel.appendLine(`[ProcessManager] Handshake complete. Backend is ready! (NATS URL: ${initResult.nats_url || 'unknown'})`);
         } else {
-            outputChannel.appendLine(`[ProcessManager] Warning: Unexpected handshake result: ${JSON.stringify(initResult)}`);
+            const errorMsg = `Unexpected handshake result: ${JSON.stringify(initResult)}`;
+            outputChannel.appendLine(`[ProcessManager] Error: ${errorMsg}`);
+            this.dispose();
+            throw new Error(errorMsg);
         }
       } catch (err: any) {
         outputChannel.appendLine(`[ProcessManager] Handshake failed: ${err.message || err.code || err}`);
+        this.dispose();
         throw new Error(`Worker initialization failed: ${err.message || err.code || err}`);
       }
     }
     
     // Register exit handlers to clean up if the parent process dies abruptly
-    process.on('exit', () => this.dispose());
+    if (!this.hasRegisteredExitHandler) {
+      process.on('exit', () => this.dispose());
+      this.hasRegisteredExitHandler = true;
+    }
   }
 
-  private async waitForNats(): Promise<void> {
+  private async waitForNats(port: number): Promise<void> {
     return new Promise((resolve, reject) => {
       const maxRetries = 50; // 5s (50 * 100ms)
       let retries = 0;
@@ -159,27 +193,54 @@ export class VertexProcessManager implements vscode.Disposable {
           socket.destroy();
           retries++;
           if (retries >= maxRetries) {
-            reject(new Error('NATS server failed to start on port 4222 within 5 seconds'));
+            reject(new Error(`NATS server failed to start on port ${port} within 5 seconds`));
           } else {
             setTimeout(tryConnect, 100);
           }
         });
-        socket.connect(4222, '127.0.0.1');
+        socket.connect(port, '127.0.0.1');
       };
 
       tryConnect();
     });
   }
 
+  private async getFreePort(startPort: number): Promise<number> {
+    return new Promise((resolve, reject) => {
+      const server = net.createServer();
+      
+      server.on('error', (err: any) => {
+        if (err.code === 'EADDRINUSE') {
+          const randomServer = net.createServer();
+          randomServer.on('error', (randomErr) => reject(randomErr));
+          randomServer.listen(0, '127.0.0.1', () => {
+            const port = (randomServer.address() as net.AddressInfo).port;
+            randomServer.close(() => resolve(port));
+          });
+        } else {
+          reject(err);
+        }
+      });
+
+      server.listen(startPort, '127.0.0.1', () => {
+        const port = (server.address() as net.AddressInfo).port;
+        server.close(() => resolve(port));
+      });
+    });
+  }
+
   public dispose() {
-    if (this.rpcClient) {
-      this.rpcClient.dispose();
+    if (this._rpcClient) {
+      this._rpcClient.dispose();
+      this._rpcClient = null;
     }
-    if (this.backendProcess) {
-      this.backendProcess.kill();
+    if (this._backendProcess) {
+      this._backendProcess.kill();
+      this._backendProcess = null;
     }
     if (this.natsProcess) {
       this.natsProcess.kill();
+      this.natsProcess = null;
     }
   }
 }

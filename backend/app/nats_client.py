@@ -52,7 +52,7 @@ class NATSClient:
                 config.ttl = ttl
             return await self.js.create_key_value(config)
 
-    async def kv_set(self, bucket: str, key: str, value: str, ttl: int = None) -> None:
+    async def kv_set(self, bucket: str, key: str, value: str, ttl: Optional[int] = None) -> None:
         kv = await self._get_or_create_kv(bucket, ttl)
         await kv.put(key, value.encode('utf-8'))
         

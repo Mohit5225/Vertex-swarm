@@ -34,6 +34,7 @@ export interface VertexSwarmChatRuntimeOptions {
   authLog?: (message: string) => void;
   postMessage: (message: object) => void;
   planDocumentProvider?: PlanDocumentProvider;
+  processManager: VertexProcessManager;
 }
 
 export class VertexSwarmChatRuntime {
@@ -57,10 +58,11 @@ export class VertexSwarmChatRuntime {
   private readonly toolExecutor: ToolExecutor;
   private readonly processedToolCallIds = new Set<string>();
 
-  private processManager = new VertexProcessManager();
+  private processManager: VertexProcessManager;
   private currentChatId: string | null = null;
   private streamCancellationRequested: boolean = false;
   private staticContext: { os: string; workspaceFolders: string[] } | null = null;
+  private lastRegisteredRpcClient: any = null;
 
   constructor(options: VertexSwarmChatRuntimeOptions) {
     this.tokenManager = options.tokenManager;
@@ -85,6 +87,7 @@ export class VertexSwarmChatRuntime {
       this.snapshotManager,
       (message: string) => this.log(message)
     );
+    this.processManager = options.processManager;
   }
 
   private log(message: string) {
@@ -195,8 +198,12 @@ export class VertexSwarmChatRuntime {
           }
 
           if (!this.processManager.rpcClient) {
-            this.post({ type: 'error', payload: 'Backend not running' });
-            return;
+            this.log('Backend not running during stream start, attempting respawn...');
+            const success = await this.syncWebviewConfig();
+            if (!success || !this.processManager.rpcClient) {
+              this.post({ type: 'error', payload: 'Backend not running and could not be restarted' });
+              return;
+            }
           }
 
           const activeEditor = vscode.window.activeTextEditor;
@@ -551,41 +558,42 @@ export class VertexSwarmChatRuntime {
     }
 
     if (!this.processManager.rpcClient) {
+      this.log('Backend not running, attempting lazy respawn...');
       try {
         const config = await this.configManager.getConfig();
-        if (session.status === 'valid') {
-          await this.processManager.start(this.context, this.outputChannel, config, session.token);
-        } else {
-          throw new Error('Cannot start process manager without a valid token');
-        }
-        
-        this.processManager.rpcClient!.on('stream/event', (params: any) => {
-          if (params.chat_id === this.currentChatId) {
-            this.log(this.describeEvent(params.event));
-            if (params.event.type === 'plan_chunk') {
-              this.planDocumentProvider?.appendPlanChunk(params.chat_id, params.event.content);
-              return;
-            }
-            if (params.event.type === 'plan_ready') {
-              void this.planDocumentProvider?.openPlanTab(params.chat_id);
-              this.post({ type: 'plan-ready', payload: {} });
-              return;
-            }
-            if (params.event.type === 'done') {
-              this.post({ type: 'cancel-stream' });
-            }
-            this.post({ type: 'event', payload: params.event });
-            if (params.event.type === 'tool_call') {
-              void this.handleToolCallEvent(params.event);
-            }
-          }
-        });
-      } catch (e: any) {
-        this.log(`Failed to start process manager: ${e.message}`);
-        vscode.window.showErrorMessage(`Failed to start Vertex backend: ${e.message}`);
-        this.post({ type: 'config-missing', payload: { reason: e.message } });
+        const sessionToken = session.status === 'valid' ? session.token : '';
+        await this.processManager.start(this.context, this.outputChannel, config, sessionToken);
+      } catch (err: any) {
+        this.log(`Failed to respawn backend: ${err.message}`);
+        this.post({ type: 'config-missing', payload: { reason: 'Backend process not running' } });
         return false;
       }
+    }
+
+    const rpcClient = this.processManager.rpcClient;
+    if (rpcClient && rpcClient !== this.lastRegisteredRpcClient) {
+      this.lastRegisteredRpcClient = rpcClient;
+      rpcClient.on('stream/event', (params: any) => {
+        if (params.chat_id === this.currentChatId) {
+          this.log(this.describeEvent(params.event));
+          if (params.event.type === 'plan_chunk') {
+            this.planDocumentProvider?.appendPlanChunk(params.chat_id, params.event.content);
+            return;
+          }
+          if (params.event.type === 'plan_ready') {
+            void this.planDocumentProvider?.openPlanTab(params.chat_id);
+            this.post({ type: 'plan-ready', payload: {} });
+            return;
+          }
+          if (params.event.type === 'done') {
+            this.post({ type: 'cancel-stream' });
+          }
+          this.post({ type: 'event', payload: params.event });
+          if (params.event.type === 'tool_call') {
+            void this.handleToolCallEvent(params.event);
+          }
+        }
+      });
     }
 
     const config = await this.configManager.getConfig();

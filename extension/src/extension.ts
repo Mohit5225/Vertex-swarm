@@ -7,6 +7,7 @@ import { VertexSwarmChatParticipant } from './chat-participant';
 import { SnapshotContentProvider, SNAPSHOT_SCHEME } from './snapshot/snapshot-content-provider';
 import { SnapshotGarbageCollector } from './snapshot/garbage-collector';
 import { PlanDocumentProvider } from './plan-document-provider';
+import { VertexProcessManager } from './process-manager';
 import * as path from 'path';
 import * as os from 'os';
 
@@ -61,6 +62,20 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   const tokenManager = new TokenManager(context.secrets);
   const oauthHandler = new OAuthHandler(tokenManager, logAuthToOutput);
   const configManager = new ConfigManager(context);
+  
+  const processManager = new VertexProcessManager();
+  context.subscriptions.push(processManager);
+
+  // Initialize backend synchronously, blocking activation until ready
+  try {
+    const config = await configManager.getConfig();
+    const session = await tokenManager.getSession();
+    const token = session.status === 'valid' ? session.token : '';
+    await processManager.start(context, outputChannel, config, token);
+  } catch (err: any) {
+    outputChannel.appendLine(`[Extension] Failed to start process manager: ${err.message}`);
+    vscode.window.showErrorMessage(`Failed to start Vertex Swarm backend: ${err.message}`);
+  }
 
   const chatParticipantAdapter = new VertexSwarmChatParticipant(
     context,
@@ -68,7 +83,8 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     oauthHandler,
     configManager,
     outputChannel,
-    logAuthToOutput
+    logAuthToOutput,
+    processManager
   );
   const chatParticipant = vscode.chat.createChatParticipant(
     VertexSwarmChatParticipant.participantId,
@@ -93,7 +109,8 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     context,
     outputChannel,
     logAuthToOutput,
-    planDocumentProvider
+    planDocumentProvider,
+    processManager
   );
 
   context.subscriptions.push(

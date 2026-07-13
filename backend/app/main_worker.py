@@ -42,8 +42,10 @@ class WorkerNode:
             # TODO: Add Entitlement JWT validation here if needed
 
             # Initialize NATS
+            nats_port = params.get("nats_port", 4222)
+            nats_url = f"nats://127.0.0.1:{nats_port}"
             self.nats = NATSClient()
-            await self.nats.connect("nats://127.0.0.1:4222")
+            await self.nats.connect(nats_url)
 
             # Initialize Orchestrator
             self.orchestrator = LLMOrchestrator(self.config, self.nats)
@@ -57,7 +59,7 @@ class WorkerNode:
                 "result": {
                     "protocol_version": "1.0",
                     "status": "ready",
-                    "nats_url": "nats://127.0.0.1:4222"
+                    "nats_url": nats_url
                 }
             })
             logger.info("Worker initialized successfully.")
