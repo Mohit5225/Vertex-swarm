@@ -663,14 +663,17 @@ export class VertexSwarmChatRuntime {
 
   private extractToolCallPayload(event: SessionEvent): ToolCallPayload | null {
     const metadata = event.metadata ?? {};
+    const root = event as any;
 
-    const tool_call_id = this.metadataString(metadata, 'tool_call_id');
+    const tool_call_id = this.metadataString(metadata, 'tool_call_id') || this.metadataString(root, 'tool_call_id');
     const tool_name = this.metadataString(metadata, 'tool_name')
-      || this.metadataString(metadata, 'toolName');
-    const session_id = this.metadataString(metadata, 'session_id');
-    const chat_id = this.metadataString(metadata, 'chat_id') || this.currentChatId;
-    const message_id = this.metadataString(metadata, 'message_id');
-    const args = this.metadataObject(metadata, 'args') ?? {};
+      || this.metadataString(metadata, 'toolName')
+      || this.metadataString(root, 'tool_name')
+      || this.metadataString(root, 'toolName');
+    const session_id = this.metadataString(metadata, 'session_id') || this.metadataString(root, 'session_id');
+    const chat_id = this.metadataString(metadata, 'chat_id') || this.metadataString(root, 'chat_id') || this.currentChatId;
+    const message_id = this.metadataString(metadata, 'message_id') || this.metadataString(root, 'message_id');
+    const args = this.metadataObject(metadata, 'args') ?? this.metadataObject(root, 'args') ?? {};
 
     if (!tool_call_id || !tool_name || !session_id || !chat_id || !message_id) {
       return null;
@@ -705,14 +708,26 @@ export class VertexSwarmChatRuntime {
     this.processedToolCallIds.add(payload.tool_call_id);
 
     try {
+      const startTime = Date.now();
       const result = await this.toolExecutor.handle(payload);
+      const executionTime = Date.now() - startTime;
+      
       if (this.processManager.rpcClient) {
         this.processManager.rpcClient.sendNotification('tool/result', {
-          chat_id: payload.chat_id,
+          tool_name: payload.tool_name,
           tool_call_id: payload.tool_call_id,
+          session_id: payload.session_id,
+          chat_id: payload.chat_id,
+          message_id: payload.message_id,
           status: result.status,
           content: result.content,
-          data: result.data || {}
+          data: result.data || {},
+          execution_time_ms: executionTime,
+          action: result.action,
+          request_id: result.request_id,
+          summary: result.summary,
+          error_code: result.error_code,
+          conflict: result.conflict
         });
       }
     } catch (error) {

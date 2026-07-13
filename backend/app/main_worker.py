@@ -125,9 +125,9 @@ class WorkerNode:
             return
         
         if "llm_key" in params:
-            self.orchestrator.config.llm_api_key = params["llm_key"]
+            self.orchestrator.config.llm_key = params["llm_key"]
         if "exa_key" in params:
-            self.orchestrator.config.exa_api_key = params["exa_key"]
+            self.orchestrator.config.exa_key = params["exa_key"]
         if "llm_base_url" in params:
             self.orchestrator.config.llm_base_url = params["llm_base_url"]
         if "llm_model" in params:
@@ -168,16 +168,7 @@ class WorkerNode:
         if self.nats:
             await self.nats.close()
 
-    async def handle_update_keys(self, params: Dict[str, Any]):
-        if not self.config:
-            return
-        llm_key = params.get("llm_key")
-        if llm_key is not None:
-            self.config.llm_key = llm_key
-        exa_key = params.get("exa_key")
-        if exa_key is not None:
-            self.config.exa_key = exa_key
-        logger.info("Updated API keys dynamically.")
+
 
 def main():
     logging.basicConfig(
