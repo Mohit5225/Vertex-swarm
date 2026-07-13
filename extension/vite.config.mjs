@@ -17,6 +17,7 @@ export default defineConfig({
       external: [
         'vscode',
         'http', 'path', 'fs', 'child_process', 'crypto', 'os', 'fs/promises',
+        'net', 'events',
         /node:.*/
       ],
       output: {

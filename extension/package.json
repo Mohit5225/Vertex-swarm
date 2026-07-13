@@ -97,6 +97,16 @@
           "minimum": 1,
           "maximum": 7,
           "description": "How many days to keep undo snapshots before garbage collection deletes them."
+        },
+        "vertexSwarm.llmBaseUrl": {
+          "type": "string",
+          "default": "https://api.deepseek.com/v1",
+          "description": "Base URL for the LLM API"
+        },
+        "vertexSwarm.llmModel": {
+          "type": "string",
+          "default": "deepseek-chat",
+          "description": "Model identifier to use for inference"
         }
       }
     }

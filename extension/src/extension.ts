@@ -1,6 +1,7 @@
 import * as vscode from 'vscode';
 import { TokenManager } from './token-manager';
 import { OAuthHandler } from './oauth-handler';
+import { ConfigManager } from './config-manager';
 import { VertexSwarmSidebarProvider } from './webview-provider';
 import { VertexSwarmChatParticipant } from './chat-participant';
 import { SnapshotContentProvider, SNAPSHOT_SCHEME } from './snapshot/snapshot-content-provider';
@@ -59,11 +60,13 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 
   const tokenManager = new TokenManager(context.secrets);
   const oauthHandler = new OAuthHandler(tokenManager, logAuthToOutput);
+  const configManager = new ConfigManager(context);
 
   const chatParticipantAdapter = new VertexSwarmChatParticipant(
     context,
     tokenManager,
     oauthHandler,
+    configManager,
     outputChannel,
     logAuthToOutput
   );
@@ -86,6 +89,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     context.extensionUri,
     tokenManager,
     oauthHandler,
+    configManager,
     context,
     outputChannel,
     logAuthToOutput,
@@ -142,7 +146,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       await tokenManager.clearToken();
 
       // Reset the sidebar locally without redirecting the user elsewhere.
-      await sidebarProvider.handleLogout();
+      // Deprecated in favor of the frontend component's logout calling chat-runtime.
     })
   );
 }

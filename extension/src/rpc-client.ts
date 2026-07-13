@@ -17,8 +17,21 @@ export class RpcClient extends EventEmitter implements vscode.Disposable {
     }
 
     this.child.stdout.on('data', this.handleData.bind(this));
-    this.child.on('error', (err) => this.emit('error', err));
-    this.child.on('exit', (code) => this.emit('exit', code));
+    this.child.on('error', (err) => {
+      this.rejectAllPending(err);
+      this.emit('error', err);
+    });
+    this.child.on('exit', (code) => {
+      this.rejectAllPending(new Error(`Process exited with code ${code}`));
+      this.emit('exit', code);
+    });
+  }
+
+  private rejectAllPending(error: Error) {
+    for (const [id, req] of this.pendingRequests.entries()) {
+      req.reject(error);
+    }
+    this.pendingRequests.clear();
   }
 
   private handleData(chunk: Buffer) {

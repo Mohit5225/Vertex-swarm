@@ -61,7 +61,7 @@ class LLMOrchestrator:
             {"prompt": prompt, "task_type": task_type, "timeout": timeout, "depth": depth},
             timeout=5.0
         )
-        response = json.loads(reply.data)
+        response = reply
         return response["agent_id"]
 
     async def handle_session_start(self, chat_id: str, message: str, context: dict) -> None:
@@ -294,7 +294,7 @@ async def _run_agent_loop_impl(
         existing_active_categories = state.get("working_memory", {}).get("active_tool_categories", [])
         existing_tool_memory = state.get("working_memory", {})
 
-    await orchestrator.file_store.append_message(chat_id, "user", message)
+    await orchestrator.file_store.append_message(chat_id, "user", message, message_id=request_message_id)
     history_raw = await orchestrator.file_store.read_messages(chat_id)
 
     llm_messages = []
@@ -939,7 +939,7 @@ async def _run_agent_loop_impl(
             )
         )
 
-    await orchestrator.file_store.append_message(chat_id, "assistant", full_response, events=trace_events)
+    await orchestrator.file_store.append_message(chat_id, "assistant", full_response, events=trace_events, message_id=f"msg_{uuid4().hex[:12]}")
 
     logger.info(
         "final response completed user_id=%s chat_id=%s session_id=%s message_id=%s failed=%s trace_events=%s response_chars=%s response_preview=%s",

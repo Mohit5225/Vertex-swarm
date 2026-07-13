@@ -1,6 +1,5 @@
 import * as vscode from 'vscode';
-import { TokenManager, type StoredSession } from './token-manager';
-import { OAuthHandler } from './oauth-handler';
+import { ConfigManager } from './config-manager';
 import { VertexProcessManager } from './process-manager';
 import { FileSystemService } from './tools/file-system-service';
 import { ToolExecutor } from './tools/tool-executor';
@@ -9,6 +8,9 @@ import { DiskSnapshotManager } from './snapshot/snapshot-manager';
 import { TerminalService } from './tools/terminal-service';
 import { createRequestContext } from './request-context';
 import { PlanDocumentProvider } from './plan-document-provider';
+import { LocalChatStore } from './local-chat-store';
+import { TokenManager } from './token-manager';
+import { OAuthHandler } from './oauth-handler';
 import type {
   WebviewToExtensionMessage,
   SessionEvent,
@@ -22,37 +24,15 @@ import type {
   ToolCallPayload,
 } from './types/index';
 
-const BACKEND_URL = process.env.VERTEX_BACKEND_URL || 'http://127.0.0.1:8000';
-
-interface ChatMessagesResponse {
-  chatId: string;
-  ideContextEnabled: boolean;
-  messages: ChatMessageData[];
-}
-
-interface BackendAuthUser {
-  id: string;
-  email?: string;
-  role?: string;
-}
-
-interface BackendAuthTokenResponse {
-  access_token: string;
-  refresh_token: string;
-  token_type: string;
-  expires_in: number;
-  expires_at: string;
-  user?: BackendAuthUser;
-}
 
 export interface VertexSwarmChatRuntimeOptions {
   tokenManager: TokenManager;
   oauthHandler: OAuthHandler;
+  configManager: ConfigManager;
   context: vscode.ExtensionContext;
   outputChannel: vscode.OutputChannel;
   authLog?: (message: string) => void;
   postMessage: (message: object) => void;
-  backendUrl?: string;
   planDocumentProvider?: PlanDocumentProvider;
 }
 
@@ -61,9 +41,10 @@ export class VertexSwarmChatRuntime {
   private static readonly TOKEN_REFRESH_BUFFER_MS = 12 * 60 * 1000;
   private static readonly APP_TOKEN_ISSUER = process.env.VERTEX_APP_TOKEN_ISSUER || 'vertex-swarm-backend';
 
-  private readonly backendUrl: string;
+  private readonly chatStore = new LocalChatStore();
   private readonly tokenManager: TokenManager;
   private readonly oauthHandler: OAuthHandler;
+  private readonly configManager: ConfigManager;
   private readonly context: vscode.ExtensionContext;
   private readonly outputChannel: vscode.OutputChannel;
   private readonly authLog?: (message: string) => void;
@@ -79,14 +60,12 @@ export class VertexSwarmChatRuntime {
   private processManager = new VertexProcessManager();
   private currentChatId: string | null = null;
   private streamCancellationRequested: boolean = false;
-  private static authResetInProgress = false;
-  private static refreshInFlight: Promise<StoredSession> | null = null;
   private staticContext: { os: string; workspaceFolders: string[] } | null = null;
 
   constructor(options: VertexSwarmChatRuntimeOptions) {
-    this.backendUrl = options.backendUrl || BACKEND_URL;
     this.tokenManager = options.tokenManager;
     this.oauthHandler = options.oauthHandler;
+    this.configManager = options.configManager;
     this.context = options.context;
     this.outputChannel = options.outputChannel;
     this.authLog = options.authLog;
@@ -108,6 +87,13 @@ export class VertexSwarmChatRuntime {
     );
   }
 
+  private log(message: string) {
+    this.outputChannel.appendLine(`[${new Date().toISOString()}] [ChatRuntime] ${message}`);
+  }
+
+  private post(message: object) {
+    this.postMessage(message);
+  }
   private getStaticContext(): { os: string; workspaceFolders: string[] } {
     if (!this.staticContext) {
       this.staticContext = {
@@ -125,34 +111,34 @@ export class VertexSwarmChatRuntime {
     }
     switch (message.type) {
       case 'open-browser': {
-        this.log('starting OAuth browser flow');
-        const success = await this.oauthHandler.startAuthFlow(true);
-        if (success) {
-          this.log('OAuth flow completed successfully');
-          const hasValidSession = await this.syncWebviewSession();
-          if (hasValidSession) {
-            await this.sendChatList();
-          }
+        this.log('open-browser requested');
+        try {
+          await this.oauthHandler.startAuthFlow(true);
+          await this.syncWebviewConfig();
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          this.log(`Failed to complete OAuth flow: ${message}`);
+          this.post({ type: 'error', payload: `Login failed: ${message}` });
         }
         break;
       }
 
       case 'copy-link': {
-        this.log('starting OAuth clipboard flow');
-        const success = await this.oauthHandler.startAuthFlow(false);
-        if (success) {
-          this.log('OAuth flow completed successfully via clipboard');
-          const hasValidSession = await this.syncWebviewSession();
-          if (hasValidSession) {
-            await this.sendChatList();
-          }
+        this.log('copy-link requested');
+        try {
+          await this.oauthHandler.startAuthFlow(false);
+          await this.syncWebviewConfig();
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          this.log(`Failed to generate sign-in link: ${message}`);
+          vscode.window.showErrorMessage('Failed to generate sign-in link.');
         }
         break;
       }
 
       case 'request-session': {
         this.log('webview requested current session');
-        const hasValidSession = await this.syncWebviewSession();
+        const hasValidSession = await this.syncWebviewConfig();
         if (hasValidSession) {
           await this.sendChatList();
         }
@@ -175,15 +161,12 @@ export class VertexSwarmChatRuntime {
       case 'start-stream': {
         this.streamCancellationRequested = false;
         const payload = message.payload as StreamStartPayload;
-        const token = await this.getValidToken();
-
-        if (!token) {
-          return;
-        }
+        // Local backend ignores entitlement token for now, just pass a dummy value
+        const token = 'local_dev_token';
 
         try {
           const ideContextEnabled = Boolean(payload.ideContextEnabled);
-          const chatId = this.currentChatId ?? await this.createChat(token, ideContextEnabled);
+          const chatId = this.currentChatId ?? await this.createChat(ideContextEnabled);
           
           if (this.streamCancellationRequested) {
             this.log(`Stream cancelled before creation finished`);
@@ -200,7 +183,7 @@ export class VertexSwarmChatRuntime {
           }
 
           this.currentChatId = chatId;
-          await this.sendChatList(token);
+          await this.sendChatList();
 
           const workspaceSkeleton = ideContextEnabled
             ? await this.workspaceStore.getSkeleton()
@@ -261,57 +244,39 @@ export class VertexSwarmChatRuntime {
             });
           }
           if (this.currentChatId === chatId) {
-            await this.sendChatList(token);
+            await this.sendChatList();
           }
         } catch (error) {
           const errorMessage = error instanceof Error ? error.message : 'Unknown error';
           console.error('Failed to start stream:', errorMessage);
-          if (!this.isUnauthorizedError(errorMessage)) {
-            this.post({ type: 'error', payload: errorMessage });
-          }
+          this.post({ type: 'error', payload: errorMessage });
         }
         break;
       }
 
       case 'open-chat': {
         const payload = message.payload as OpenChatPayload;
-        const token = await this.getValidToken();
-
-        if (!token) {
-          return;
-        }
-
         try {
           this.log(`webview requested open chat chat_id=${payload.chatId}`);
-          await this.openChat(token, payload.chatId);
+          await this.openChat(payload.chatId);
         } catch (error) {
           const errorMessage = error instanceof Error ? error.message : 'Unknown error';
           console.error('Failed to open chat:', errorMessage);
-          if (!this.isUnauthorizedError(errorMessage)) {
-            this.post({ type: 'error', payload: errorMessage });
-          }
+          this.post({ type: 'error', payload: errorMessage });
         }
         break;
       }
 
       case 'set-ide-context': {
         const payload = message.payload as SetIdeContextPayload;
-        const token = await this.getValidToken();
-
-        if (!token) {
-          return;
-        }
-
         try {
           this.log(`updating IDE context chat_id=${payload.chatId} enabled=${payload.enabled}`);
-          await this.updateChatIdeContext(token, payload.chatId, payload.enabled);
-          await this.sendChatList(token);
+          await this.updateChatIdeContext(payload.chatId, payload.enabled);
+          await this.sendChatList();
         } catch (error) {
           const errorMessage = error instanceof Error ? error.message : 'Unknown error';
-          if (!this.isUnauthorizedError(errorMessage)) {
-            console.error('Failed to update IDE context state:', errorMessage);
-            this.post({ type: 'error', payload: errorMessage });
-          }
+          console.error('Failed to update IDE context state:', errorMessage);
+          this.post({ type: 'error', payload: errorMessage });
         }
         break;
       }
@@ -347,6 +312,7 @@ export class VertexSwarmChatRuntime {
         this.log('logout requested from webview');
         this.currentChatId = null;
         await vscode.commands.executeCommand('vertex-swarm.logout');
+        await this.handleLogout('User initiated logout');
         break;
       }
 
@@ -441,27 +407,40 @@ export class VertexSwarmChatRuntime {
         break;
       }
 
+      case 'save-config': {
+        const payload = message.payload as { llmBaseUrl?: string, llmModel?: string, llmKey?: string, exaKey?: string };
+        await this.configManager.updateConfig(payload);
+        
+        // If backend is running, update it live
+        if (this.processManager?.rpcClient) {
+          this.log('sending config/update_keys to running backend');
+          await this.processManager.rpcClient.sendNotification('config/update_keys', {
+            llm_base_url: payload.llmBaseUrl,
+            llm_model: payload.llmModel,
+            llm_key: payload.llmKey?.trim(),
+            exa_key: payload.exaKey?.trim()
+          });
+        }
+        
+        // Notify frontend
+        const hasConfig = await this.configManager.hasValidConfig();
+        if (hasConfig) {
+          await this.syncWebviewConfig();
+        }
+        break;
+      }
+
       case 'truncate-messages': {
         const payload = message.payload as any;
         const { chatId, messageId, messageText } = payload;
         this.log(`truncate-messages requested chat_id=${chatId} message_id=${messageId}`);
-        const token = await this.getValidToken();
-        if (!token || !chatId || !messageId) {
-          this.log('truncate-messages: missing token or ids');
+        
+        if (!chatId || !messageId) {
+          this.log('truncate-messages: missing ids');
           break;
         }
         try {
-          const resp = await fetch(
-            `${this.backendUrl}/api/v1/chats/${chatId}/messages/truncate-after/${messageId}`,
-            {
-              method: 'DELETE',
-              headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
-            }
-          );
-          if (!resp.ok) {
-            throw new Error(`Truncate failed: ${resp.status}`);
-          }
-          const result = await resp.json() as { sessionId: string; deletedCount: number };
+          const result = await this.chatStore.truncateMessages(chatId, messageId);
           this.log(`truncate-messages: deleted ${result.deletedCount} messages session_id=${result.sessionId}`);
 
           // Restore snapshot for this turn (graceful if none exists)
@@ -496,77 +475,89 @@ export class VertexSwarmChatRuntime {
   }
 
   public async handleLogout(reason?: string): Promise<void> {
-    this.log(`handling logout${reason ? ` reason="${reason}"` : ''}`);
-    const activeChatId = this.currentChatId;
-    this.currentChatId = null;
-    this.currentChatId = null;
-    if (this.processManager) {
-      this.processManager.dispose();
-      this.processManager = new VertexProcessManager();
+    await this.tokenManager.clearToken();
+    this.post({ type: 'logged-out', payload: { reason: reason || null } });
+  }
+
+  private async refreshSessionToken(refreshToken: string): Promise<boolean> {
+    const BACKEND_URL = process.env.VERTEX_BACKEND_URL || 'http://127.0.0.1:8000';
+    try {
+      const abortController = new AbortController();
+      const timeoutHandle = setTimeout(() => abortController.abort(), 5000);
+      try {
+        const response = await fetch(`${BACKEND_URL}/api/v1/auth/refresh`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Accept: 'application/json',
+          },
+          body: JSON.stringify({ refresh_token: refreshToken }),
+          signal: abortController.signal,
+        });
+
+        if (!response.ok) {
+          this.log(`Token refresh rejected by backend, status=${response.status}`);
+          return false;
+        }
+
+        const data = await response.json() as any;
+        const currentSession = await this.tokenManager.getSession();
+        const user = currentSession.status !== 'missing' && currentSession.userMetadata
+          ? {
+              id: String(currentSession.userMetadata.id || ''),
+              email: String(currentSession.userMetadata.email || ''),
+              provider: String(currentSession.userMetadata.provider || 'google')
+            }
+          : { id: '', email: '', provider: 'google' };
+
+        await this.tokenManager.setToken(data.access_token, user, data.refresh_token);
+        this.log('Successfully refreshed JWT via backend');
+        return true;
+      } finally {
+        clearTimeout(timeoutHandle);
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      this.log(`Backend token refresh failed: ${message}`);
+      return false;
     }
-    this.postLoggedOut(reason);
   }
 
-  private post(message: object): void {
-    this.postMessage(message);
-  }
+  public async syncWebviewConfig(): Promise<boolean> {
+    let session = await this.tokenManager.getSession();
+    
+    if (session.status === 'expired' && session.refreshToken) {
+      this.log('Session expired, attempting automatic JWT refresh...');
+      const refreshed = await this.refreshSessionToken(session.refreshToken);
+      if (refreshed) {
+        session = await this.tokenManager.getSession();
+      }
+    }
 
-  private log(message: string): void {
-    this.outputChannel.appendLine(`[${new Date().toISOString()}] ${message}`);
-  }
-
-  private logAuth(message: string): void {
-    this.authLog?.(`[AuthRuntime] ${message}`);
-  }
-
-  private postLoggedOut(reason?: string): void {
-    this.log(`posting logged-out state${reason ? ` reason="${reason}"` : ''}`);
-    this.post({
-      type: 'logged-out',
-      payload: { reason: reason ?? null },
-    });
-  }
-
-  private buildAuthenticatedSessionData(
-    userMetadata: Record<string, unknown>
-  ): AuthenticatedSessionData {
-    return {
-      user: {
-        id: (userMetadata.id as string) || '',
-        email: (userMetadata.email as string) || '',
-        provider: (userMetadata.provider as string) || 'neon-auth',
-      },
-    };
-  }
-
-  private postAuthenticated(session: Extract<StoredSession, { status: 'valid' }>): void {
-    this.post({
-      type: 'authenticated',
-      payload: this.buildAuthenticatedSessionData(session.userMetadata),
-    });
-  }
-
-  private async syncWebviewSession(): Promise<boolean> {
-    const session = await this.getRestoredSession();
-    this.log(`session lookup completed status=${session.status}`);
-    this.logAuth(`session lookup completed status=${session.status}`);
-
-    if (session.status === 'expired') {
-      await vscode.window.showInformationMessage(
-        'Vertex Swarm session expired. Please sign in again.'
-      );
-      await this.handleLogout('Vertex Swarm session expired. Please sign in again.');
+    if (session.status === 'missing' || session.status === 'expired') {
+      this.post({ type: 'auth-required' });
       return false;
     }
 
-    if (session.status !== 'valid') {
-      this.postLoggedOut();
+    // Pass user payload on successful auth check
+    if (session.status === 'valid' && session.userMetadata) {
+      this.post({ type: 'authenticated', payload: { user: session.userMetadata } });
+    }
+
+    const hasConfig = await this.configManager.hasValidConfig();
+    if (!hasConfig) {
+      this.post({ type: 'config-missing' });
       return false;
     }
 
     if (!this.processManager.rpcClient) {
       try {
-        await this.processManager.start(this.context, this.outputChannel, session.token);
+        const config = await this.configManager.getConfig();
+        if (session.status === 'valid') {
+          await this.processManager.start(this.context, this.outputChannel, config, session.token);
+        } else {
+          throw new Error('Cannot start process manager without a valid token');
+        }
         
         this.processManager.rpcClient!.on('stream/event', (params: any) => {
           if (params.chat_id === this.currentChatId) {
@@ -589,445 +580,38 @@ export class VertexSwarmChatRuntime {
       } catch (e: any) {
         this.log(`Failed to start process manager: ${e.message}`);
         vscode.window.showErrorMessage(`Failed to start Vertex backend: ${e.message}`);
-        this.postLoggedOut(e.message);
+        this.post({ type: 'config-missing', payload: { reason: e.message } });
         return false;
       }
     }
 
-    this.postAuthenticated(session);
+    const config = await this.configManager.getConfig();
+    this.post({
+      type: 'config-ready',
+      payload: { llmBaseUrl: config.llmBaseUrl, llmModel: config.llmModel }
+    });
+
+    const vscodeConfig = vscode.workspace.getConfiguration('vertexSwarm');
+    this.post({
+      type: 'config-state',
+      payload: { snapshotRetentionDays: vscodeConfig.get<number>('snapshotRetentionDays') || 30 },
+    });
+
     return true;
   }
 
-  private async getValidToken(
-    options: { forceRefresh?: boolean; previousToken?: string } = {}
-  ): Promise<string | undefined> {
-    const session = await this.getRestoredSession(options);
-
-    if (session.status === 'valid') {
-      return session.token;
-    }
-
-    if (session.status === 'expired') {
-      await vscode.window.showInformationMessage(
-        'Vertex Swarm session expired. Please sign in again.'
-      );
-    }
-
-    await this.handleLogout(
-      session.status === 'expired'
-        ? 'Vertex Swarm session expired. Please sign in again.'
-        : undefined
-    );
-    return undefined;
+  private async createChat(ideContextEnabled: boolean): Promise<string> {
+    this.log(`creating local chat ide_context_enabled=${ideContextEnabled}`);
+    return await this.chatStore.createChat(ideContextEnabled);
   }
 
-  private async getRestoredSession(
-    options: { forceRefresh?: boolean; previousToken?: string } = {}
-  ): Promise<StoredSession> {
-    const session = await this.tokenManager.getSession();
-    const backendSession = await this.ensureBackendSession(session);
-    return this.refreshSessionIfNeeded(backendSession, options);
+  private async updateChatIdeContext(chatId: string, enabled: boolean): Promise<void> {
+    await this.chatStore.updateIdeContext(chatId, enabled);
   }
 
-  private async ensureBackendSession(session: StoredSession): Promise<StoredSession> {
-    if (session.status !== 'valid') {
-      return session;
-    }
-
-    if (this.isBackendAccessToken(session.token)) {
-      return session;
-    }
-
-    this.log('exchanging Neon JWT for backend extension session');
-    this.logAuth('exchanging Neon JWT for backend extension session');
-
-    const exchanged = await this.exchangeTokenWithBackend(session.token);
-    if (!exchanged?.access_token || !exchanged.refresh_token) {
-      await this.tokenManager.clearToken();
-      return { status: 'missing' };
-    }
-
-    const mergedUserMetadata = {
-      ...session.userMetadata,
-      id: exchanged.user?.id || (session.userMetadata.id as string) || '',
-      email: exchanged.user?.email || (session.userMetadata.email as string) || '',
-      role: exchanged.user?.role || (session.userMetadata.role as string) || 'authenticated',
-      provider: 'vertex-swarm-backend',
-    };
-
-    await this.tokenManager.setToken(
-      exchanged.access_token,
-      mergedUserMetadata,
-      exchanged.refresh_token
-    );
-
-    const restored = await this.tokenManager.getSession();
-    if (restored.status === 'valid') {
-      this.logAuth('backend session exchange completed successfully');
-      this.postAuthenticated(restored);
-    }
-
-    return restored;
-  }
-
-  private async exchangeTokenWithBackend(neonToken: string): Promise<BackendAuthTokenResponse | undefined> {
+  private async sendChatList(): Promise<void> {
     try {
-      const response = await fetch(`${this.backendUrl}/api/v1/auth/exchange`, {
-        method: 'POST',
-        headers: {
-          Authorization: `Bearer ${neonToken}`,
-          Accept: 'application/json',
-        },
-      });
-
-      if (!response.ok) {
-        const errorText = await response.text();
-        this.log(`backend auth exchange failed status=${response.status} body=${errorText.slice(0, 300)}`);
-        this.logAuth(`backend auth exchange failed status=${response.status}`);
-        return undefined;
-      }
-
-      return await response.json() as BackendAuthTokenResponse;
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      this.log(`backend auth exchange error: ${message}`);
-      this.logAuth(`backend auth exchange error: ${message}`);
-      return undefined;
-    }
-  }
-
-  private async refreshSessionIfNeeded(
-    session: StoredSession,
-    options: { forceRefresh?: boolean; previousToken?: string } = {}
-  ): Promise<StoredSession> {
-    if (!this.shouldRefreshSession(session, options.forceRefresh)) {
-      const reason = this.getRefreshSkipReason(session, options.forceRefresh) ?? 'not eligible for refresh';
-      this.log(`silent refresh skipped (${reason})`);
-      this.logAuth(`silent refresh skipped (${reason})`);
-      return session;
-    }
-
-    const reason = options.forceRefresh
-      ? 'forced refresh'
-      : session.status === 'expired'
-        ? 'expired JWT'
-        : 'expiring JWT';
-
-    if (VertexSwarmChatRuntime.refreshInFlight) {
-      this.log(`joining in-flight silent refresh (${reason})`);
-      this.logAuth(`joining in-flight silent refresh (${reason})`);
-      return VertexSwarmChatRuntime.refreshInFlight;
-    }
-
-    VertexSwarmChatRuntime.refreshInFlight = this.refreshSessionWithStoredToken(session, reason)
-      .finally(() => {
-        VertexSwarmChatRuntime.refreshInFlight = null;
-      });
-
-    return VertexSwarmChatRuntime.refreshInFlight;
-  }
-
-  private shouldRefreshSession(
-    session: StoredSession,
-    forceRefresh = false
-  ): session is Exclude<StoredSession, { status: 'missing' }> {
-    if (session.status === 'missing' || !session.refreshToken) {
-      return false;
-    }
-
-    if (!this.isBackendRefreshToken(session.refreshToken)) {
-      return false;
-    }
-
-    if (forceRefresh || session.status === 'expired') {
-      return true;
-    }
-
-    return (
-      typeof session.expiresAt === 'number'
-      && session.expiresAt - Date.now() <= VertexSwarmChatRuntime.TOKEN_REFRESH_BUFFER_MS
-    );
-  }
-
-  private getRefreshSkipReason(
-    session: StoredSession,
-    forceRefresh = false
-  ): string | null {
-    if (session.status === 'missing') {
-      return 'no stored session';
-    }
-
-    if (!session.refreshToken) {
-      return `refresh token missing (status=${session.status})`;
-    }
-
-    if (!this.isBackendRefreshToken(session.refreshToken)) {
-      return 'stored refresh token is not a backend token';
-    }
-
-    if (forceRefresh || session.status === 'expired') {
-      return null;
-    }
-
-    if (typeof session.expiresAt !== 'number') {
-      return 'session expiration unavailable';
-    }
-
-    const remainingMs = session.expiresAt - Date.now();
-    if (remainingMs > VertexSwarmChatRuntime.TOKEN_REFRESH_BUFFER_MS) {
-      const remainingMinutes = Math.max(0, Math.floor(remainingMs / (60 * 1000)));
-      return `token still healthy for ${remainingMinutes}m`;
-    }
-
-    return null;
-  }
-
-  private async refreshSessionWithStoredToken(
-    session: Exclude<StoredSession, { status: 'missing' }>,
-    reason: string
-  ): Promise<StoredSession> {
-    const refreshedSession = await this.silentRefreshWithBackendToken(
-      session.refreshToken ?? '',
-      session.userMetadata,
-      reason
-    );
-    if (!refreshedSession) {
-      return session;
-    }
-
-    return refreshedSession;
-  }
-
-  private async silentRefreshFromStorage(
-    reason: string,
-    previousToken?: string
-  ): Promise<string | undefined> {
-    const storedSession = await this.tokenManager.getSession();
-    const session = await this.ensureBackendSession(storedSession);
-
-    if (session.status === 'valid' && previousToken && session.token !== previousToken) {
-      this.log(`using newer stored access token without backend refresh (${reason})`);
-      this.logAuth(`using newer stored access token without backend refresh (${reason})`);
-      return session.token;
-    }
-
-    if (session.status === 'missing' || !session.refreshToken) {
-      this.log(`forced silent refresh unavailable (${reason})`);
-      this.logAuth(`forced silent refresh unavailable (${reason})`);
-      return undefined;
-    }
-
-    const refreshedSession = await this.refreshSessionIfNeeded(session, { forceRefresh: true });
-    if (refreshedSession.status !== 'valid') {
-      this.log(`forced silent refresh failed (${reason}) status=${refreshedSession.status}`);
-      this.logAuth(`forced silent refresh failed (${reason}) status=${refreshedSession.status}`);
-      return undefined;
-    }
-
-    if (session.status === 'valid' && refreshedSession.token === session.token) {
-      if (!previousToken || refreshedSession.token !== previousToken) {
-        this.log(`using stored access token after refresh attempt (${reason})`);
-        this.logAuth(`using stored access token after refresh attempt (${reason})`);
-        return refreshedSession.token;
-      }
-
-      this.log(`forced silent refresh produced no replacement JWT (${reason})`);
-      this.logAuth(`forced silent refresh produced no replacement JWT (${reason})`);
-      return undefined;
-    }
-
-    return refreshedSession.token;
-  }
-
-  private async silentRefreshWithBackendToken(
-    refreshToken: string,
-    userMetadata: Record<string, unknown>,
-    reason: string
-  ): Promise<StoredSession | undefined> {
-    this.log(`attempting backend access token refresh (${reason})`);
-    this.logAuth(`attempting backend access token refresh (${reason})`);
-
-    const refreshedToken = await this.requestBackendTokenRefresh(refreshToken);
-    if (!refreshedToken?.access_token || !refreshedToken.refresh_token) {
-      this.log(`backend refresh did not return replacement tokens (${reason})`);
-      this.logAuth(`backend refresh did not return replacement tokens (${reason})`);
-      return undefined;
-    }
-
-    const mergedUserMetadata = {
-      ...userMetadata,
-      id: refreshedToken.user?.id || (userMetadata.id as string) || '',
-      email: refreshedToken.user?.email || (userMetadata.email as string) || '',
-      role: refreshedToken.user?.role || (userMetadata.role as string) || 'authenticated',
-      provider: 'vertex-swarm-backend',
-    };
-
-    await this.tokenManager.setToken(
-      refreshedToken.access_token,
-      mergedUserMetadata,
-      refreshedToken.refresh_token
-    );
-
-    const refreshedSession = await this.tokenManager.getSession();
-    this.log(`backend refresh completed status=${refreshedSession.status} (${reason})`);
-    this.logAuth(`backend refresh completed status=${refreshedSession.status} (${reason})`);
-    if (refreshedSession.status === 'valid') {
-      this.postAuthenticated(refreshedSession);
-    }
-
-    return refreshedSession;
-  }
-
-  private async requestBackendTokenRefresh(refreshToken: string): Promise<BackendAuthTokenResponse | undefined> {
-    try {
-      const response = await fetch(`${this.backendUrl}/api/v1/auth/refresh`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Accept: 'application/json',
-        },
-        body: JSON.stringify({ refresh_token: refreshToken }),
-      });
-
-      if (!response.ok) {
-        const errorText = await response.text();
-        this.log(`backend refresh request failed status=${response.status} body=${errorText.slice(0, 300)}`);
-        this.logAuth(`backend refresh request failed status=${response.status}`);
-        return undefined;
-      }
-
-      return await response.json() as BackendAuthTokenResponse;
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      this.log(`backend refresh request error: ${message}`);
-      this.logAuth(`backend refresh request error: ${message}`);
-      return undefined;
-    }
-  }
-
-  private isBackendAccessToken(token: string): boolean {
-    try {
-      const payloadPart = token.split('.')[1];
-      if (!payloadPart) {
-        return false;
-      }
-
-      const normalized = payloadPart.replace(/-/g, '+').replace(/_/g, '/');
-      const padded = normalized + '='.repeat((4 - (normalized.length % 4)) % 4);
-      const payload = JSON.parse(
-        Buffer.from(padded, 'base64').toString('utf-8')
-      ) as { iss?: string; token_type?: string };
-
-      return (
-        payload.iss === VertexSwarmChatRuntime.APP_TOKEN_ISSUER
-        && payload.token_type === 'access'
-      );
-    } catch {
-      return false;
-    }
-  }
-
-  private isBackendRefreshToken(token: string): boolean {
-    try {
-      const payloadPart = token.split('.')[1];
-      if (!payloadPart) {
-        return false;
-      }
-
-      const normalized = payloadPart.replace(/-/g, '+').replace(/_/g, '/');
-      const padded = normalized + '='.repeat((4 - (normalized.length % 4)) % 4);
-      const payload = JSON.parse(
-        Buffer.from(padded, 'base64').toString('utf-8')
-      ) as { iss?: string; token_type?: string };
-
-      return (
-        payload.iss === VertexSwarmChatRuntime.APP_TOKEN_ISSUER
-        && payload.token_type === 'refresh'
-      );
-    } catch {
-      return false;
-    }
-  }
-
-  private async createChat(token: string, ideContextEnabled: boolean): Promise<string | null> {
-    try {
-      this.log(`creating backend chat ide_context_enabled=${ideContextEnabled}`);
-      const data = await this.requestJson<{ chatId: string }>(
-        '/api/v1/chats',
-        token,
-        {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-          },
-          body: JSON.stringify({
-            ide_context_enabled: ideContextEnabled,
-          }),
-        }
-      );
-
-      if (!data.chatId) {
-        throw new Error('No chatId in response');
-      }
-
-      return data.chatId;
-    } catch (error) {
-      const errorMessage = error instanceof Error ? error.message : 'Unknown error';
-      console.error('Failed to create chat:', errorMessage);
-      throw error;
-    }
-  }
-
-  private async fetchChatList(token: string): Promise<ChatSummaryData[]> {
-    return this.requestJson<ChatSummaryData[]>(
-      '/api/v1/chats',
-      token,
-      {
-        method: 'GET',
-        headers: {
-          Accept: 'application/json',
-        },
-      }
-    );
-  }
-
-  private async fetchChatMessages(token: string, chatId: string): Promise<ChatMessagesResponse> {
-    return this.requestJson<ChatMessagesResponse>(
-      `/api/v1/chats/${chatId}/messages`,
-      token,
-      {
-        method: 'GET',
-        headers: {
-          Accept: 'application/json',
-        },
-      }
-    );
-  }
-
-  private async updateChatIdeContext(token: string, chatId: string, enabled: boolean): Promise<void> {
-    await this.requestJson<{ chatId: string; ideContextEnabled: boolean }>(
-      `/api/v1/chats/${chatId}/ide-context`,
-      token,
-      {
-        method: 'PATCH',
-        headers: {
-          Accept: 'application/json',
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({ enabled }),
-      }
-    );
-  }
-
-  private async sendChatList(token?: string): Promise<void> {
-    const validToken = token ?? await this.getValidToken();
-
-    if (!validToken) {
-      return;
-    }
-
-    try {
-      const chats = await this.fetchChatList(validToken);
+      const chats = await this.chatStore.listChats();
       this.log(`loaded chat list count=${chats.length}`);
       this.post({
         type: 'chat-list',
@@ -1038,139 +622,30 @@ export class VertexSwarmChatRuntime {
       });
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : 'Unknown error';
-      if (!this.isUnauthorizedError(errorMessage)) {
-        console.error('Failed to load chat list:', errorMessage);
-        this.post({ type: 'error', payload: errorMessage });
-      }
+      console.error('Failed to load chat list:', errorMessage);
+      this.post({ type: 'error', payload: errorMessage });
     }
   }
 
-  private async openChat(token: string, chatId: string): Promise<void> {
-    const chatState = await this.fetchChatMessages(token, chatId);
+  private async openChat(chatId: string): Promise<void> {
+    const messages = await this.chatStore.loadMessages(chatId);
+    const ideContextEnabled = await this.chatStore.getIdeContextEnabled(chatId);
+
     this.currentChatId = chatId;
-    this.log(`opened chat chat_id=${chatId} messages=${chatState.messages.length}`);
+    this.log(`opened chat chat_id=${chatId} messages=${messages.length}`);
 
     this.post({
       type: 'chat-opened',
       payload: {
         chatId,
-        ideContextEnabled: chatState.ideContextEnabled,
-        messages: chatState.messages,
+        ideContextEnabled,
+        messages,
       },
     });
 
-    await this.sendChatList(token);
+    await this.sendChatList();
   }
 
-  private async requestJson<T>(
-    path: string,
-    token: string,
-    init: RequestInit,
-    allowRetry = true
-  ): Promise<T> {
-    const headers = {
-      Authorization: `Bearer ${token}`,
-      ...(init.headers || {}),
-    };
-    const response = await fetch(`${this.backendUrl}${path}`, {
-      ...init,
-      headers,
-    });
-
-    if (response.status === 401) {
-      if (allowRetry) {
-        const refreshedToken = await this.silentRefreshFromStorage(
-          `backend 401 for ${path}`,
-          token
-        );
-        if (refreshedToken) {
-          this.log(`retrying request after backend 401 path=${path}`);
-          return this.requestJson<T>(path, refreshedToken, init, false);
-        }
-      }
-
-      await this.handleUnauthorized();
-      throw new Error('Authentication expired. Please sign in again.');
-    }
-
-    if (!response.ok) {
-      const errorData = await response.json().catch(
-        () => ({ detail: response.statusText })
-      ) as { detail?: string };
-      throw new Error(`${response.status} ${errorData.detail || response.statusText}`.trim());
-    }
-
-    return await response.json() as T;
-  }
-
-  private isUnauthorizedError(errorMessage: string): boolean {
-    return /(^|\s)401(\s|$)|expired|unauthorized/i.test(errorMessage);
-  }
-
-  private async handleUnauthorized(): Promise<void> {
-    if (VertexSwarmChatRuntime.authResetInProgress) {
-      return;
-    }
-
-    const refreshedToken = await this.silentRefreshFromStorage('backend rejected request');
-    if (refreshedToken) {
-      this.log('recovered from backend 401 via silent refresh');
-      return;
-    }
-
-    VertexSwarmChatRuntime.authResetInProgress = true;
-    this.log('backend returned 401; clearing local session');
-    this.logAuth('backend returned 401; clearing local session');
-    await this.revokeStoredRefreshToken('forced unauthorized logout');
-    await this.tokenManager.clearToken();
-    try {
-      await vscode.window.showWarningMessage(
-        'Vertex Swarm session expired. Please sign in again.'
-      );
-      await this.handleLogout(
-        'Backend rejected the session token. Please sign in again.'
-      );
-    } finally {
-      VertexSwarmChatRuntime.authResetInProgress = false;
-    }
-  }
-
-  private async revokeStoredRefreshToken(reason: string): Promise<void> {
-    try {
-      const session = await this.tokenManager.getSession();
-      if (session.status === 'missing' || !session.refreshToken) {
-        return;
-      }
-
-      if (!this.isBackendRefreshToken(session.refreshToken)) {
-        return;
-      }
-
-      const abortController = new AbortController();
-      const timeoutHandle = setTimeout(() => abortController.abort(), 5000);
-
-      try {
-        const response = await fetch(`${this.backendUrl}/api/v1/auth/logout`, {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            Accept: 'application/json',
-          },
-          body: JSON.stringify({ refresh_token: session.refreshToken }),
-          signal: abortController.signal,
-        });
-
-        this.log(`backend refresh revoke during ${reason} status=${response.status}`);
-        this.logAuth(`backend refresh revoke during ${reason} status=${response.status}`);
-      } finally {
-        clearTimeout(timeoutHandle);
-      }
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      this.log(`backend refresh revoke failed during ${reason}: ${message}`);
-      this.logAuth(`backend refresh revoke failed during ${reason}: ${message}`);
-    }
-  }
 
   private async handleToolCallEvent(event: SessionEvent): Promise<void> {
     const payload = this.extractToolCallPayload(event);

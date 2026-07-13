@@ -33,6 +33,7 @@ class FileStore:
         meta = {
             "title": title,
             "created_at": datetime.now(timezone.utc).isoformat(),
+            "updated_at": datetime.now(timezone.utc).isoformat(),
             "ide_context_enabled": ide_context
         }
         
@@ -40,11 +41,12 @@ class FileStore:
         async with aiofiles.open(meta_file, mode='w', encoding='utf-8') as f:
             await f.write(json.dumps(meta, indent=2))
             
-    async def append_message(self, chat_id: str, role: str, content: str, events: List[Dict[str, Any]] = None) -> None:
+    async def append_message(self, chat_id: str, role: str, content: str, events: List[Dict[str, Any]] = None, message_id: str = None) -> None:
         chat_dir = self.chats_path / chat_id
         await self._ensure_dir(chat_dir)
         
         msg = {
+            "message_id": message_id,
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "role": role,
             "content": content,

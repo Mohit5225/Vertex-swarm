@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react'
-import { useAuthStore } from '../store/authStore'
+import { useConfigStore } from '../store/configStore'
 import { useChatStore, type ChatMessage } from '../store/chatStore'
 import MessageRenderer from './MessageRenderer'
 import InputArea from './InputArea'
@@ -244,7 +244,7 @@ const LiveFileEditBar: React.FC<{ messages: ChatMessage[] }> = ({ messages }) =>
 }
 
 const ChatPanel: React.FC = () => {
-  const { user, logout } = useAuthStore()
+  const { config, logout } = useConfigStore()
   const { clearMessages, messages, isStreaming, error, chats, currentChatId, currentTodo } =
     useChatStore()
   const {
@@ -394,9 +394,8 @@ const ChatPanel: React.FC = () => {
     return () => window.removeEventListener('message', handleMessage);
   }, []);
 
-  const handleConfirmLogout = () => {
+  const handleConfirmConfigReset = () => {
     setShowLogoutConfirm(false)
-    getVsCodeApi()?.postMessage({ type: 'logout' })
     logout()
   }
 
@@ -511,19 +510,19 @@ const ChatPanel: React.FC = () => {
               className="absolute right-2 top-2 z-20 w-[min(17rem,calc(100vw-1rem))] rounded-[22px] border border-white/10 bg-[#0c1220]/96 p-4 shadow-[0_22px_60px_rgba(0,0,0,0.38)] backdrop-blur-xl"
             >
               <div className="flex items-center justify-between gap-3">
-                <p className="text-[11px] font-medium uppercase tracking-[0.2em] text-[#7d89a6]">
-                  Session
-                </p>
-                <span className="text-[11px] text-[#8f9cb7]">
-                  {sessionStateLabel}
-                </span>
+                  <span className="truncate text-[13px] font-medium leading-none text-white">
+                    Provider Config
+                  </span>
+                  <span className="text-[11px] text-[#8f9cb7]">
+                    {sessionStateLabel}
+                  </span>
               </div>
               <p className="mt-3 truncate text-sm font-medium text-[#f3f6ff]">
-                {user?.email || 'Signed in locally'}
+                {config?.llmBaseUrl ? new URL(config.llmBaseUrl).hostname : 'Local Provider'}
               </p>
               <div className="mt-3 space-y-1 text-[12px] leading-5 text-[#95a2bd]">
-                <p>Stored locally inside the extension.</p>
-                <p>The backend JWT refreshes automatically while your Neon session stays valid.</p>
+                <p>Model: {config?.llmModel || 'Default Model'}</p>
+                <p>Keys are stored securely in your OS keychain.</p>
               </div>
 
               <div className="mt-4 border-t border-white/10 pt-3">
@@ -571,7 +570,7 @@ const ChatPanel: React.FC = () => {
                   }}
                   className="ghost-btn !rounded-xl !px-3 !py-2"
                 >
-                  Sign out
+                  Settings
                 </button>
               </div>
             </div>
@@ -643,11 +642,11 @@ const ChatPanel: React.FC = () => {
 
       <ConfirmDialog
         open={showLogoutConfirm}
-        title="Sign out of Vertex Swarm?"
-        description="This clears the local extension session and returns the sidebar to the login screen."
-        confirmLabel="Sign out"
+        title="Reconfigure Provider?"
+        description="This will return you to the settings screen. You will need to re-enter your configuration if you proceed."
+        confirmLabel="Continue"
         onCancel={() => setShowLogoutConfirm(false)}
-        onConfirm={handleConfirmLogout}
+        onConfirm={handleConfirmConfigReset}
       />
     </>
   )

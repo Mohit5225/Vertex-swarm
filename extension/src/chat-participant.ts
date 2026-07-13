@@ -1,4 +1,5 @@
 import * as vscode from 'vscode';
+import { ConfigManager } from './config-manager';
 import { TokenManager } from './token-manager';
 import { OAuthHandler } from './oauth-handler';
 import { VertexSwarmChatRuntime } from './chat-runtime';
@@ -27,12 +28,14 @@ export class VertexSwarmChatParticipant {
     context: vscode.ExtensionContext,
     tokenManager: TokenManager,
     oauthHandler: OAuthHandler,
+    configManager: ConfigManager,
     outputChannel: vscode.OutputChannel,
     authLog?: (message: string) => void
   ) {
     this.runtime = new VertexSwarmChatRuntime({
       tokenManager,
       oauthHandler,
+      configManager,
       context,
       outputChannel,
       authLog,

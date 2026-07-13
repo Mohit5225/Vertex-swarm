@@ -1,10 +1,11 @@
 import React, { useEffect } from 'react'
-import { useAuthStore } from './store/authStore'
-import LoginPanel from './components/LoginPanel'
+import { useConfigStore } from './store/configStore'
+import SettingsPanel from './components/SettingsPanel'
 import ChatPanel from './components/ChatPanel'
+import LoginPanel from './components/LoginPanel'
 
 const App: React.FC = () => {
-  const { isAuthenticated, loading, initializeExtensionBridge } = useAuthStore()
+  const { hasConfig, isAuthenticated, loading, initializeExtensionBridge } = useConfigStore()
 
   useEffect(() => {
     initializeExtensionBridge()
@@ -17,17 +18,19 @@ const App: React.FC = () => {
           <div className="w-full max-w-md">
             <p className="surface-label">Vertex Swarm</p>
             <h1 className="mt-3 text-[1.7rem] font-semibold leading-tight text-white">
-              Restoring session...
+              Checking Configuration...
             </h1>
             <p className="mt-3 text-sm leading-7 text-[#92a0bb]">
-              Checking the extension session before we render the sidebar.
+              Ensuring backend is connected.
             </p>
           </div>
         </div>
-      ) : isAuthenticated ? (
-        <ChatPanel />
-      ) : (
+      ) : !isAuthenticated ? (
         <LoginPanel />
+      ) : !hasConfig ? (
+        <SettingsPanel />
+      ) : (
+        <ChatPanel />
       )}
     </div>
   )

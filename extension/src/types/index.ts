@@ -93,6 +93,9 @@ export type ExtensionToWebviewMessage =
   | { type: 'config-state'; payload: { snapshotRetentionDays: number } }
   | { type: 'message-id-assigned'; payload: { tempId: string; realId: string } }
   | { type: 'messages-truncated'; payload: { messageId: string; messageText: string } }
+  | { type: 'auth-required' }
+  | { type: 'config-missing'; payload?: { reason?: string } }
+  | { type: 'config-ready'; payload: { llmBaseUrl?: string; llmModel?: string } }
   | { type: 'plan-ready'; payload: Record<string, never> };
 
 // Messages FROM Webview TO Extension Host
@@ -115,7 +118,9 @@ export type WebviewToExtensionMessage =
   | { type: 'review-snapshot'; payload: { file: string; originalUri: string; snapshotPath: string } }
   | { type: 'get-config' }
   | { type: 'set-config'; payload: { snapshotRetentionDays: number } }
-  | { type: 'truncate-messages'; payload: { chatId: string; messageId: string; messageText: string } };
+  | { type: 'open-plan' }
+  | { type: 'truncate-messages'; payload: { chatId: string; messageId: string; messageText: string } }
+  | { type: 'save-config'; payload: { llmBaseUrl?: string, llmModel?: string, llmKey?: string, exaKey?: string } };
 
 // Legacy union kept for backward compat
 export type ExtensionMessage = ExtensionToWebviewMessage | WebviewToExtensionMessage;

@@ -120,6 +120,21 @@ class WorkerNode:
         except Exception as e:
             logger.error(f"Failed to parse tool result: {e}")
 
+    async def handle_update_keys(self, params: Dict[str, Any]):
+        if not self.orchestrator:
+            return
+        
+        if "llm_key" in params:
+            self.orchestrator.config.llm_api_key = params["llm_key"]
+        if "exa_key" in params:
+            self.orchestrator.config.exa_api_key = params["exa_key"]
+        if "llm_base_url" in params:
+            self.orchestrator.config.llm_base_url = params["llm_base_url"]
+        if "llm_model" in params:
+            self.orchestrator.config.llm_model = params["llm_model"]
+        
+        logger.info("Keys and config updated dynamically from extension.")
+
     async def run(self):
         logger.info("Worker started. Waiting for messages on stdio.")
         while True:
@@ -140,9 +155,10 @@ class WorkerNode:
                     await self.handle_session_cancel(params)
                 elif method == "tool/result":
                     await self.handle_tool_result(params)
+                elif method == "config/update_keys":
+                    await self.handle_update_keys(params)
                 else:
                     logger.warning(f"Unknown method: {method}")
-
             except Exception as e:
                 logger.exception("Error processing message")
 
@@ -152,7 +168,18 @@ class WorkerNode:
         if self.nats:
             await self.nats.close()
 
-if __name__ == "__main__":
+    async def handle_update_keys(self, params: Dict[str, Any]):
+        if not self.config:
+            return
+        llm_key = params.get("llm_key")
+        if llm_key is not None:
+            self.config.llm_key = llm_key
+        exa_key = params.get("exa_key")
+        if exa_key is not None:
+            self.config.exa_key = exa_key
+        logger.info("Updated API keys dynamically.")
+
+def main():
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
@@ -165,3 +192,6 @@ if __name__ == "__main__":
         asyncio.run(worker.run())
     except KeyboardInterrupt:
         pass
+
+if __name__ == "__main__":
+    main()

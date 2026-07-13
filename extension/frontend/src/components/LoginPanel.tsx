@@ -1,10 +1,10 @@
 import React, { useState } from 'react'
 import { getVsCodeApi } from '../lib/vscode'
-import { useAuthStore } from '../store/authStore'
+import { useConfigStore } from '../store/configStore'
 
 const LoginPanel: React.FC = () => {
   const [copied, setCopied] = useState(false)
-  const { error } = useAuthStore()
+  const { error } = useConfigStore()
 
   const handleOpenBrowser = () => {
     getVsCodeApi()?.postMessage({ type: 'open-browser' })
