@@ -1,6 +1,5 @@
 import * as vscode from 'vscode';
-import { TokenManager } from './token-manager';
-import { OAuthHandler } from './oauth-handler';
+import { EntitlementClient } from './auth/entitlement-client';
 import { ConfigManager } from './config-manager';
 import { VertexSwarmSidebarProvider } from './webview-provider';
 import { VertexSwarmChatParticipant } from './chat-participant';
@@ -11,41 +10,7 @@ import { VertexProcessManager } from './process-manager';
 import * as path from 'path';
 import * as os from 'os';
 
-const BACKEND_URL = process.env.VERTEX_BACKEND_URL || 'http://127.0.0.1:8000';
 
-async function revokeBackendRefreshToken(
-  tokenManager: TokenManager,
-  logAuthToOutput: (message: string) => void
-): Promise<void> {
-  try {
-    const session = await tokenManager.getSession();
-    if (session.status === 'missing' || !session.refreshToken) {
-      return;
-    }
-
-    const abortController = new AbortController();
-    const timeoutHandle = setTimeout(() => abortController.abort(), 5000);
-
-    try {
-      const response = await fetch(`${BACKEND_URL}/api/v1/auth/logout`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Accept: 'application/json',
-        },
-        body: JSON.stringify({ refresh_token: session.refreshToken }),
-        signal: abortController.signal,
-      });
-
-      logAuthToOutput(`[AuthRuntime] backend logout revoke status=${response.status}`);
-    } finally {
-      clearTimeout(timeoutHandle);
-    }
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    logAuthToOutput(`[AuthRuntime] backend logout revoke failed: ${message}`);
-  }
-}
 
 export async function activate(context: vscode.ExtensionContext): Promise<void> {
   console.log('Vertex Swarm extension activated');
@@ -59,28 +24,26 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     authOutputChannel.appendLine(`[${new Date().toISOString()}] ${message}`);
   };
 
-  const tokenManager = new TokenManager(context.secrets);
-  const oauthHandler = new OAuthHandler(tokenManager, logAuthToOutput);
+  const entitlementClient = new EntitlementClient(context.secrets, logAuthToOutput);
   const configManager = new ConfigManager(context);
   
   const processManager = new VertexProcessManager();
   context.subscriptions.push(processManager);
 
-  // Initialize backend synchronously, blocking activation until ready
-  try {
-    const config = await configManager.getConfig();
-    const session = await tokenManager.getSession();
-    const token = session.status === 'valid' ? session.token : '';
-    await processManager.start(context, outputChannel, config, token);
-  } catch (err: any) {
-    outputChannel.appendLine(`[Extension] Failed to start process manager: ${err.message}`);
-    vscode.window.showErrorMessage(`Failed to start Vertex Swarm backend: ${err.message}`);
-  }
+  // Initialize backend asynchronously so we don't block extension activation
+  configManager.getConfig().then(async (config) => {
+    try {
+      const token = await entitlementClient.getToken() || '';
+      await processManager.start(context, outputChannel, config, token);
+    } catch (err: any) {
+      outputChannel.appendLine(`[Extension] Failed to start process manager: ${err.message}`);
+      vscode.window.showErrorMessage(`Failed to start Vertex Swarm backend: ${err.message}`);
+    }
+  });
 
   const chatParticipantAdapter = new VertexSwarmChatParticipant(
     context,
-    tokenManager,
-    oauthHandler,
+    entitlementClient,
     configManager,
     outputChannel,
     logAuthToOutput,
@@ -103,8 +66,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   // Register the sidebar WebviewView provider
   const sidebarProvider = new VertexSwarmSidebarProvider(
     context.extensionUri,
-    tokenManager,
-    oauthHandler,
+    entitlementClient,
     configManager,
     context,
     outputChannel,
@@ -159,9 +121,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   // Logout command (executes actual logout)
   context.subscriptions.push(
     vscode.commands.registerCommand('vertex-swarm.logout', async () => {
-      await revokeBackendRefreshToken(tokenManager, logAuthToOutput);
-      await tokenManager.clearToken();
-
+      await entitlementClient.logout();
       // Reset the sidebar locally without redirecting the user elsewhere.
       // Deprecated in favor of the frontend component's logout calling chat-runtime.
     })

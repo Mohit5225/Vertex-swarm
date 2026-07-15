@@ -1,7 +1,6 @@
 import * as vscode from 'vscode';
 import { ConfigManager } from './config-manager';
-import { TokenManager } from './token-manager';
-import { OAuthHandler } from './oauth-handler';
+import { EntitlementClient } from './auth/entitlement-client';
 import { VertexSwarmChatRuntime } from './chat-runtime';
 import { PlanDocumentProvider } from './plan-document-provider';
 import { VertexProcessManager } from './process-manager';
@@ -19,8 +18,7 @@ export class VertexSwarmSidebarProvider implements vscode.WebviewViewProvider {
 
   constructor(
     private readonly extensionUri: vscode.Uri,
-    tokenManager: TokenManager,
-    oauthHandler: OAuthHandler,
+    entitlementClient: EntitlementClient,
     configManager: ConfigManager,
     context: vscode.ExtensionContext,
     outputChannel: vscode.OutputChannel,
@@ -29,8 +27,7 @@ export class VertexSwarmSidebarProvider implements vscode.WebviewViewProvider {
     processManager: VertexProcessManager
   ) {
     this.runtime = new VertexSwarmChatRuntime({
-      tokenManager,
-      oauthHandler,
+      entitlementClient,
       configManager,
       context,
       outputChannel,

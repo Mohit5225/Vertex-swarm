@@ -6,6 +6,7 @@ import * as os from 'os';
 import * as net from 'net';
 import * as fs from 'fs';
 import { RpcClient } from './rpc-client';
+import { validateProtocolVersion } from './utils/protocol-validator';
 
 export class VertexProcessManager implements vscode.Disposable {
   private natsProcess: cp.ChildProcess | null = null;
@@ -151,6 +152,17 @@ export class VertexProcessManager implements vscode.Disposable {
           )
         ]);
         
+        const protocolCheck = validateProtocolVersion('1.0', initResult.protocol_version);
+        if (!protocolCheck.valid) {
+            const errorMsg = `Protocol validation failed: ${protocolCheck.error}`;
+            outputChannel.appendLine(`[ProcessManager] Error: ${errorMsg}`);
+            this.dispose();
+            throw new Error(errorMsg);
+        }
+        if (protocolCheck.warning) {
+            outputChannel.appendLine(`[ProcessManager] Warning: ${protocolCheck.warning}`);
+        }
+
         if (initResult.status === 'ready') {
             outputChannel.appendLine(`[ProcessManager] Handshake complete. Backend is ready! (NATS URL: ${initResult.nats_url || 'unknown'})`);
         } else {
@@ -162,7 +174,9 @@ export class VertexProcessManager implements vscode.Disposable {
       } catch (err: any) {
         outputChannel.appendLine(`[ProcessManager] Handshake failed: ${err.message || err.code || err}`);
         this.dispose();
-        throw new Error(`Worker initialization failed: ${err.message || err.code || err}`);
+        const customErr = new Error(`Worker initialization failed: ${err.message || err.code || err}`);
+        (customErr as any).code = err.code;
+        throw customErr;
       }
     }
     

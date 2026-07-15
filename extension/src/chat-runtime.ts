@@ -9,8 +9,7 @@ import { TerminalService } from './tools/terminal-service';
 import { createRequestContext } from './request-context';
 import { PlanDocumentProvider } from './plan-document-provider';
 import { LocalChatStore } from './local-chat-store';
-import { TokenManager } from './token-manager';
-import { OAuthHandler } from './oauth-handler';
+import { EntitlementClient } from './auth/entitlement-client';
 import type {
   WebviewToExtensionMessage,
   SessionEvent,
@@ -26,8 +25,7 @@ import type {
 
 
 export interface VertexSwarmChatRuntimeOptions {
-  tokenManager: TokenManager;
-  oauthHandler: OAuthHandler;
+  entitlementClient: EntitlementClient;
   configManager: ConfigManager;
   context: vscode.ExtensionContext;
   outputChannel: vscode.OutputChannel;
@@ -43,8 +41,7 @@ export class VertexSwarmChatRuntime {
   private static readonly APP_TOKEN_ISSUER = process.env.VERTEX_APP_TOKEN_ISSUER || 'vertex-swarm-backend';
 
   private readonly chatStore = new LocalChatStore();
-  private readonly tokenManager: TokenManager;
-  private readonly oauthHandler: OAuthHandler;
+  private readonly entitlementClient: EntitlementClient;
   private readonly configManager: ConfigManager;
   private readonly context: vscode.ExtensionContext;
   private readonly outputChannel: vscode.OutputChannel;
@@ -65,8 +62,7 @@ export class VertexSwarmChatRuntime {
   private lastRegisteredRpcClient: any = null;
 
   constructor(options: VertexSwarmChatRuntimeOptions) {
-    this.tokenManager = options.tokenManager;
-    this.oauthHandler = options.oauthHandler;
+    this.entitlementClient = options.entitlementClient;
     this.configManager = options.configManager;
     this.context = options.context;
     this.outputChannel = options.outputChannel;
@@ -116,7 +112,7 @@ export class VertexSwarmChatRuntime {
       case 'open-browser': {
         this.log('open-browser requested');
         try {
-          await this.oauthHandler.startAuthFlow(true);
+          await this.entitlementClient.startAuthFlow();
           await this.syncWebviewConfig();
         } catch (error) {
           const message = error instanceof Error ? error.message : String(error);
@@ -129,7 +125,7 @@ export class VertexSwarmChatRuntime {
       case 'copy-link': {
         this.log('copy-link requested');
         try {
-          await this.oauthHandler.startAuthFlow(false);
+          await this.entitlementClient.startAuthFlow();
           await this.syncWebviewConfig();
         } catch (error) {
           const message = error instanceof Error ? error.message : String(error);
@@ -164,13 +160,33 @@ export class VertexSwarmChatRuntime {
       case 'start-stream': {
         this.streamCancellationRequested = false;
         const payload = message.payload as StreamStartPayload;
-        // Local backend ignores entitlement token for now, just pass a dummy value
-        const token = 'local_dev_token';
 
         try {
+          let token = await this.entitlementClient.getToken();
+          if (token) {
+            const check = await this.entitlementClient.checkEntitlement(token);
+            if (check.exp * 1000 < Date.now() + 1 * 60 * 1000) {
+              this.log('Token expiring within 5 minutes, refreshing...');
+              const refreshed = await this.entitlementClient.refreshToken();
+              if (refreshed) {
+                token = refreshed;
+                if (this.processManager.rpcClient) {
+                  this.processManager.rpcClient.sendNotification('config/update_keys', { entitlementToken: token });
+                }
+              } else if (check.exp * 1000 < Date.now()) {
+                token = undefined; // Force auth-required if strictly expired and refresh failed
+              }
+            }
+          }
+
+          if (!token) {
+            this.post({ type: 'auth-required' });
+            return;
+          }
+
           const ideContextEnabled = Boolean(payload.ideContextEnabled);
           const chatId = this.currentChatId ?? await this.createChat(ideContextEnabled);
-          
+
           if (this.streamCancellationRequested) {
             this.log(`Stream cancelled before creation finished`);
             return;
@@ -201,7 +217,7 @@ export class VertexSwarmChatRuntime {
             this.log('Backend not running during stream start, attempting respawn...');
             const success = await this.syncWebviewConfig();
             if (!success || !this.processManager.rpcClient) {
-              this.post({ type: 'error', payload: 'Backend not running and could not be restarted' });
+              // syncWebviewConfig already posts the appropriate auth-required or error UI
               return;
             }
           }
@@ -386,7 +402,7 @@ export class VertexSwarmChatRuntime {
             const liveUri = vscode.Uri.parse(payload.originalUri);
             const snapshotUri = vscode.Uri.parse(`vertex-snapshot:/${payload.file}?snapshotPath=${encodeURIComponent(payload.snapshotPath)}`);
             const title = `${payload.file} (Snapshot vs Live)`;
-            
+
             await vscode.commands.executeCommand('vscode.diff', snapshotUri, liveUri, title);
           } catch (e) {
             this.log(`review failed: ${e}`);
@@ -417,7 +433,7 @@ export class VertexSwarmChatRuntime {
       case 'save-config': {
         const payload = message.payload as { llmBaseUrl?: string, llmModel?: string, llmKey?: string, exaKey?: string };
         await this.configManager.updateConfig(payload);
-        
+
         // If backend is running, update it live
         if (this.processManager?.rpcClient) {
           this.log('sending config/update_keys to running backend');
@@ -428,7 +444,7 @@ export class VertexSwarmChatRuntime {
             exa_key: payload.exaKey?.trim()
           });
         }
-        
+
         // Notify frontend
         const hasConfig = await this.configManager.hasValidConfig();
         if (hasConfig) {
@@ -441,7 +457,7 @@ export class VertexSwarmChatRuntime {
         const payload = message.payload as any;
         const { chatId, messageId, messageText } = payload;
         this.log(`truncate-messages requested chat_id=${chatId} message_id=${messageId}`);
-        
+
         if (!chatId || !messageId) {
           this.log('truncate-messages: missing ids');
           break;
@@ -482,74 +498,38 @@ export class VertexSwarmChatRuntime {
   }
 
   public async handleLogout(reason?: string): Promise<void> {
-    await this.tokenManager.clearToken();
+    await this.entitlementClient.logout();
     this.post({ type: 'logged-out', payload: { reason: reason || null } });
   }
 
-  private async refreshSessionToken(refreshToken: string): Promise<boolean> {
-    const BACKEND_URL = process.env.VERTEX_BACKEND_URL || 'http://127.0.0.1:8000';
-    try {
-      const abortController = new AbortController();
-      const timeoutHandle = setTimeout(() => abortController.abort(), 5000);
-      try {
-        const response = await fetch(`${BACKEND_URL}/api/v1/auth/refresh`, {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            Accept: 'application/json',
-          },
-          body: JSON.stringify({ refresh_token: refreshToken }),
-          signal: abortController.signal,
-        });
 
-        if (!response.ok) {
-          this.log(`Token refresh rejected by backend, status=${response.status}`);
-          return false;
-        }
-
-        const data = await response.json() as any;
-        const currentSession = await this.tokenManager.getSession();
-        const user = currentSession.status !== 'missing' && currentSession.userMetadata
-          ? {
-              id: String(currentSession.userMetadata.id || ''),
-              email: String(currentSession.userMetadata.email || ''),
-              provider: String(currentSession.userMetadata.provider || 'google')
-            }
-          : { id: '', email: '', provider: 'google' };
-
-        await this.tokenManager.setToken(data.access_token, user, data.refresh_token);
-        this.log('Successfully refreshed JWT via backend');
-        return true;
-      } finally {
-        clearTimeout(timeoutHandle);
-      }
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      this.log(`Backend token refresh failed: ${message}`);
-      return false;
-    }
-  }
 
   public async syncWebviewConfig(): Promise<boolean> {
-    let session = await this.tokenManager.getSession();
-    
-    if (session.status === 'expired' && session.refreshToken) {
-      this.log('Session expired, attempting automatic JWT refresh...');
-      const refreshed = await this.refreshSessionToken(session.refreshToken);
-      if (refreshed) {
-        session = await this.tokenManager.getSession();
+    let token = await this.entitlementClient.getToken();
+
+    if (token) {
+      const check = await this.entitlementClient.checkEntitlement(token);
+      if (check.exp * 1000 < Date.now() + 1 * 60 * 1000) {
+        this.log('Session expiring, attempting automatic JWT refresh...');
+        const refreshed = await this.entitlementClient.refreshToken();
+        if (refreshed) {
+          token = refreshed;
+          if (this.processManager.rpcClient) {
+            this.processManager.rpcClient.sendNotification('config/update_keys', { entitlementToken: token });
+          }
+        } else if (check.exp * 1000 < Date.now()) {
+          token = undefined;
+        }
       }
     }
 
-    if (session.status === 'missing' || session.status === 'expired') {
+    if (!token) {
       this.post({ type: 'auth-required' });
       return false;
     }
 
-    // Pass user payload on successful auth check
-    if (session.status === 'valid' && session.userMetadata) {
-      this.post({ type: 'authenticated', payload: { user: session.userMetadata } });
-    }
+    // Pass mock user payload on successful auth check for now
+    this.post({ type: 'authenticated', payload: { user: { id: 'jwt-user', email: 'user@vertex-swarm.com', provider: 'google' } } });
 
     const hasConfig = await this.configManager.hasValidConfig();
     if (!hasConfig) {
@@ -561,11 +541,17 @@ export class VertexSwarmChatRuntime {
       this.log('Backend not running, attempting lazy respawn...');
       try {
         const config = await this.configManager.getConfig();
-        const sessionToken = session.status === 'valid' ? session.token : '';
+        const sessionToken = token;
         await this.processManager.start(this.context, this.outputChannel, config, sessionToken);
       } catch (err: any) {
         this.log(`Failed to respawn backend: ${err.message}`);
-        this.post({ type: 'config-missing', payload: { reason: 'Backend process not running' } });
+
+        // Trap the explicit RS256 validation errors from the python backend
+        if (err.code === -32000 || err.code === -32001) {
+          this.post({ type: 'auth-required' });
+        } else {
+          this.post({ type: 'config-missing', payload: { reason: 'Backend process not running' } });
+        }
         return false;
       }
     }
@@ -574,7 +560,9 @@ export class VertexSwarmChatRuntime {
     if (rpcClient && rpcClient !== this.lastRegisteredRpcClient) {
       this.lastRegisteredRpcClient = rpcClient;
       rpcClient.on('stream/event', (params: any) => {
-        if (params.chat_id === this.currentChatId) {
+        const isCurrentChat = params.chat_id === this.currentChatId;
+
+        if (isCurrentChat) {
           this.log(this.describeEvent(params.event));
           if (params.event.type === 'plan_chunk') {
             this.planDocumentProvider?.appendPlanChunk(params.chat_id, params.event.content);
@@ -589,9 +577,14 @@ export class VertexSwarmChatRuntime {
             this.post({ type: 'cancel-stream' });
           }
           this.post({ type: 'event', payload: params.event });
-          if (params.event.type === 'tool_call') {
-            void this.handleToolCallEvent(params.event);
+        }
+
+        // Always execute tools, even for subagents running in the background
+        if (params.event.type === 'tool_call') {
+          if (!isCurrentChat) {
+            this.log(`subagent tool_call intercepted: ${params.event.metadata?.tool_name || params.event.metadata?.toolName || 'unknown'}`);
           }
+          void this.handleToolCallEvent(params.event);
         }
       });
     }
@@ -722,7 +715,7 @@ export class VertexSwarmChatRuntime {
       const startTime = Date.now();
       const result = await this.toolExecutor.handle(payload);
       const executionTime = Date.now() - startTime;
-      
+
       if (this.processManager.rpcClient) {
         this.processManager.rpcClient.sendNotification('tool/result', {
           tool_name: payload.tool_name,

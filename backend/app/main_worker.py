@@ -9,6 +9,7 @@ from app.config import WorkerConfig
 from app.nats_client import NATSClient
 from app.stdio_transport import StdioTransport
 from app.orchestrator import LLMOrchestrator
+from app.utils.auth_validator import validate_entitlement, EntitlementError
 
 logger = logging.getLogger(__name__)
 
@@ -39,7 +40,22 @@ class WorkerNode:
                 llm_reasoning_effort=params.get("llm_reasoning_effort", "low"),
             )
             
-            # TODO: Add Entitlement JWT validation here if needed
+            # Strict JWT Entitlement Validation
+            entitlement_token = params.get("entitlement_token")
+            try:
+                # Cryptographically verify the RS256 token using the baked-in Public Key
+                validate_entitlement(entitlement_token)
+            except EntitlementError as e:
+                logger.error(f"Entitlement validation failed: {e.message}")
+                await self.stdio.write_message({
+                    "jsonrpc": "2.0",
+                    "id": msg_id,
+                    "error": {
+                        "code": e.code,
+                        "message": f"Auth Error: {e.message}"
+                    }
+                })
+                return  # Abort initialization
 
             # Initialize NATS
             nats_port = params.get("nats_port", 4222)

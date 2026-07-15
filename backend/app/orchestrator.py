@@ -55,15 +55,6 @@ class LLMOrchestrator:
         else:
             logger.warning(f"Received tool result for unknown tool_call_id: {tool_call_id}")
 
-    async def spawn_subagent(self, prompt: str, task_type: str, timeout: int, depth: int) -> str:
-        reply = await self.nats.request(
-            "spawn.request",
-            {"prompt": prompt, "task_type": task_type, "timeout": timeout, "depth": depth},
-            timeout=5.0
-        )
-        response = reply
-        return response["agent_id"]
-
     async def handle_session_start(self, chat_id: str, message: str, context: dict) -> None:
         await _run_agent_loop_impl(self, chat_id, message, context)
 
@@ -271,11 +262,11 @@ def _log_trace_event(
 
 
 async def _run_agent_loop_impl(
-    orchestrator: LLMOrchestrator,
+    orchestrator: "LLMOrchestrator",
     chat_id: str,
     message: str,
     context: dict,
-):
+) -> str:
     user_id = context.get("user_id", "local_user")
     synthetic_session_id = context.get("synthetic_session_id", f"sess_{chat_id}")
     request_message_id = context.get("request_message_id", f"msg_{uuid4().hex[:12]}")
@@ -287,12 +278,14 @@ async def _run_agent_loop_impl(
     req_workspace_skeleton = context.get("workspace_skeleton", None)
     
     state_str = await orchestrator.nats.kv_get("SESSIONS", f"session.{chat_id}")
-    existing_active_categories = []
+    existing_active_categories = context.get("active_tool_categories", [])
     existing_tool_memory = {}
     if state_str:
         state = json.loads(state_str)
-        existing_active_categories = state.get("working_memory", {}).get("active_tool_categories", [])
-        existing_tool_memory = state.get("working_memory", {})
+        if "working_memory" in state and "active_tool_categories" in state["working_memory"]:
+            # Merge context inherited categories with session persisted categories
+            existing_active_categories = list(dict.fromkeys(existing_active_categories + state["working_memory"]["active_tool_categories"]))
+        existing_tool_memory = state.get("working_memory", {}).get("tool_memory", {})
 
     await orchestrator.file_store.append_message(chat_id, "user", message, message_id=request_message_id)
     history_raw = await orchestrator.file_store.read_messages(chat_id)
@@ -315,6 +308,13 @@ async def _run_agent_loop_impl(
         system_context_messages.append({"role": "system", "content": request_context_message})
     if tool_memory_message:
         system_context_messages.append({"role": "system", "content": tool_memory_message})
+        
+    task_type = context.get("task_type")
+    if task_type:
+        system_context_messages.append({
+            "role": "system", 
+            "content": f"Task Category: {task_type}\nYou are running as a specialized subagent focusing on this specific task type. Focus ONLY on this task and return your final comprehensive result to the parent orchestrator when complete."
+        })
 
     if system_context_messages:
         llm_messages = [
@@ -742,6 +742,74 @@ async def _run_agent_loop_impl(
                                 break
                         # ΓöÇΓöÇ end web_search ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
 
+                        # ┌──────────────── spawn_subagent interception ─────────────────────────
+                        if tool_name == "spawn_subagent":
+                            prompt = tool_args.get("prompt")
+                            task_type = tool_args.get("task_type")
+                            
+                            agent_id = uuid4().hex
+                            
+                            tool_event = _build_event(
+                                "tool_call",
+                                metadata={"phase": "tool_requested"},
+                                tool_call_id=tool_call_id,
+                                tool_name=tool_name,
+                                args=tool_args,
+                                session_id=synthetic_session_id,
+                                chat_id=str(chat_id),
+                                message_id=request_message_id,
+                            )
+                            await emit_trace_and_push(tool_event)
+
+                            logger.info(f"Spawning subagent {agent_id} for task: {task_type}")
+                            await emit_trace_and_push(build_status_event(f"Spawning subagent for '{task_type}'...", "spawning_subagent"))
+
+                            try:
+                                current_depth = context.get("depth", 0)
+                                if current_depth >= 5:
+                                    raise Exception("Maximum subagent depth of 5 reached.")
+                                
+                                # Subagents are recursive async calls to the same orchestrator loop
+                                subagent_context = {
+                                    "user_id": user_id,
+                                    "synthetic_session_id": f"sess_{agent_id}",
+                                    "request_message_id": f"msg_{uuid4().hex[:12]}",
+                                    "ide_context_enabled": False, 
+                                    "workspace_skeleton": req_workspace_skeleton,
+                                    "active_tool_categories": existing_active_categories,
+                                    "task_type": task_type,
+                                    "parent_id": str(chat_id),
+                                    "depth": current_depth + 1
+                                }
+                                
+                                # Await the subagent execution
+                                subagent_result = await _run_agent_loop_impl(
+                                    orchestrator,
+                                    agent_id,
+                                    prompt,
+                                    subagent_context
+                                )
+                                
+                                logger.info(f"Subagent {agent_id} completed.")
+                                success_event = _build_event("tool_result", metadata={"phase": "tool_result", "status": "success"}, status="success", content=f"Subagent finished. Result: {subagent_result}", tool_call_id=tool_call_id)
+                                await emit_trace_and_push(success_event)
+                                
+                                llm_messages.append(_assistant_tool_call_message(assistant_turn_content, tool_name, tool_call_id, tool_args, assistant_reasoning_content))
+                                llm_messages.append({"role": "tool", "tool_call_id": tool_call_id, "content": format_tool_response(tool_status="success", tool_content=subagent_result)})
+                                
+                                tool_call_requested = True
+                                break
+                            except Exception as e:
+                                logger.error(f"Subagent {agent_id} failed: {e}", exc_info=True)
+                                result_content = f"Subagent crashed with exception: {str(e)}"
+                                error_event = _build_event("tool_result", metadata={"phase": "tool_result", "status": "error", "error_code": "subagent_error"}, status="error", content=result_content, error_code="subagent_error", tool_call_id=tool_call_id)
+                                await emit_trace_and_push(error_event)
+                                llm_messages.append(_assistant_tool_call_message(assistant_turn_content, tool_name, tool_call_id, tool_args, assistant_reasoning_content))
+                                llm_messages.append({"role": "tool", "tool_call_id": tool_call_id, "content": format_tool_response(tool_status="error", tool_content=result_content, error_code="subagent_error")})
+                                tool_call_requested = True
+                                break
+                        # └──────────────── end spawn_subagent ─────────────────────────
+
                         tool_event = _build_event(
                             "tool_call",
                             metadata={"phase": "tool_requested"},
@@ -994,4 +1062,6 @@ async def _run_agent_loop_impl(
         await push_event({"type": "done", "messageId": request_message_id})
     except Exception:
         logger.exception("Failed to push done event")
+
+    return full_response
 

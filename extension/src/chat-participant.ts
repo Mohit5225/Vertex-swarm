@@ -1,7 +1,6 @@
 import * as vscode from 'vscode';
 import { ConfigManager } from './config-manager';
-import { TokenManager } from './token-manager';
-import { OAuthHandler } from './oauth-handler';
+import { EntitlementClient } from './auth/entitlement-client';
 import { VertexProcessManager } from './process-manager';
 import { VertexSwarmChatRuntime } from './chat-runtime';
 import { createRequestContext } from './request-context';
@@ -27,16 +26,14 @@ export class VertexSwarmChatParticipant {
 
   constructor(
     context: vscode.ExtensionContext,
-    tokenManager: TokenManager,
-    oauthHandler: OAuthHandler,
+    entitlementClient: EntitlementClient,
     configManager: ConfigManager,
     outputChannel: vscode.OutputChannel,
     logAuthToOutput: ((message: string) => void) | undefined,
     processManager: VertexProcessManager
   ) {
     this.runtime = new VertexSwarmChatRuntime({
-      tokenManager,
-      oauthHandler,
+      entitlementClient,
       configManager,
       context,
       outputChannel,
