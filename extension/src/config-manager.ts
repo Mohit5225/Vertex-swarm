@@ -17,7 +17,12 @@ export class ConfigManager {
     const llmBaseUrl = config.get<string>('llmBaseUrl') || 'https://api.deepseek.com/v1';
     const llmModel = config.get<string>('llmModel') || 'deepseek-chat';
     
-    const llmKey = await this.context.secrets.get('llm_key') || '';
+    let llmKey = await this.context.secrets.get('llm_key') || '';
+    if (!llmKey) {
+      // Retry once after 500ms in case SecretStorage is still initializing on startup
+      await new Promise(resolve => setTimeout(resolve, 500));
+      llmKey = await this.context.secrets.get('llm_key') || '';
+    }
     const exaKey = await this.context.secrets.get('exa_key') || '';
 
     return {

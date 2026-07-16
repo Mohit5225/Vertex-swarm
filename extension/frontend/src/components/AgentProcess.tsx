@@ -184,6 +184,7 @@ const FILE_OPS = new Set([
   'delete_path',
   'rename_path',
   'write_file',
+  'write_to_file',
   'replace_file_content',
   'multi_replace_file_content',
   'delete_file'
@@ -218,12 +219,14 @@ const extractTerminalOutput = (resultDebug: any): string => {
   const data = resultDebug.data
   if (data) {
     if (typeof data.output === 'string') return data.output
+    if (typeof data.output_tail === 'string') return data.output_tail
     if (typeof data.stdout === 'string' || typeof data.stderr === 'string') {
       return [data.stdout, data.stderr].filter(Boolean).join('\n')
     }
   }
 
   if (typeof resultDebug.output === 'string') return resultDebug.output
+  if (typeof resultDebug.output_tail === 'string') return resultDebug.output_tail
 
   try {
     return JSON.stringify(resultDebug, null, 2)
@@ -242,11 +245,14 @@ const TerminalCard: React.FC<{
   expanded?: boolean
 }> = ({ node, expanded }) => {
   const data = (node.resultDebug as any)?.data as
-    | { terminal_name?: string; command?: string; exit_code?: number | null }
+    | { terminal_name?: string; command?: string; exit_code?: number | null; pid?: number; job_id?: string }
     | undefined
 
-  const terminalName = data?.terminal_name ?? (node.requestDebug as any)?.args?.payload?.terminal_context?.name ?? (node.requestDebug as any)?.args?.payload?.terminal_name ?? 'Vertex Worker'
-  const command = data?.command ?? (node.requestDebug as any)?.args?.payload?.command ?? ''
+  const payload = (node.requestDebug as any)?.args?.payload || {}
+  const userVisible = payload.user_visible ?? (payload.mode !== 'background')
+  
+  const terminalName = data?.terminal_name ?? payload.terminal_context?.name ?? payload.terminal_name ?? 'Vertex Worker'
+  const command = data?.command ?? payload.command ?? ''
   const exitCode = data?.exit_code
   const durationMs =
     node.completedAt && node.startedAt ? node.completedAt - node.startedAt : undefined
@@ -264,7 +270,7 @@ const TerminalCard: React.FC<{
         <div className="mb-2 flex items-center justify-between text-[11px] font-medium text-[#7f91b4]">
           <div className="flex items-center gap-2">
             <Terminal className="h-3.5 w-3.5" />
-            <span>{terminalName}</span>
+            <span>{userVisible ? terminalName : `Background Job ${data?.pid ? `(PID ${data.pid})` : ''}`}</span>
           </div>
           <div className="flex items-center gap-3">
             {exitCode !== undefined && exitCode !== null && (
@@ -295,14 +301,16 @@ const TerminalCard: React.FC<{
         <div className="border-t border-white/[0.05] bg-[#06090e]">
           <div className="flex items-center justify-between px-3 py-2 bg-white/[0.02]">
             <span className="text-[10px] font-medium text-[#6f81a1] uppercase tracking-wider">Command Output</span>
-            <button
-              type="button"
-              onClick={handleShowTerminal}
-              className="flex items-center gap-1.5 rounded text-[10px] font-medium text-[#7d8cf0] transition hover:text-[#9eb1ff]"
-            >
-              <Terminal className="h-3 w-3" />
-              Open Terminal Panel
-            </button>
+            {userVisible && (
+              <button
+                type="button"
+                onClick={handleShowTerminal}
+                className="flex items-center gap-1.5 rounded text-[10px] font-medium text-[#7d8cf0] transition hover:text-[#9eb1ff]"
+              >
+                <Terminal className="h-3 w-3" />
+                Open Terminal Panel
+              </button>
+            )}
           </div>
           <div className="p-3 overflow-x-auto max-h-[300px] custom-scrollbar">
             <pre className="font-mono text-[11px] leading-5 text-[#a1b0cb] whitespace-pre-wrap break-words">
@@ -310,7 +318,7 @@ const TerminalCard: React.FC<{
             </pre>
           </div>
         </div>
-      ) : (
+      ) : userVisible ? (
         <div className="px-3 pb-3 flex justify-end">
           <button
             type="button"
@@ -320,6 +328,10 @@ const TerminalCard: React.FC<{
             <Terminal className="h-3 w-3" />
             Show Terminal
           </button>
+        </div>
+      ) : (
+        <div className="px-3 pb-3 flex justify-end">
+          <span className="text-[10px] font-medium text-[#6f81a1]">Running in background</span>
         </div>
       )}
     </div>

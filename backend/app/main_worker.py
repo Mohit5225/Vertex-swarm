@@ -150,8 +150,33 @@ class WorkerNode:
             self.orchestrator.config.llm_base_url = params["llm_base_url"]
         if "llm_model" in params:
             self.orchestrator.config.llm_model = params["llm_model"]
+        if "entitlementToken" in params:
+            self.orchestrator.config.entitlement_token = params["entitlementToken"]
+        elif "entitlement_token" in params:
+            self.orchestrator.config.entitlement_token = params["entitlement_token"]
         
         logger.info("Keys and config updated dynamically from extension.")
+
+    async def handle_background_event(self, params: Dict[str, Any]):
+        if not self.orchestrator:
+            return
+        
+        chat_id = params.get("chat_id")
+        job_id = params.get("job_id")
+        status = params.get("status")
+        
+        if not chat_id or not job_id:
+            return
+            
+        system_message = f"[System Notification: Background task {job_id} completed with status: {status}. Use terminal_ops -> get_output to read the final result.]"
+        
+        logger.info(f"Received background event for job {job_id} in chat {chat_id}. Waking up LLM.")
+        
+        # Forge a session/start parameter dict to wake up the LLM
+        wakeup_params = params.copy()
+        wakeup_params["message"] = system_message
+        
+        await self.handle_session_start(wakeup_params)
 
     async def run(self):
         logger.info("Worker started. Waiting for messages on stdio.")
@@ -175,6 +200,8 @@ class WorkerNode:
                     await self.handle_tool_result(params)
                 elif method == "config/update_keys":
                     await self.handle_update_keys(params)
+                elif method == "background/event":
+                    await self.handle_background_event(params)
                 else:
                     logger.warning(f"Unknown method: {method}")
             except Exception as e:

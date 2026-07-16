@@ -79,7 +79,7 @@ const startRestoreWatchdog = () => {
       loading: false,
       error: "Extension session restore timed out. Reload the window.",
     });
-  }, 4000);
+  }, 30000);
 };
 
 const handleExtensionMessage = (event: MessageEvent) => {

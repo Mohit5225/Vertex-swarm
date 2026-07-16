@@ -189,7 +189,7 @@ export class VertexProcessManager implements vscode.Disposable {
 
   private async waitForNats(port: number): Promise<void> {
     return new Promise((resolve, reject) => {
-      const maxRetries = 50; // 5s (50 * 100ms)
+      const maxRetries = 150; // 15s (150 * 100ms)
       let retries = 0;
 
       const tryConnect = () => {

@@ -3,7 +3,7 @@ import { create } from 'zustand'
 export interface SessionEvent {
   id: string
   type: 'thinking' | 'code' | 'output' | 'error' | 'status' | 'tool_call' | 'tool_result'
-      | 'plan_permission_request' | 'plan_chunk' | 'plan_ready' | 'todo_init' | 'todo_update'
+      | 'plan_permission_request' | 'plan_chunk' | 'plan_ready' | 'todo_init' | 'todo_update' | 'todo_clear'
   content?: string
   timestamp?: number
   metadata?: Record<string, unknown>
@@ -198,44 +198,9 @@ const shouldMergeEvent = (previous: SessionEvent | undefined, next: SessionEvent
 const normalizeEventComparisonContent = (content?: string) =>
   typeof content === 'string' ? content.replace(/\s+/g, ' ').trim() : ''
 
-const mergeStreamingText = (previousContent: string, nextContent: string) => {
-  if (!previousContent) {
-    return nextContent
-  }
-
-  if (!nextContent) {
-    return previousContent
-  }
-
-  if (previousContent === nextContent) {
-    return previousContent
-  }
-
-  if (nextContent.startsWith(previousContent)) {
-    return nextContent
-  }
-
-  if (previousContent.endsWith(nextContent)) {
-    return previousContent
-  }
-
-  const maxOverlap = Math.min(previousContent.length, nextContent.length)
-
-  for (let overlapLength = maxOverlap; overlapLength > 0; overlapLength -= 1) {
-    if (
-      previousContent.slice(-overlapLength) ===
-      nextContent.slice(0, overlapLength)
-    ) {
-      return `${previousContent}${nextContent.slice(overlapLength)}`
-    }
-  }
-
-  return `${previousContent}${nextContent}`
-}
-
 const mergeEvent = (previous: SessionEvent, next: SessionEvent): SessionEvent => ({
   ...previous,
-  content: mergeStreamingText(previous.content || '', next.content || ''),
+  content: appendEventContent(previous.content || '', next),
   timestamp: next.timestamp,
   metadata: {
     ...(previous.metadata || {}),

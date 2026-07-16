@@ -15,6 +15,7 @@ const KNOWN_EVENT_TYPES: SessionEvent['type'][] = [
   'plan_ready',
   'todo_init',
   'todo_update',
+  'todo_clear',
 ]
 
 const asRecord = (value: unknown): UnknownRecord | undefined =>

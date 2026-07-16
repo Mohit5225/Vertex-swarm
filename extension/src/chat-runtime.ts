@@ -60,6 +60,7 @@ export class VertexSwarmChatRuntime {
   private streamCancellationRequested: boolean = false;
   private staticContext: { os: string; workspaceFolders: string[] } | null = null;
   private lastRegisteredRpcClient: any = null;
+  private sessionMaintenanceInterval?: NodeJS.Timeout;
 
   constructor(options: VertexSwarmChatRuntimeOptions) {
     this.entitlementClient = options.entitlementClient;
@@ -71,8 +72,18 @@ export class VertexSwarmChatRuntime {
     this.planDocumentProvider = options.planDocumentProvider;
     this.fileSystemService = new FileSystemService();
     this.terminalService = new TerminalService(
+      options.context,
       (msg) => this.log(msg),
-      (event) => this.post({ type: 'event', payload: event })
+      (event) => this.post({ type: 'event', payload: event }),
+      (jobId, status, chatId) => {
+        if (this.processManager.rpcClient) {
+          this.processManager.rpcClient.sendNotification('background/event', {
+            job_id: jobId,
+            status: status,
+            chat_id: chatId
+          });
+        }
+      }
     );
     this.workspaceStore = new WorkspaceStore();
     this.context.subscriptions.push(this.workspaceStore);
@@ -84,6 +95,30 @@ export class VertexSwarmChatRuntime {
       (message: string) => this.log(message)
     );
     this.processManager = options.processManager;
+
+    // Actively maintain session in the background (runs every 45 seconds)
+    this.sessionMaintenanceInterval = setInterval(() => {
+      this.maintainSession();
+    }, 45 * 1000);
+  }
+
+  private async maintainSession(): Promise<void> {
+    try {
+      const token = await this.entitlementClient.getToken();
+      if (!token) return;
+
+      const check = await this.entitlementClient.checkEntitlement(token);
+      // Refresh if it expires in less than 2 minutes
+      if (check.exp * 1000 < Date.now() + 2 * 60 * 1000) {
+        this.log('Background session maintenance: token expiring soon, refreshing...');
+        const refreshed = await this.entitlementClient.refreshToken();
+        if (refreshed && this.processManager.rpcClient) {
+          this.processManager.rpcClient.sendNotification('config/update_keys', { entitlementToken: refreshed });
+        }
+      }
+    } catch (e) {
+      this.log(`Background session maintenance failed: ${e}`);
+    }
   }
 
   private log(message: string) {
@@ -550,7 +585,7 @@ export class VertexSwarmChatRuntime {
         if (err.code === -32000 || err.code === -32001) {
           this.post({ type: 'auth-required' });
         } else {
-          this.post({ type: 'config-missing', payload: { reason: 'Backend process not running' } });
+          this.post({ type: 'error', payload: `Backend process failed to start: ${err.message}` });
         }
         return false;
       }

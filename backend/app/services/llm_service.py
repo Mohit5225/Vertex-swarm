@@ -11,6 +11,7 @@ from openai import AsyncOpenAI
 
 from app.config import WorkerConfig
 from app.services.tool_schemas import WORKSPACE_OPS_TOOL_SPEC, TERMINAL_OPS_TOOL_SPEC, LOAD_TOOL_CONTEXT_TOOL_SPEC, PLAN_TOOL_SPEC, TODO_TOOL_SPEC, WEB_SEARCH_TOOL_SPEC, SPAWN_SUBAGENT_TOOL_SPEC
+from app.prompts.engineering_standards import ENGINEERING_STANDARDS_PERSONA
 
 logger = logging.getLogger(__name__)
 context_logger = logging.getLogger("app.context")
@@ -128,7 +129,7 @@ def _build_system_prompt(
     active_tool_guidance: str | None = None,
 ) -> str:
     """Build system prompt, injecting workspace context and any loaded tool guidance."""
-    parts = [DEVELOPER_ASSISTANT_PERSONA]
+    parts = [DEVELOPER_ASSISTANT_PERSONA, ENGINEERING_STANDARDS_PERSONA]
 
     if active_tool_guidance:
         parts.append(active_tool_guidance)
