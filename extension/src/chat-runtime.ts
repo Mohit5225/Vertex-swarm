@@ -107,6 +107,10 @@ export class VertexSwarmChatRuntime {
       if (!token) return;
 
       const check = await this.entitlementClient.checkEntitlement(token);
+      if (!check.valid && check.exp === 0) {
+        this.log('Session token failed local issuer/format checks.');
+        return;
+      }
       // Refresh if it expires within the buffer
       if (check.exp * 1000 < Date.now() + VertexSwarmChatRuntime.TOKEN_REFRESH_BUFFER_MS) {
         this.log('Background session maintenance: token expiring soon, refreshing...');
@@ -199,7 +203,9 @@ export class VertexSwarmChatRuntime {
           let token = await this.entitlementClient.getToken();
           if (token) {
             const check = await this.entitlementClient.checkEntitlement(token);
-            if (check.exp * 1000 < Date.now() + VertexSwarmChatRuntime.TOKEN_REFRESH_BUFFER_MS) {
+            if (!check.valid && check.exp === 0) {
+              token = undefined;
+            } else if (check.exp * 1000 < Date.now() + VertexSwarmChatRuntime.TOKEN_REFRESH_BUFFER_MS) {
               this.log('Token expiring within 5 minutes, refreshing...');
               const refreshed = await this.entitlementClient.refreshToken();
               if (refreshed) {
@@ -368,7 +374,6 @@ export class VertexSwarmChatRuntime {
       case 'logout': {
         this.log('logout requested from webview');
         this.currentChatId = null;
-        await vscode.commands.executeCommand('vertex-swarm.logout');
         await this.handleLogout('User initiated logout');
         break;
       }
@@ -533,6 +538,7 @@ export class VertexSwarmChatRuntime {
 
   public async handleLogout(reason?: string): Promise<void> {
     await this.entitlementClient.logout();
+    this.processManager.dispose();
     this.post({ type: 'logged-out', payload: { reason: reason || null } });
   }
 
@@ -543,7 +549,9 @@ export class VertexSwarmChatRuntime {
 
     if (token) {
       const check = await this.entitlementClient.checkEntitlement(token);
-      if (check.exp * 1000 < Date.now() + VertexSwarmChatRuntime.TOKEN_REFRESH_BUFFER_MS) {
+      if (!check.valid && check.exp === 0) {
+        token = undefined;
+      } else if (check.exp * 1000 < Date.now() + VertexSwarmChatRuntime.TOKEN_REFRESH_BUFFER_MS) {
         this.log('Session expiring, attempting automatic JWT refresh...');
         const refreshed = await this.entitlementClient.refreshToken();
         if (refreshed) {

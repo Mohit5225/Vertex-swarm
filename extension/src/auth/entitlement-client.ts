@@ -1,5 +1,6 @@
 import * as vscode from 'vscode';
 import * as http from 'http';
+import * as crypto from 'crypto';
 
 export interface EntitlementResult {
   valid: boolean;
@@ -12,17 +13,30 @@ export class EntitlementClient {
   private readonly authApiUrl: string;
   private localServer: http.Server | null = null;
   private allocatedPort: number | null = null;
-  private pendingAccessToken: string | null = null;
-  private pendingRefreshToken: string | null = null;
+  private pendingAuthorizationCode: string | null = null;
+  private pendingState: string | null = null;
+  private pendingCodeVerifier: string | null = null;
+  private pendingRedirectUri: string | null = null;
+  private refreshPromise: Promise<string | undefined> | null = null;
   private pendingError: string | null = null;
 
   constructor(
     private readonly secretStorage: vscode.SecretStorage,
     private readonly logMessage?: (message: string) => void
   ) {
-    // URL for the Hosted Auth API (Phase 7)
-    // Defaulting to a local mock address for development
-    this.authApiUrl = process.env.VERTEX_HOSTED_AUTH_URL || 'http://localhost:8080';
+    const configuredUrl = process.env.VERTEX_HOSTED_AUTH_URL || 'http://localhost:8080';
+    let parsedUrl: URL;
+    try {
+      parsedUrl = new URL(configuredUrl);
+    } catch {
+      throw new Error('VERTEX_HOSTED_AUTH_URL must be a valid absolute URL');
+    }
+    const isLocalHttp = parsedUrl.protocol === 'http:' &&
+      ['localhost', '127.0.0.1', '[::1]'].includes(parsedUrl.hostname);
+    if (parsedUrl.protocol !== 'https:' && !isLocalHttp) {
+      throw new Error('Hosted auth must use HTTPS outside localhost development');
+    }
+    this.authApiUrl = parsedUrl.toString().replace(/\/$/, '');
   }
 
   private log(message: string): void {
@@ -63,13 +77,13 @@ export class EntitlementClient {
       const payloadStr = Buffer.from(payloadBase64, 'base64').toString('utf8');
       const payload = JSON.parse(payloadStr);
 
-      if (payload.iss && payload.iss !== 'vertex-swarm-backend') {
-        this.warn(`Invalid issuer: ${payload.iss}`);
+      if (payload.iss !== 'vertex-swarm-backend') {
+        this.warn(`Invalid or missing issuer: ${String(payload.iss)}`);
         return { valid: false, tier: 'none', exp: 0 };
       }
 
-      const exp = payload.exp || 0;
-      const valid = exp * 1000 > Date.now();
+      const exp = typeof payload.exp === 'number' ? payload.exp : 0;
+      const valid = Number.isFinite(exp) && exp * 1000 > Date.now();
 
       return { valid, tier: payload.tier || 'free', exp };
     } catch (err) {
@@ -82,6 +96,15 @@ export class EntitlementClient {
    * Refreshes the token against the Hosted Auth API using the current JWT.
    */
   async refreshToken(): Promise<string | undefined> {
+    if (!this.refreshPromise) {
+      this.refreshPromise = this.refreshTokenInternal().finally(() => {
+        this.refreshPromise = null;
+      });
+    }
+    return this.refreshPromise;
+  }
+
+  private async refreshTokenInternal(): Promise<string | undefined> {
     try {
       const refreshToken = await this.secretStorage.get('vertex_refresh_jwt');
       if (!refreshToken) {
@@ -89,7 +112,7 @@ export class EntitlementClient {
         return undefined;
       }
 
-      const response = await fetch(`${this.authApiUrl}/oauth/refresh`, {
+      const response = await fetch(this.authEndpoint('/oauth/refresh'), {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json'
@@ -112,22 +135,36 @@ export class EntitlementClient {
     }
   }
 
-  /**
-   * Triggers the full OAuth flow.
-   * Spawns a local HTTP server on an ephemeral port, opens browser to hosted auth.
-   */
+  /** Triggers an authorization-code flow using PKCE and a loopback callback. */
   async startAuthFlow(): Promise<string> {
     try {
       await this.startCallbackServer();
-      const callbackUrl = encodeURIComponent(`http://localhost:${this.allocatedPort}/callback`);
-      const authUrl = `${this.authApiUrl}/oauth/start?callback=${callbackUrl}`;
+      if (!this.allocatedPort) {
+        throw new Error('OAuth callback server did not allocate a port');
+      }
 
-      await vscode.env.openExternal(vscode.Uri.parse(authUrl));
+      const state = crypto.randomBytes(32).toString('base64url');
+      const codeVerifier = crypto.randomBytes(64).toString('base64url');
+      const codeChallenge = crypto.createHash('sha256').update(codeVerifier).digest('base64url');
+      const redirectUri = `http://127.0.0.1:${this.allocatedPort}/callback`;
+      this.pendingState = state;
+      this.pendingCodeVerifier = codeVerifier;
+      this.pendingRedirectUri = redirectUri;
 
-      const tokens = await this.waitForCallback(EntitlementClient.AUTH_TIMEOUT_MS);
-      if (!tokens) {
+      const authUrl = new URL(this.authEndpoint('/oauth/start'));
+      authUrl.searchParams.set('redirect_uri', redirectUri);
+      authUrl.searchParams.set('state', state);
+      authUrl.searchParams.set('code_challenge', codeChallenge);
+      authUrl.searchParams.set('code_challenge_method', 'S256');
+
+      await vscode.env.openExternal(vscode.Uri.parse(authUrl.toString()));
+
+      const code = await this.waitForCallback(EntitlementClient.AUTH_TIMEOUT_MS);
+      if (!code || !this.pendingCodeVerifier || !this.pendingRedirectUri) {
         throw new Error('Authentication timed out. Please try again.');
       }
+
+      const tokens = await this.exchangeAuthorizationCode(code, this.pendingCodeVerifier, this.pendingRedirectUri);
 
       await this.secretStorage.store('vertex_access_jwt', tokens.accessToken);
       await this.secretStorage.store('vertex_refresh_jwt', tokens.refreshToken);
@@ -139,6 +176,7 @@ export class EntitlementClient {
       throw error;
     } finally {
       await this.stopCallbackServer();
+      this.clearPendingAuthorization();
     }
   }
 
@@ -146,7 +184,7 @@ export class EntitlementClient {
     const refreshToken = await this.secretStorage.get('vertex_refresh_jwt');
     if (refreshToken) {
       try {
-        await fetch(`${this.authApiUrl}/oauth/logout`, {
+        await fetch(this.authEndpoint('/oauth/logout'), {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
@@ -170,8 +208,7 @@ export class EntitlementClient {
     }
 
     return new Promise((resolve, reject) => {
-      this.pendingAccessToken = null;
-      this.pendingRefreshToken = null;
+      this.pendingAuthorizationCode = null;
       this.pendingError = null;
 
       const server = http.createServer((req, res) => void this.handleRequest(req, res));
@@ -217,28 +254,22 @@ export class EntitlementClient {
   }
 
   private async handleRequest(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
-    const cors = {
-      'Access-Control-Allow-Origin': '*',
-      'Access-Control-Allow-Methods': 'GET, OPTIONS',
-    };
-
-    if (req.method === 'OPTIONS') {
-      res.writeHead(204, cors);
-      res.end();
-      return;
-    }
-
     try {
-      const url = new URL(req.url || '/', `http://localhost:${this.allocatedPort}`);
+      const url = new URL(req.url || '/', `http://127.0.0.1:${this.allocatedPort}`);
 
       if (req.method === 'GET' && url.pathname === '/callback') {
-        const accessToken = url.searchParams.get('access_token');
-        const refreshToken = url.searchParams.get('refresh_token');
+        const code = url.searchParams.get('code');
+        const state = url.searchParams.get('state');
         const error = url.searchParams.get('error');
 
-        if (accessToken && refreshToken) {
-          this.pendingAccessToken = accessToken;
-          this.pendingRefreshToken = refreshToken;
+        if (!this.stateMatches(state)) {
+          this.pendingError = 'Invalid OAuth state. Please start sign-in again.';
+          this.serveHtml(res, this.buildErrorPage(this.pendingError));
+        } else if (url.searchParams.has('access_token') || url.searchParams.has('refresh_token')) {
+          this.pendingError = 'Token callbacks are not accepted.';
+          this.serveHtml(res, this.buildErrorPage(this.pendingError));
+        } else if (code) {
+          this.pendingAuthorizationCode = code;
           this.serveHtml(res, this.buildSuccessPage());
         } else if (error) {
           this.pendingError = error;
@@ -257,13 +288,13 @@ export class EntitlementClient {
     }
   }
 
-  private async waitForCallback(timeoutMs: number): Promise<{ accessToken: string, refreshToken: string } | null> {
+  private async waitForCallback(timeoutMs: number): Promise<string | null> {
     const startTime = Date.now();
     return new Promise((resolve, reject) => {
       const interval = setInterval(() => {
-        if (this.pendingAccessToken && this.pendingRefreshToken) {
+        if (this.pendingAuthorizationCode) {
           clearInterval(interval);
-          resolve({ accessToken: this.pendingAccessToken, refreshToken: this.pendingRefreshToken });
+          resolve(this.pendingAuthorizationCode);
         } else if (this.pendingError) {
           clearInterval(interval);
           reject(new Error(this.pendingError));
@@ -278,6 +309,47 @@ export class EntitlementClient {
   private serveHtml(res: http.ServerResponse, html: string): void {
     res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
     res.end(html);
+  }
+
+  private authEndpoint(path: string): string {
+    return new URL(path, `${this.authApiUrl}/`).toString();
+  }
+
+  private stateMatches(state: string | null): boolean {
+    if (!state || !this.pendingState) {
+      return false;
+    }
+    const expected = Buffer.from(this.pendingState, 'utf8');
+    const actual = Buffer.from(state, 'utf8');
+    return expected.length === actual.length && crypto.timingSafeEqual(expected, actual);
+  }
+
+  private async exchangeAuthorizationCode(
+    code: string,
+    codeVerifier: string,
+    redirectUri: string,
+  ): Promise<{ accessToken: string; refreshToken: string }> {
+    const response = await fetch(this.authEndpoint('/oauth/token'), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ code, code_verifier: codeVerifier, redirect_uri: redirectUri }),
+    });
+    if (!response.ok) {
+      throw new Error(`Authorization-code exchange failed: status ${response.status}`);
+    }
+    const data = await response.json() as { access_token?: unknown; refresh_token?: unknown };
+    if (typeof data.access_token !== 'string' || typeof data.refresh_token !== 'string') {
+      throw new Error('Authorization-code exchange returned an invalid token response');
+    }
+    return { accessToken: data.access_token, refreshToken: data.refresh_token };
+  }
+
+  private clearPendingAuthorization(): void {
+    this.pendingAuthorizationCode = null;
+    this.pendingState = null;
+    this.pendingCodeVerifier = null;
+    this.pendingRedirectUri = null;
+    this.pendingError = null;
   }
 
   private buildSuccessPage(): string {
@@ -306,6 +378,13 @@ export class EntitlementClient {
   }
 
   private buildErrorPage(error: string): string {
+    const safeError = error.replace(/[&<>"']/g, (character) => ({
+      '&': '&amp;',
+      '<': '&lt;',
+      '>': '&gt;',
+      '"': '&quot;',
+      "'": '&#39;',
+    })[character] || character);
     return `
       <!DOCTYPE html>
       <html lang="en">
@@ -324,7 +403,7 @@ export class EntitlementClient {
           <div class="container">
               <h1>Authentication Failed</h1>
               <p>There was a problem signing you in.</p>
-              <div class="error">${error}</div>
+              <div class="error">${safeError}</div>
               <p>You can close this tab and try again in VS Code.</p>
           </div>
       </body>

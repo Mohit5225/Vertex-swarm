@@ -122,9 +122,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   // Logout command (executes actual logout)
   context.subscriptions.push(
     vscode.commands.registerCommand('vertex-swarm.logout', async () => {
-      await entitlementClient.logout();
-      // Reset the sidebar locally without redirecting the user elsewhere.
-      // Deprecated in favor of the frontend component's logout calling chat-runtime.
+      await sidebarProvider.handleLogout('User initiated logout');
     })
   );
 }

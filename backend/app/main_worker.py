@@ -90,8 +90,21 @@ class WorkerNode:
                 }
             })
 
+    def has_valid_entitlement(self) -> bool:
+        """Authorize work at the point it is executed, not only at startup."""
+        if not self.orchestrator:
+            return False
+        try:
+            validate_entitlement(self.orchestrator.config.entitlement_token)
+            return True
+        except EntitlementError as exc:
+            logger.warning("Rejected privileged worker action: %s", exc.message)
+            return False
+
     async def handle_session_start(self, params: Dict[str, Any]):
         if not self.orchestrator:
+            return
+        if not self.has_valid_entitlement():
             return
 
         chat_id = params.get("chat_id")
@@ -125,6 +138,8 @@ class WorkerNode:
     async def handle_tool_result(self, params: Dict[str, Any]):
         if not self.orchestrator:
             return
+        if not self.has_valid_entitlement():
+            return
             
         chat_id = params.get("chat_id")
         tool_call_id = params.get("tool_call_id")
@@ -140,6 +155,16 @@ class WorkerNode:
 
     async def handle_update_keys(self, params: Dict[str, Any]):
         if not self.orchestrator:
+            return
+
+        replacement_token = params.get("entitlement_token")
+        if replacement_token is not None:
+            try:
+                validate_entitlement(replacement_token)
+            except EntitlementError as exc:
+                logger.warning("Rejected invalid entitlement-token update: %s", exc.message)
+                return
+        elif not self.has_valid_entitlement():
             return
         
         if "llm_key" in params:
@@ -157,6 +182,8 @@ class WorkerNode:
 
     async def handle_background_event(self, params: Dict[str, Any]):
         if not self.orchestrator:
+            return
+        if not self.has_valid_entitlement():
             return
         
         chat_id = params.get("chat_id")
