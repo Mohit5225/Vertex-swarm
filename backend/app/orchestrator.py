@@ -121,6 +121,38 @@ def _assistant_tool_call_message(
     return assistant_message
 
 
+def _assistant_tool_call_message_multi(
+    assistant_turn_content: str,
+    tool_calls: list[dict[str, Any]],
+    assistant_reasoning_content: str = "",
+) -> dict[str, Any]:
+    """Build an assistant message carrying multiple parallel tool call requests.
+
+    The OpenAI chat completions API allows a single assistant turn to request
+    multiple tool calls simultaneously.  All of those call descriptors must
+    live inside the same ``tool_calls`` list so the subsequent ``tool``
+    messages can be matched back by ``tool_call_id``.
+    """
+    assistant_message: dict[str, Any] = {
+        "role": "assistant",
+        "content": assistant_turn_content or None,
+        "tool_calls": [
+            {
+                "id": call["tool_call_id"],
+                "type": "function",
+                "function": {
+                    "name": call["tool_name"],
+                    "arguments": json.dumps(call["args"], separators=(",", ":"), sort_keys=True),
+                },
+            }
+            for call in tool_calls
+        ],
+    }
+    if assistant_reasoning_content:
+        assistant_message["reasoning_content"] = assistant_reasoning_content
+    return assistant_message
+
+
 def _build_request_context_message(request_context: dict[str, Any] | None) -> str | None:
     if not request_context:
         return None
@@ -261,6 +293,325 @@ def _log_trace_event(
 
 
 
+# ---------------------------------------------------------------------------
+# _execute_tool_call
+# ---------------------------------------------------------------------------
+# A standalone coroutine that handles exactly ONE tool call event produced by
+# the LLM.  It is designed to be awaited via asyncio.gather so that several
+# tool calls requested in the same LLM turn can run concurrently.
+#
+# Returns a (tool_call_id, tool_name, result_content, result_status,
+# error_code) tuple so the caller can build tool-role messages without any
+# shared mutable state.
+# ---------------------------------------------------------------------------
+
+async def _execute_tool_call(
+    orchestrator: "LLMOrchestrator",
+    event: dict[str, Any],
+    *,
+    # ── context forwarded from the parent agent loop ──────────────────────
+    user_id: str,
+    chat_id: str,
+    synthetic_session_id: str,
+    request_message_id: str,
+    req_workspace_skeleton: str | None,
+    existing_active_categories: list[str],
+    context: dict,
+    # ── callbacks so we can push UI events without sharing mutable state ──
+    emit_trace_and_push: Any,
+    build_status_event: Any,
+    # ── mutable shared state (load_tool_context updates these) ───────────
+    active_tool_guidance_holder: list[str | None],  # [0] is the current value
+    active_categories_holder: list[list[str]],       # [0] is the current list
+) -> tuple[str, str, str, str, str | None]:  # (tool_call_id, tool_name, content, status, error_code)
+    """Execute a single tool call and return its result tuple.
+
+    Designed to run concurrently with other _execute_tool_call coroutines via
+    asyncio.gather.  All I/O is awaited; no shared mutable state is written
+    except through the explicit *_holder lists (which are only written by
+    load_tool_context, and that tool is never parallelised).
+    """
+    tool_name: str = event.get("tool_name", "")
+    tool_call_id: str = event.get("tool_call_id", "")
+    tool_args: dict[str, Any] = event.get("args", {})
+    if not isinstance(tool_args, dict):
+        tool_args = {}
+
+    # ── load_tool_context ──────────────────────────────────────────────────
+    if tool_name in ("load_tool_context", "workspace_ops.load_tool_context"):
+        requested = tool_args.get("categories", [])
+        if not isinstance(requested, list):
+            requested = []
+        valid = [c for c in requested if c in SUPPORTED_CATEGORIES]
+
+        loaded_prose = load_categories(valid)
+        newly_loaded = list(loaded_prose.keys())
+
+        merged = list(dict.fromkeys(active_categories_holder[0] + newly_loaded))
+        active_categories_holder[0] = merged
+        active_tool_guidance_holder[0] = build_injected_guidance(merged) or None
+
+        try:
+            state_str = await orchestrator.nats.kv_get("SESSIONS", f"session.{chat_id}")
+            if state_str:
+                state = json.loads(state_str)
+                if "working_memory" not in state:
+                    state["working_memory"] = {}
+                state["working_memory"]["active_tool_categories"] = merged
+                await orchestrator.nats.kv_set("SESSIONS", f"session.{chat_id}", json.dumps(state))
+                await orchestrator.file_store.write_session(chat_id, state)
+        except Exception:
+            logger.exception("Failed to persist active_tool_categories session_id=%s", synthetic_session_id)
+
+        if newly_loaded:
+            label = ", ".join(c.replace("_", " ").title() for c in newly_loaded)
+            await emit_trace_and_push(
+                build_status_event(f"Loaded {label} guidance", "tool_context_loaded")
+            )
+
+        combined_prose = "\n\n---\n\n".join(loaded_prose.values())
+        result_content = (
+            f"Tool guidance loaded for: {', '.join(newly_loaded)}.\n\n{combined_prose}"
+            if newly_loaded
+            else f"No new categories loaded. Already active: {', '.join(active_categories_holder[0]) or 'none'}."
+        )
+        return (tool_call_id, tool_name, result_content, "success", None)
+
+    # ── plan_tool ─────────────────────────────────────────────────────────
+    if tool_name == "plan_tool":
+        action = tool_args.get("action")
+        payload = tool_args.get("payload", {})
+
+        tool_event = _build_event(
+            "tool_call",
+            metadata={"phase": "tool_requested"},
+            tool_call_id=tool_call_id,
+            tool_name=tool_name,
+            args=tool_args,
+            session_id=synthetic_session_id,
+            chat_id=str(chat_id),
+            message_id=request_message_id,
+        )
+        await emit_trace_and_push(tool_event)
+
+        if action == "revise" and not payload.get("plan_id"):
+            result_content = "Error: 'revise' action requires a 'plan_id' in the payload."
+            error_event = _build_event("tool_result", metadata={"phase": "tool_result", "status": "error", "error_code": "validation_error"}, status="error", content=result_content, error_code="validation_error", tool_call_id=tool_call_id)
+            await emit_trace_and_push(error_event)
+            return (tool_call_id, tool_name, result_content, "error", "validation_error")
+
+        if action == "present" and payload.get("plan_id"):
+            result_content = "Error: 'present' action must NOT include a 'plan_id' in the payload."
+            error_event = _build_event("tool_result", metadata={"phase": "tool_result", "status": "error", "error_code": "validation_error"}, status="error", content=result_content, error_code="validation_error", tool_call_id=tool_call_id)
+            await emit_trace_and_push(error_event)
+            return (tool_call_id, tool_name, result_content, "error", "validation_error")
+
+        title = payload.get("title", "Implementation Plan")
+        plan_markdown = payload.get("plan_markdown", "")
+        new_plan_id = payload.get("plan_id") if action == "revise" else f"plan_{chat_id}_{request_message_id}"
+
+        await emit_trace_and_push(_build_event("plan_permission_request", reason=title, title=title, action=action, plan_id=new_plan_id))
+
+        chunk_size = 4000
+        for i in range(0, len(plan_markdown), chunk_size):
+            chunk = plan_markdown[i:i + chunk_size]
+            await orchestrator.stdio.write_event(chat_id, _build_event("plan_chunk", content=chunk))
+
+        await orchestrator.stdio.write_event(chat_id, _build_event("plan_ready", plan_id=new_plan_id))
+
+        result_content = "Plan presented to user. Waiting for user approval."
+        success_event = _build_event("tool_result", metadata={"phase": "tool_result", "status": "success"}, status="success", content=result_content, tool_call_id=tool_call_id)
+        await emit_trace_and_push(success_event)
+        return (tool_call_id, tool_name, result_content, "success", None)
+
+    # ── todo_tool ─────────────────────────────────────────────────────────
+    if tool_name == "todo_tool":
+        action = tool_args.get("action")
+        payload = tool_args.get("payload", {})
+
+        tool_event = _build_event(
+            "tool_call",
+            metadata={"phase": "tool_requested"},
+            tool_call_id=tool_call_id,
+            tool_name=tool_name,
+            args=tool_args,
+            session_id=synthetic_session_id,
+            chat_id=str(chat_id),
+            message_id=request_message_id,
+        )
+        await emit_trace_and_push(tool_event)
+
+        todos = payload.get("todos", [])
+        if action == "init":
+            await emit_trace_and_push(_build_event("todo_init", metadata={"plan_id": payload.get("plan_id"), "items": todos}))
+        elif action == "update":
+            await emit_trace_and_push(_build_event("todo_update", metadata={"items": todos}))
+
+        result_content = "Todo list updated successfully."
+        success_event = _build_event("tool_result", metadata={"phase": "tool_result", "status": "success"}, status="success", content=result_content, tool_call_id=tool_call_id)
+        await emit_trace_and_push(success_event)
+        return (tool_call_id, tool_name, result_content, "success", None)
+
+    # ── web_search ────────────────────────────────────────────────────────
+    if tool_name == "web_search":
+        query = tool_args.get("query")
+        num_results = tool_args.get("num_results", 5)
+
+        tool_event = _build_event(
+            "tool_call",
+            metadata={"phase": "tool_requested"},
+            tool_call_id=tool_call_id,
+            tool_name=tool_name,
+            args=tool_args,
+            session_id=synthetic_session_id,
+            chat_id=str(chat_id),
+            message_id=request_message_id,
+        )
+        await emit_trace_and_push(tool_event)
+
+        logger.info("Executing web_search for query: %s", query)
+        await emit_trace_and_push(build_status_event(f"Searching web for '{query}'...", "searching_web"))
+
+        try:
+            results_list = await search_web(query, orchestrator.config.exa_key, num_results=num_results)
+            result_content = json.dumps(results_list, ensure_ascii=False)
+            logger.info("Web search successful for query: %s", query)
+            success_event = _build_event("tool_result", metadata={"phase": "tool_result", "status": "success"}, status="success", content="Web search successful", tool_call_id=tool_call_id)
+            await emit_trace_and_push(success_event)
+            return (tool_call_id, tool_name, result_content, "success", None)
+        except Exception as e:
+            logger.error("Web search failed: %s", e, exc_info=True)
+            result_content = f"Web search failed: {str(e)}"
+            error_event = _build_event("tool_result", metadata={"phase": "tool_result", "status": "error", "error_code": "search_error"}, status="error", content=result_content, error_code="search_error", tool_call_id=tool_call_id)
+            await emit_trace_and_push(error_event)
+            return (tool_call_id, tool_name, result_content, "error", "search_error")
+
+    # ── spawn_subagent ────────────────────────────────────────────────────
+    if tool_name == "spawn_subagent":
+        prompt = tool_args.get("prompt")
+        task_type = tool_args.get("task_type")
+        worktree_path = tool_args.get("worktree_path")
+
+        agent_id = uuid4().hex
+
+        tool_event = _build_event(
+            "tool_call",
+            metadata={"phase": "tool_requested"},
+            tool_call_id=tool_call_id,
+            tool_name=tool_name,
+            args=tool_args,
+            session_id=synthetic_session_id,
+            chat_id=str(chat_id),
+            message_id=request_message_id,
+        )
+        await emit_trace_and_push(tool_event)
+
+        logger.info("Spawning subagent %s for task: %s worktree: %s", agent_id, task_type, worktree_path)
+        await emit_trace_and_push(build_status_event(f"Spawning subagent for '{task_type}'...", "spawning_subagent"))
+
+        try:
+            current_depth = context.get("depth", 0)
+            if current_depth >= 5:
+                raise Exception("Maximum subagent depth of 5 reached.")
+
+            subagent_context: dict[str, Any] = {
+                "user_id": user_id,
+                "synthetic_session_id": f"sess_{agent_id}",
+                "request_message_id": f"msg_{uuid4().hex[:12]}",
+                "ide_context_enabled": False,
+                "workspace_skeleton": req_workspace_skeleton,
+                "active_tool_categories": active_categories_holder[0],
+                "task_type": task_type,
+                "parent_id": str(chat_id),
+                "depth": current_depth + 1,
+            }
+            if worktree_path:
+                subagent_context["worktree_path"] = worktree_path
+
+            subagent_result = await _run_agent_loop_impl(
+                orchestrator,
+                agent_id,
+                prompt,
+                subagent_context,
+            )
+
+            logger.info("Subagent %s completed.", agent_id)
+            success_event = _build_event("tool_result", metadata={"phase": "tool_result", "status": "success"}, status="success", content=f"Subagent finished. Result: {subagent_result}", tool_call_id=tool_call_id)
+            await emit_trace_and_push(success_event)
+            return (tool_call_id, tool_name, subagent_result, "success", None)
+        except Exception as e:
+            logger.error("Subagent %s failed: %s", agent_id, e, exc_info=True)
+            result_content = f"Subagent crashed with exception: {str(e)}"
+            error_event = _build_event("tool_result", metadata={"phase": "tool_result", "status": "error", "error_code": "subagent_error"}, status="error", content=result_content, error_code="subagent_error", tool_call_id=tool_call_id)
+            await emit_trace_and_push(error_event)
+            return (tool_call_id, tool_name, result_content, "error", "subagent_error")
+
+    # ── workspace_ops / terminal_ops (extension-side tools) ───────────────
+    # Emit the tool_call event; the VS Code extension picks it up, executes
+    # the tool, and sends back a tool/result notification which is routed
+    # into orchestrator.active_tool_queues[tool_call_id] by handle_tool_result.
+    tool_event = _build_event(
+        "tool_call",
+        metadata={"phase": "tool_requested"},
+        tool_call_id=tool_call_id,
+        tool_name=tool_name,
+        args=tool_args,
+        session_id=synthetic_session_id,
+        chat_id=str(chat_id),
+        message_id=request_message_id,
+    )
+    await emit_trace_and_push(tool_event)
+    await emit_trace_and_push(
+        build_status_event(
+            f"Waiting for {tool_name} result from the extension...",
+            "awaiting_tool_result",
+        )
+    )
+
+    tool_result = await orchestrator._wait_for_tool_result(tool_call_id)
+
+    if tool_result is None:
+        timeout_content = f"Timed out waiting for tool result: {tool_name}"
+        logger.error(timeout_content)
+        await emit_trace_and_push(
+            _build_event(
+                "error",
+                content=timeout_content,
+                metadata={"phase": "tool_timeout"},
+                session_id=synthetic_session_id,
+                chat_id=str(chat_id),
+                message_id=request_message_id,
+            )
+        )
+        return (tool_call_id, tool_name, timeout_content, "error", "tool_timeout")
+
+    tool_result_event = _build_event(
+        "tool_result",
+        metadata={
+            "phase": "tool_result",
+            "status": tool_result.status,
+            "execution_time_ms": tool_result.execution_time_ms,
+            "error_code": tool_result.error_code,
+        },
+        **tool_result.model_dump(),
+    )
+    await emit_trace_and_push(tool_result_event)
+    await emit_trace_and_push(
+        build_status_event(
+            f"Tool result received from {tool_name}. Continuing reasoning...",
+            "tool_result_received",
+        )
+    )
+
+    return (
+        tool_call_id,
+        tool_result.tool_name,
+        tool_result.content,
+        tool_result.status,
+        tool_result.error_code,
+    )
+
+
 async def _run_agent_loop_impl(
     orchestrator: "LLMOrchestrator",
     chat_id: str,
@@ -314,6 +665,17 @@ async def _run_agent_loop_impl(
         system_context_messages.append({
             "role": "system", 
             "content": f"Task Category: {task_type}\nYou are running as a specialized subagent focusing on this specific task type. Focus ONLY on this task and return your final comprehensive result to the parent orchestrator when complete."
+        })
+
+    worktree_path = context.get("worktree_path")
+    if worktree_path:
+        system_context_messages.append({
+            "role": "system",
+            "content": (
+                f"Worktree Root: {worktree_path}\n"
+                "You are operating inside a dedicated git worktree. ALL file read/write operations "
+                "MUST be scoped to this path. Do not access files outside this root."
+            ),
         })
 
     if system_context_messages:
@@ -371,11 +733,18 @@ async def _run_agent_loop_impl(
             message_id=request_message_id,
         )
 
+    # Holders allow _execute_tool_call (running concurrently via gather) to
+    # read and update shared guidance state without needing class-level locks.
+    # load_tool_context is the only writer; it is never called in parallel
+    # with itself because the LLM will only call it once per turn.
+    active_tool_guidance_holder: list[str | None] = [active_tool_guidance]
+    active_categories_holder: list[list[str]] = [existing_active_categories]
+
     profiler = TokenProfiler(request_message_id)
     profiler.log_constant("dev_persona", DEVELOPER_ASSISTANT_PERSONA)
     profiler.log_constant("tool_schemas", json.dumps([
-        WORKSPACE_OPS_TOOL_SPEC, 
-        TERMINAL_OPS_TOOL_SPEC, 
+        WORKSPACE_OPS_TOOL_SPEC,
+        TERMINAL_OPS_TOOL_SPEC,
         LOAD_TOOL_CONTEXT_TOOL_SPEC,
         PLAN_TOOL_SPEC,
         TODO_TOOL_SPEC,
@@ -443,12 +812,7 @@ async def _run_agent_loop_impl(
                     orchestrator.config.llm_model,
                     orchestrator.config.llm_fallback_model,
                 )
-                await emit_trace_and_push(
-                    build_status_event(
-                        f"Primary model rate-limited, switching to fallback...",
-                        "fallback_model",
-                    )
-                )
+                await emit_trace_and_push(build_status_event("Primary model rate-limited, switching to fallback...", "fallback_model"))
                 stream_iterator = stream_chat_events(
                     llm_messages,
                     config=orchestrator.config,
@@ -459,8 +823,12 @@ async def _run_agent_loop_impl(
                         "model": orchestrator.config.llm_fallback_model,
                         "is_fallback": True,
                     },
-                    active_tool_guidance=active_tool_guidance,
+                    active_tool_guidance=active_tool_guidance_holder[0],
                 )
+
+            # ── Phase 1: drain the full LLM stream ────────────────────────────────
+            # Collect ALL tool_call events before executing any of them.
+            collected_tool_calls: list[dict[str, Any]] = []
 
             try:
                 async for event in stream_iterator:
@@ -472,13 +840,11 @@ async def _run_agent_loop_impl(
                             profiler.log_api_usage(llm_round, usage_content)
                         continue
 
-
-
                     if event_type == "token":
                         token = str(event.get("content", ""))
                         if not token:
                             continue
-                            
+
                         if in_plan_mode:
                             plan_buffer += token
                             await push_event(_build_event("plan_chunk", content=token))
@@ -486,388 +852,31 @@ async def _run_agent_loop_impl(
 
                         assistant_turn_content += token
                         full_response += token
-                        await push_event(
-                            _build_event(
-                                "token",
-                                content=token,
-                                metadata={"phase": "assistant_output"},
-                            )
-                        )
+                        await push_event(_build_event("token", content=token, metadata={"phase": "assistant_output"}))
                         continue
 
                     if event_type == "thinking":
                         thinking_content = str(event.get("content", ""))
                         if not thinking_content:
                             continue
-                        
+
                         assistant_reasoning_content += thinking_content
 
                         if not thinking_content.strip():
                             continue
 
-                        await emit_trace_and_push(
-                            _build_event(
-                                "thinking",
-                                content=thinking_content,
-                                metadata={"phase": "reasoning"},
-                                session_id=synthetic_session_id,
-                                chat_id=str(chat_id),
-                                message_id=request_message_id,
-                            )
-                        )
+                        await emit_trace_and_push(_build_event("thinking", content=thinking_content, metadata={"phase": "reasoning"}, session_id=synthetic_session_id, chat_id=str(chat_id), message_id=request_message_id))
                         continue
 
                     if event_type == "tool_call":
-                        tool_name = event.get("tool_name")
-                        tool_call_id = event.get("tool_call_id")
-                        tool_args = event.get("args")
+                        tool_name_evt = event.get("tool_name")
+                        tool_call_id_evt = event.get("tool_call_id")
+                        tool_args_evt = event.get("args")
 
-                        if not isinstance(tool_name, str) or not isinstance(tool_call_id, str):
+                        if not isinstance(tool_name_evt, str) or not isinstance(tool_call_id_evt, str):
                             logger.warning("Skipping malformed tool_call event: %s", event)
                             continue
 
-                        if not isinstance(tool_args, dict):
-                            tool_args = {}
-
-                        # ΓöÇΓöÇ load_tool_context interception ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
-                        # This tool is handled entirely on the backend.
-                        # No round-trip to the extension needed.
-                        # Some models hallucinate a dotted variant; normalise it here.
-                        if tool_name in ("load_tool_context", "workspace_ops.load_tool_context"):
-                            requested = tool_args.get("categories", [])
-                            if not isinstance(requested, list):
-                                requested = []
-                            valid = [c for c in requested if c in SUPPORTED_CATEGORIES]
-
-                            # Load and persist new categories into session
-                            loaded_prose = load_categories(valid)
-                            newly_loaded = list(loaded_prose.keys())
-
-                            # Merge with already-active categories
-                            merged = list(dict.fromkeys(existing_active_categories + newly_loaded))
-                            existing_active_categories = merged
-                            active_tool_guidance = build_injected_guidance(merged) or None
-
-                            # Persist to NATS and FileStore immediately so next turn auto-injects
-                            try:
-                                state_str = await orchestrator.nats.kv_get("SESSIONS", f"session.{chat_id}")
-                                if state_str:
-                                    state = json.loads(state_str)
-                                    if "working_memory" not in state: state["working_memory"] = {}
-                                    state["working_memory"]["active_tool_categories"] = merged
-                                    await orchestrator.nats.kv_set("SESSIONS", f"session.{chat_id}", json.dumps(state))
-                                    await orchestrator.file_store.write_session(chat_id, state)
-                            except Exception:
-                                logger.exception("Failed to persist active_tool_categories session_id=%s", synthetic_session_id)
-
-                            # Emit ephemeral UI notification
-                            if newly_loaded:
-                                label = ", ".join(c.replace("_", " ").title() for c in newly_loaded)
-                                await emit_trace_and_push(
-                                    build_status_event(
-                                        f"Loaded {label} guidance",
-                                        "tool_context_loaded",
-                                    )
-                                )
-
-                            # Build a combined prose result to give to the LLM
-                            combined_prose = "\n\n---\n\n".join(loaded_prose.values())
-                            result_content = (
-                                f"Tool guidance loaded for: {', '.join(newly_loaded)}.\n\n{combined_prose}"
-                                if newly_loaded
-                                else f"No new categories loaded. Already active: {', '.join(existing_active_categories) or 'none'}."
-                            )
-
-                            llm_messages.append(
-                                _assistant_tool_call_message(
-                                    assistant_turn_content,
-                                    tool_name,
-                                    tool_call_id,
-                                    tool_args,
-                                    assistant_reasoning_content,
-                                )
-                            )
-                            llm_messages.append(
-                                {
-                                    "role": "tool",
-                                    "tool_call_id": tool_call_id,
-                                    "content": format_tool_response(
-                                         tool_status="success",
-                                         tool_content=result_content,
-                                     ),
-                                }
-                            )
-                            tool_call_requested = True
-                            break
-                        # ΓöÇΓöÇ end load_tool_context ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
-
-                        # ΓöÇΓöÇ plan_tool interception ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
-                        if tool_name == "plan_tool":
-                            action = tool_args.get("action")
-                            payload = tool_args.get("payload", {})
-                            
-                            # 1. Emit tool_call to trace so UI shows the accordion
-                            tool_event = _build_event(
-                                "tool_call",
-                                metadata={"phase": "tool_requested"},
-                                tool_call_id=tool_call_id,
-                                tool_name=tool_name,
-                                args=tool_args,
-                                session_id=synthetic_session_id,
-                                chat_id=str(chat_id),
-                                message_id=request_message_id,
-                            )
-                            await emit_trace_and_push(tool_event)
-
-                            if action == "revise" and not payload.get("plan_id"):
-                                result_content = "Error: 'revise' action requires a 'plan_id' in the payload."
-                                error_event = _build_event("tool_result", metadata={"phase": "tool_result", "status": "error", "error_code": "validation_error"}, status="error", content=result_content, error_code="validation_error", tool_call_id=tool_call_id)
-                                await emit_trace_and_push(error_event)
-                                llm_messages.append(_assistant_tool_call_message(assistant_turn_content, tool_name, tool_call_id, tool_args, assistant_reasoning_content))
-                                llm_messages.append({"role": "tool", "tool_call_id": tool_call_id, "content": format_tool_response(tool_status="error", tool_content=result_content, error_code="validation_error")})
-                                tool_call_requested = True
-                                break
-                            elif action == "present" and payload.get("plan_id"):
-                                result_content = "Error: 'present' action must NOT include a 'plan_id' in the payload."
-                                error_event = _build_event("tool_result", metadata={"phase": "tool_result", "status": "error", "error_code": "validation_error"}, status="error", content=result_content, error_code="validation_error", tool_call_id=tool_call_id)
-                                await emit_trace_and_push(error_event)
-                                llm_messages.append(_assistant_tool_call_message(assistant_turn_content, tool_name, tool_call_id, tool_args, assistant_reasoning_content))
-                                llm_messages.append({"role": "tool", "tool_call_id": tool_call_id, "content": format_tool_response(tool_status="error", tool_content=result_content, error_code="validation_error")})
-                                tool_call_requested = True
-                                break
-                            
-                            title = payload.get("title", "Implementation Plan")
-                            plan_markdown = payload.get("plan_markdown", "")
-                            new_plan_id = payload.get("plan_id") if action == "revise" else f"plan_{chat_id}_{request_message_id}"
-                            
-                            # 2. Emit plan_permission_request to trace so it persists in DB
-                            await emit_trace_and_push(_build_event("plan_permission_request", reason=title, title=title, action=action, plan_id=new_plan_id))
-                            
-                            # 3. Chunk markdown (only needs push_event, handled by extension runtime)
-                            chunk_size = 4000
-                            for i in range(0, len(plan_markdown), chunk_size):
-                                chunk = plan_markdown[i:i+chunk_size]
-                                await push_event(_build_event("plan_chunk", content=chunk))
-                            
-                            await push_event(_build_event("plan_ready", plan_id=new_plan_id))
-                            
-                            # 4. Emit tool_result to close the UI accordion
-                            result_content = "Plan presented to user. Waiting for user approval."
-                            success_event = _build_event("tool_result", metadata={"phase": "tool_result", "status": "success"}, status="success", content=result_content, tool_call_id=tool_call_id)
-                            await emit_trace_and_push(success_event)
-                            
-                            llm_messages.append(_assistant_tool_call_message(assistant_turn_content, tool_name, tool_call_id, tool_args, assistant_reasoning_content))
-                            llm_messages.append({"role": "tool", "tool_call_id": tool_call_id, "content": format_tool_response(tool_status="success", tool_content=result_content)})
-                            
-                            tool_call_requested = True
-                            break
-                        # ΓöÇΓöÇ end plan_tool ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
-
-                        # ΓöÇΓöÇ todo_tool interception ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
-                        if tool_name == "todo_tool":
-                            action = tool_args.get("action")
-                            payload = tool_args.get("payload", {})
-                            
-                            # 1. Emit tool_call
-                            tool_event = _build_event(
-                                "tool_call",
-                                metadata={"phase": "tool_requested"},
-                                tool_call_id=tool_call_id,
-                                tool_name=tool_name,
-                                args=tool_args,
-                                session_id=synthetic_session_id,
-                                chat_id=str(chat_id),
-                                message_id=request_message_id,
-                            )
-                            await emit_trace_and_push(tool_event)
-                            
-                            todos = payload.get("todos", [])
-                            if action == "init":
-                                await emit_trace_and_push(_build_event("todo_init", metadata={"plan_id": payload.get("plan_id"), "items": todos}))
-                            elif action == "update":
-                                await emit_trace_and_push(_build_event("todo_update", metadata={"items": todos}))
-                                
-                            # 2. Emit tool_result
-                            result_content = "Todo list updated successfully."
-                            success_event = _build_event("tool_result", metadata={"phase": "tool_result", "status": "success"}, status="success", content=result_content, tool_call_id=tool_call_id)
-                            await emit_trace_and_push(success_event)
-                            
-                            llm_messages.append(_assistant_tool_call_message(assistant_turn_content, tool_name, tool_call_id, tool_args, assistant_reasoning_content))
-                            llm_messages.append({"role": "tool", "tool_call_id": tool_call_id, "content": format_tool_response(tool_status="success", tool_content=result_content)})
-                            
-                            tool_call_requested = True
-                            break
-                        # ΓöÇΓöÇ end todo_tool ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
-
-                        # ΓöÇΓöÇ web_search interception ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
-                        if tool_name == "web_search":
-                            query = tool_args.get("query")
-                            num_results = tool_args.get("num_results", 5)
-                            
-                            tool_event = _build_event(
-                                "tool_call",
-                                metadata={"phase": "tool_requested"},
-                                tool_call_id=tool_call_id,
-                                tool_name=tool_name,
-                                args=tool_args,
-                                session_id=synthetic_session_id,
-                                chat_id=str(chat_id),
-                                message_id=request_message_id,
-                            )
-                            await emit_trace_and_push(tool_event)
-
-                            logger.info(f"Executing web_search for query: {query}")
-                            await emit_trace_and_push(build_status_event(f"Searching web for '{query}'...", "searching_web"))
-
-                            try:
-                                results_list = await search_web(query, orchestrator.config.exa_key, num_results=num_results)
-                                result_content = json.dumps(results_list, ensure_ascii=False)
-                                logger.info(f"Web search successful for query: {query}")
-                                success_event = _build_event("tool_result", metadata={"phase": "tool_result", "status": "success"}, status="success", content="Web search successful", tool_call_id=tool_call_id)
-                                await emit_trace_and_push(success_event)
-                                
-                                llm_messages.append(_assistant_tool_call_message(assistant_turn_content, tool_name, tool_call_id, tool_args, assistant_reasoning_content))
-                                llm_messages.append({"role": "tool", "tool_call_id": tool_call_id, "content": format_tool_response(tool_status="success", tool_content=result_content)})
-                                
-                                tool_call_requested = True
-                                break
-                            except Exception as e:
-                                logger.error(f"Web search failed: {e}", exc_info=True)
-                                result_content = f"Web search failed: {str(e)}"
-                                error_event = _build_event("tool_result", metadata={"phase": "tool_result", "status": "error", "error_code": "search_error"}, status="error", content=result_content, error_code="search_error", tool_call_id=tool_call_id)
-                                await emit_trace_and_push(error_event)
-                                llm_messages.append(_assistant_tool_call_message(assistant_turn_content, tool_name, tool_call_id, tool_args, assistant_reasoning_content))
-                                llm_messages.append({"role": "tool", "tool_call_id": tool_call_id, "content": format_tool_response(tool_status="error", tool_content=result_content, error_code="search_error")})
-                                tool_call_requested = True
-                                break
-                        # ΓöÇΓöÇ end web_search ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
-
-                        # ┌──────────────── spawn_subagent interception ─────────────────────────
-                        if tool_name == "spawn_subagent":
-                            prompt = tool_args.get("prompt")
-                            task_type = tool_args.get("task_type")
-                            
-                            agent_id = uuid4().hex
-                            
-                            tool_event = _build_event(
-                                "tool_call",
-                                metadata={"phase": "tool_requested"},
-                                tool_call_id=tool_call_id,
-                                tool_name=tool_name,
-                                args=tool_args,
-                                session_id=synthetic_session_id,
-                                chat_id=str(chat_id),
-                                message_id=request_message_id,
-                            )
-                            await emit_trace_and_push(tool_event)
-
-                            logger.info(f"Spawning subagent {agent_id} for task: {task_type}")
-                            await emit_trace_and_push(build_status_event(f"Spawning subagent for '{task_type}'...", "spawning_subagent"))
-
-                            try:
-                                current_depth = context.get("depth", 0)
-                                if current_depth >= 5:
-                                    raise Exception("Maximum subagent depth of 5 reached.")
-                                
-                                # Subagents are recursive async calls to the same orchestrator loop
-                                subagent_context = {
-                                    "user_id": user_id,
-                                    "synthetic_session_id": f"sess_{agent_id}",
-                                    "request_message_id": f"msg_{uuid4().hex[:12]}",
-                                    "ide_context_enabled": False, 
-                                    "workspace_skeleton": req_workspace_skeleton,
-                                    "active_tool_categories": existing_active_categories,
-                                    "task_type": task_type,
-                                    "parent_id": str(chat_id),
-                                    "depth": current_depth + 1
-                                }
-                                
-                                # Await the subagent execution
-                                subagent_result = await _run_agent_loop_impl(
-                                    orchestrator,
-                                    agent_id,
-                                    prompt,
-                                    subagent_context
-                                )
-                                
-                                logger.info(f"Subagent {agent_id} completed.")
-                                success_event = _build_event("tool_result", metadata={"phase": "tool_result", "status": "success"}, status="success", content=f"Subagent finished. Result: {subagent_result}", tool_call_id=tool_call_id)
-                                await emit_trace_and_push(success_event)
-                                
-                                llm_messages.append(_assistant_tool_call_message(assistant_turn_content, tool_name, tool_call_id, tool_args, assistant_reasoning_content))
-                                llm_messages.append({"role": "tool", "tool_call_id": tool_call_id, "content": format_tool_response(tool_status="success", tool_content=subagent_result)})
-                                
-                                tool_call_requested = True
-                                break
-                            except Exception as e:
-                                logger.error(f"Subagent {agent_id} failed: {e}", exc_info=True)
-                                result_content = f"Subagent crashed with exception: {str(e)}"
-                                error_event = _build_event("tool_result", metadata={"phase": "tool_result", "status": "error", "error_code": "subagent_error"}, status="error", content=result_content, error_code="subagent_error", tool_call_id=tool_call_id)
-                                await emit_trace_and_push(error_event)
-                                llm_messages.append(_assistant_tool_call_message(assistant_turn_content, tool_name, tool_call_id, tool_args, assistant_reasoning_content))
-                                llm_messages.append({"role": "tool", "tool_call_id": tool_call_id, "content": format_tool_response(tool_status="error", tool_content=result_content, error_code="subagent_error")})
-                                tool_call_requested = True
-                                break
-                        # └──────────────── end spawn_subagent ─────────────────────────
-
-                        tool_event = _build_event(
-                            "tool_call",
-                            metadata={"phase": "tool_requested"},
-                            tool_call_id=tool_call_id,
-                            tool_name=tool_name,
-                            args=tool_args,
-                            session_id=synthetic_session_id,
-                            chat_id=str(chat_id),
-                            message_id=request_message_id,
-                        )
-                        await emit_trace_and_push(tool_event)
-
-                        await emit_trace_and_push(
-                            build_status_event(
-                                f"Waiting for {tool_name} result from the extension...",
-                                "awaiting_tool_result",
-                            )
-                        )
-
-                        tool_result = await orchestrator._wait_for_tool_result(
-                            tool_call_id,
-                        )
-
-                        if tool_result is None:
-                            run_failed = True
-                            stream_aborted = True
-                            await emit_trace_and_push(
-                                _build_event(
-                                    "error",
-                                    content=f"Timed out waiting for tool result: {tool_name}",
-                                    metadata={"phase": "tool_timeout"},
-                                    session_id=synthetic_session_id,
-                                    chat_id=str(chat_id),
-                                    message_id=request_message_id,
-                                )
-                            )
-                            break
-
-                        tool_result_event = _build_event(
-                            "tool_result",
-                            metadata={
-                                "phase": "tool_result",
-                                "status": tool_result.status,
-                                "execution_time_ms": tool_result.execution_time_ms,
-                                "error_code": tool_result.error_code,
-                            },
-                            **tool_result.model_dump(),
-                        )
-                        await emit_trace_and_push(tool_result_event)
-
-                        await emit_trace_and_push(
-                            build_status_event(
-                                f"Tool result received from {tool_name}. Continuing reasoning...",
-                                "tool_result_received",
-                            )
-                        )
-
-                        profiler.log_turn(llm_round, "assistant_answer", assistant_turn_content)
                         profiler.log_turn(llm_round, "assistant_reasoning", assistant_reasoning_content)
                         profiler.log_turn(llm_round, f"tool_output_{tool_name}", tool_result.content)
 
@@ -909,8 +918,97 @@ async def _run_agent_loop_impl(
 
             if stream_aborted:
                 break
-                
 
+            # ── Phase 2: execute all collected tool calls concurrently ────────────
+            if collected_tool_calls:
+                logger.info(
+                    "executing %d tool call(s) concurrently user_id=%s chat_id=%s llm_round=%s tools=%s",
+                    len(collected_tool_calls),
+                    user_id,
+                    chat_id,
+                    llm_round,
+                    [c.get("tool_name") for c in collected_tool_calls],
+                )
+
+                # Sync updated guidance/categories back from holders after each turn
+                # (load_tool_context may have updated them during this round)
+                existing_active_categories = active_categories_holder[0]
+                active_tool_guidance = active_tool_guidance_holder[0]
+
+                # Build the single assistant message that carries ALL tool calls
+                llm_messages.append(
+                    _assistant_tool_call_message_multi(
+                        assistant_turn_content,
+                        collected_tool_calls,
+                        assistant_reasoning_content,
+                    )
+                )
+
+                # Launch all tool coroutines in parallel
+                gather_results = await asyncio.gather(
+                    *[
+                        _execute_tool_call(
+                            orchestrator,
+                            call,
+                            user_id=user_id,
+                            chat_id=chat_id,
+                            synthetic_session_id=synthetic_session_id,
+                            request_message_id=request_message_id,
+                            req_workspace_skeleton=req_workspace_skeleton,
+                            existing_active_categories=existing_active_categories,
+                            context=context,
+                            emit_trace_and_push=emit_trace_and_push,
+                            build_status_event=build_status_event,
+                            active_tool_guidance_holder=active_tool_guidance_holder,
+                            active_categories_holder=active_categories_holder,
+                        )
+                        for call in collected_tool_calls
+                    ],
+                    return_exceptions=True,
+                )
+
+                # Append one tool-role message per result
+                for call, raw_result in zip(collected_tool_calls, gather_results):
+                    tc_id = call["tool_call_id"]
+                    tc_name = call["tool_name"]
+
+                    if isinstance(raw_result, BaseException):
+                        # Unhandled exception from within _execute_tool_call
+                        logger.error(
+                            "Unhandled exception from tool %s tool_call_id=%s: %s",
+                            tc_name, tc_id, raw_result, exc_info=raw_result,
+                        )
+                        result_content = f"Tool {tc_name} failed with unhandled exception: {raw_result}"
+                        llm_messages.append({
+                            "role": "tool",
+                            "tool_call_id": tc_id,
+                            "content": format_tool_response(
+                                tool_status="error",
+                                tool_content=result_content,
+                                error_code="unhandled_exception",
+                            ),
+                        })
+                    else:
+                        # raw_result is (tool_call_id, tool_name, content, status, error_code)
+                        _tc_id, _tc_name, content, status, error_code = raw_result
+                        profiler.log_turn(llm_round, f"tool_output_{_tc_name}", content)
+                        llm_messages.append({
+                            "role": "tool",
+                            "tool_call_id": tc_id,
+                            "content": format_tool_response(
+                                tool_status=status,
+                                tool_content=content,
+                                error_code=error_code,
+                            ),
+                        })
+
+                # Sync guidance holders back after all tools have run
+                existing_active_categories = active_categories_holder[0]
+                active_tool_guidance = active_tool_guidance_holder[0]
+
+                profiler.log_turn(llm_round, "assistant_answer", assistant_turn_content)
+                profiler.log_turn(llm_round, "assistant_reasoning", assistant_reasoning_content)
+                tool_call_requested = True
 
             if tool_call_requested:
                 logger.info(

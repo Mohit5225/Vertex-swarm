@@ -19,6 +19,10 @@ SPAWN_SUBAGENT_TOOL_SPEC: dict[str, Any] = {
                 "timeout": {
                     "type": "integer",
                     "description": "Maximum execution time in seconds (default 300, max 900)."
+                },
+                "worktree_path": {
+                    "type": "string",
+                    "description": "Absolute path to the git worktree this subagent should operate in. When spawning multiple subagents in parallel, each MUST receive a different worktree_path to prevent file-system conflicts."
                 }
             },
             "required": ["prompt", "task_type"],

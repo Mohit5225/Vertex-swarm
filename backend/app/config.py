@@ -14,3 +14,4 @@ class WorkerConfig:
     llm_fallback_model: str = "deepseek-chat"
     llm_reasoning_enabled: bool = False
     llm_reasoning_effort: str = "low"
+    worktree_path: Optional[Path] = None
