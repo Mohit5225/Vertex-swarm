@@ -34,10 +34,18 @@ export class DiskSnapshotManager implements ISnapshotManager {
       }
 
       let existedBefore = true;
+      let isDirectory = false;
       try {
-        await vscode.workspace.fs.stat(uri);
+        const stat = await vscode.workspace.fs.stat(uri);
+        isDirectory = (stat.type === vscode.FileType.Directory);
       } catch {
         existedBefore = false;
+      }
+
+      if (isDirectory) {
+        // Skip directories for now, it's too expensive/complex to snapshot them recursively
+        warnedFiles.push(uri.fsPath + " (directory skipped)");
+        continue;
       }
 
       // Phase 1 MVP: Everything is disk-backed

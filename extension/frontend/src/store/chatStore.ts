@@ -149,6 +149,8 @@ const appendEventContent = (currentContent: string, event: SessionEvent): string
   }
   if (event.type === 'thinking') {
     return currentContent
+      ? `${currentContent}${event.content}`
+      : event.content
   }
 
   if (event.type === 'output') {
