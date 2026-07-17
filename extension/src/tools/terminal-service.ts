@@ -379,7 +379,16 @@ export class TerminalService {
                d.dispose();
                this.outputStore.updateJobStatus(jobId, 'completed');
                const ctx = this.terminalContexts.get(terminal.name);
-               if (ctx) ctx.isBusy = false;
+               if (ctx) {
+                 ctx.isBusy = false;
+                 if (ctx.lifecycleAction === 'auto_delete_after_command') {
+                   setTimeout(() => {
+                     terminal.dispose();
+                     this.terminals.delete(terminal.name);
+                     this.terminalContexts.delete(terminal.name);
+                   }, 1000);
+                 }
+               }
                
                const job = this.outputStore.getJob(jobId);
                if (job?.chat_id && this.onBackgroundEvent) {

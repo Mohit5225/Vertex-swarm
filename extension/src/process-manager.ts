@@ -16,6 +16,7 @@ export class VertexProcessManager implements vscode.Disposable {
   private natsPort: number = 4222;
   private hasRegisteredExitHandler: boolean = false;
   private startPromise: Promise<void> | null = null;
+  private startToken: string = '';
 
   public get backendProcess() { return this._backendProcess; }
   public get rpcClient() { return this._rpcClient; }
@@ -30,12 +31,15 @@ export class VertexProcessManager implements vscode.Disposable {
     config: VertexConfig,
     entitlementToken: string
   ): Promise<void> {
-    if (this.startPromise) {
+    if (this.startPromise && this.startToken === entitlementToken) {
       return this.startPromise;
     }
     
+    this.startToken = entitlementToken;
     this.startPromise = this._start(context, outputChannel, config, entitlementToken).finally(() => {
-      this.startPromise = null;
+      if (this.startToken === entitlementToken) {
+        this.startPromise = null;
+      }
     });
     
     return this.startPromise;

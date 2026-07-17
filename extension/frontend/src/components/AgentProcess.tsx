@@ -11,6 +11,7 @@ import {
   FileText,
   FolderOpen,
   Loader2,
+  Package,
   Search,
   Terminal,
   Trash2,
@@ -173,6 +174,8 @@ const actionIcon = (action?: string) => {
     case 'new_terminal':
     case 'kill_terminal':
       return Terminal
+    case 'context_loaded':
+      return Package
     default:
       return Wrench
   }

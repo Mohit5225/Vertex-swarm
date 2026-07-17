@@ -47,7 +47,17 @@ export interface ThinkingStep {
   text: string
 }
 
-export type ProcessStep = ThinkingStep | { kind: 'node'; node: ToolExecutionNode }
+export interface PlanPermissionStep {
+  kind: 'plan_permission_request'
+  id: string
+}
+
+export interface TodoInitStep {
+  kind: 'todo_init'
+  id: string
+}
+
+export type ProcessStep = ThinkingStep | { kind: 'node'; node: ToolExecutionNode } | PlanPermissionStep | TodoInitStep
 
 export interface ProcessBlock {
   kind: 'process'
@@ -67,11 +77,10 @@ const HIDDEN_STATUS_PHASES = new Set([
   'resuming_after_tool',
   'assistant_output',
   'completed',
-  'tool_context_loaded',
 ])
 
 /** Phases that should trigger an ephemeral toast notification in the UI. */
-export const TOAST_STATUS_PHASES = new Set(['tool_context_loaded'])
+export const TOAST_STATUS_PHASES = new Set<string>([])
 
 const asRecord = (value: unknown): UnknownRecord | undefined =>
   value && typeof value === 'object' && !Array.isArray(value)
@@ -483,6 +492,27 @@ export const buildAgentRunBlocks = (events: SessionEvent[], content?: string): A
 
     if (event.type === 'status') {
       const phase = getEventPhase(event)
+
+      if (phase === 'tool_context_loaded') {
+        const text = normalizeEventText(event.content)
+        if (text) {
+          const block = ensureProcessBlock()
+          block.steps.push({
+            kind: 'node',
+            node: {
+              id: event.id,
+              toolName: 'context_loaded',
+              action: 'context_loaded',
+              state: 'success',
+              summary: text,
+              startedAt: event.timestamp,
+              completedAt: event.timestamp,
+            }
+          })
+        }
+        continue
+      }
+
       if (phase && HIDDEN_STATUS_PHASES.has(phase)) {
         continue
       }
@@ -515,6 +545,25 @@ export const buildAgentRunBlocks = (events: SessionEvent[], content?: string): A
         text,
         tone: 'error',
       })
+      continue
+    }
+
+    if (event.type === 'plan_permission_request') {
+      const block = ensureProcessBlock()
+      block.steps.push({
+        kind: 'plan_permission_request',
+        id: event.id,
+      })
+      continue
+    }
+
+    if (event.type === 'todo_init') {
+      const block = ensureProcessBlock()
+      block.steps.push({
+        kind: 'todo_init',
+        id: event.id,
+      })
+      continue
     }
   }
 

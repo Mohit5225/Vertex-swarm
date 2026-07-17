@@ -33,7 +33,8 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   // Initialize backend asynchronously so we don't block extension activation
   configManager.getConfig().then(async (config) => {
     try {
-      const token = await entitlementClient.getToken() || '';
+      const token = await entitlementClient.getToken();
+      if (!token) return; // Let chat-runtime handle lazy start upon login
       await processManager.start(context, outputChannel, config, token);
     } catch (err: any) {
       outputChannel.appendLine(`[Extension] Failed to start process manager: ${err.message}`);

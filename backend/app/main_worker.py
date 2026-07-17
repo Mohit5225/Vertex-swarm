@@ -150,9 +150,7 @@ class WorkerNode:
             self.orchestrator.config.llm_base_url = params["llm_base_url"]
         if "llm_model" in params:
             self.orchestrator.config.llm_model = params["llm_model"]
-        if "entitlementToken" in params:
-            self.orchestrator.config.entitlement_token = params["entitlementToken"]
-        elif "entitlement_token" in params:
+        if "entitlement_token" in params:
             self.orchestrator.config.entitlement_token = params["entitlement_token"]
         
         logger.info("Keys and config updated dynamically from extension.")

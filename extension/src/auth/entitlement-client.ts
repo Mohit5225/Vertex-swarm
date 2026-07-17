@@ -63,6 +63,11 @@ export class EntitlementClient {
       const payloadStr = Buffer.from(payloadBase64, 'base64').toString('utf8');
       const payload = JSON.parse(payloadStr);
 
+      if (payload.iss && payload.iss !== 'vertex-swarm-backend') {
+        this.warn(`Invalid issuer: ${payload.iss}`);
+        return { valid: false, tier: 'none', exp: 0 };
+      }
+
       const exp = payload.exp || 0;
       const valid = exp * 1000 > Date.now();
 

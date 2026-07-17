@@ -63,7 +63,7 @@ TERMINAL_OPS_TOOL_SPEC: dict[str, Any] = {
                         },
                         "user_visible": {
                             "type": "boolean",
-                            "description": "If true, runs in a VS Code terminal panel (default). If false, runs completely hidden in the background via child_process."
+                            "description": "Defaults to true. CRITICAL: You MUST explicitly set this to false for internal workspace diagnostics (e.g. checking paths, reading logs, installing packages) so as not to clutter the user's view. Only set to true if the user explicitly needs to see the process running (e.g. starting a dev server)."
                         },
                         "estimated_duration_seconds": {
                             "type": "integer",

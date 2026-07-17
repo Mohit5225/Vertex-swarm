@@ -37,8 +37,7 @@ export interface VertexSwarmChatRuntimeOptions {
 
 export class VertexSwarmChatRuntime {
   private static readonly MAX_PROCESSED_TOOL_CALL_IDS = 10_000;
-  private static readonly TOKEN_REFRESH_BUFFER_MS = 12 * 60 * 1000;
-  private static readonly APP_TOKEN_ISSUER = process.env.VERTEX_APP_TOKEN_ISSUER || 'vertex-swarm-backend';
+  private static readonly TOKEN_REFRESH_BUFFER_MS = 5 * 60 * 1000;
 
   private readonly chatStore = new LocalChatStore();
   private readonly entitlementClient: EntitlementClient;
@@ -108,12 +107,12 @@ export class VertexSwarmChatRuntime {
       if (!token) return;
 
       const check = await this.entitlementClient.checkEntitlement(token);
-      // Refresh if it expires in less than 2 minutes
-      if (check.exp * 1000 < Date.now() + 2 * 60 * 1000) {
+      // Refresh if it expires within the buffer
+      if (check.exp * 1000 < Date.now() + VertexSwarmChatRuntime.TOKEN_REFRESH_BUFFER_MS) {
         this.log('Background session maintenance: token expiring soon, refreshing...');
         const refreshed = await this.entitlementClient.refreshToken();
         if (refreshed && this.processManager.rpcClient) {
-          this.processManager.rpcClient.sendNotification('config/update_keys', { entitlementToken: refreshed });
+          this.processManager.rpcClient.sendNotification('config/update_keys', { entitlement_token: refreshed });
         }
       }
     } catch (e) {
@@ -200,13 +199,13 @@ export class VertexSwarmChatRuntime {
           let token = await this.entitlementClient.getToken();
           if (token) {
             const check = await this.entitlementClient.checkEntitlement(token);
-            if (check.exp * 1000 < Date.now() + 1 * 60 * 1000) {
+            if (check.exp * 1000 < Date.now() + VertexSwarmChatRuntime.TOKEN_REFRESH_BUFFER_MS) {
               this.log('Token expiring within 5 minutes, refreshing...');
               const refreshed = await this.entitlementClient.refreshToken();
               if (refreshed) {
                 token = refreshed;
                 if (this.processManager.rpcClient) {
-                  this.processManager.rpcClient.sendNotification('config/update_keys', { entitlementToken: token });
+                  this.processManager.rpcClient.sendNotification('config/update_keys', { entitlement_token: token });
                 }
               } else if (check.exp * 1000 < Date.now()) {
                 token = undefined; // Force auth-required if strictly expired and refresh failed
@@ -544,13 +543,13 @@ export class VertexSwarmChatRuntime {
 
     if (token) {
       const check = await this.entitlementClient.checkEntitlement(token);
-      if (check.exp * 1000 < Date.now() + 1 * 60 * 1000) {
+      if (check.exp * 1000 < Date.now() + VertexSwarmChatRuntime.TOKEN_REFRESH_BUFFER_MS) {
         this.log('Session expiring, attempting automatic JWT refresh...');
         const refreshed = await this.entitlementClient.refreshToken();
         if (refreshed) {
           token = refreshed;
           if (this.processManager.rpcClient) {
-            this.processManager.rpcClient.sendNotification('config/update_keys', { entitlementToken: token });
+            this.processManager.rpcClient.sendNotification('config/update_keys', { entitlement_token: token });
           }
         } else if (check.exp * 1000 < Date.now()) {
           token = undefined;
@@ -582,7 +581,10 @@ export class VertexSwarmChatRuntime {
         this.log(`Failed to respawn backend: ${err.message}`);
 
         // Trap the explicit RS256 validation errors from the python backend
-        if (err.code === -32000 || err.code === -32001) {
+        if (err.code === -32000) {
+          await this.entitlementClient.logout();
+          this.post({ type: 'auth-required' });
+        } else if (err.code === -32001) {
           this.post({ type: 'auth-required' });
         } else {
           this.post({ type: 'error', payload: `Backend process failed to start: ${err.message}` });
