@@ -148,10 +148,9 @@ const appendEventContent = (currentContent: string, event: SessionEvent): string
   if (appendMode === 'token') {
     return `${currentContent}${event.content}`
   }
+  // Thinking is rendered from dedicated events in the process timeline — not message.content.
   if (event.type === 'thinking') {
     return currentContent
-      ? `${currentContent}${event.content}`
-      : event.content
   }
 
   if (event.type === 'output') {
@@ -201,9 +200,24 @@ const shouldMergeEvent = (previous: SessionEvent | undefined, next: SessionEvent
 const normalizeEventComparisonContent = (content?: string) =>
   typeof content === 'string' ? content.replace(/\s+/g, ' ').trim() : ''
 
+const mergeEventContent = (previous: SessionEvent, next: SessionEvent): string => {
+  const previousContent = previous.content || ''
+  const nextContent = next.content || ''
+
+  if (previous.type === 'thinking' && next.type === 'thinking') {
+    return `${previousContent}${nextContent}`
+  }
+
+  if (previous.type === 'output' && next.type === 'output') {
+    return `${previousContent}${nextContent}`
+  }
+
+  return appendEventContent(previousContent, next)
+}
+
 const mergeEvent = (previous: SessionEvent, next: SessionEvent): SessionEvent => ({
   ...previous,
-  content: appendEventContent(previous.content || '', next),
+  content: mergeEventContent(previous, next),
   timestamp: next.timestamp,
   metadata: {
     ...(previous.metadata || {}),
@@ -372,12 +386,21 @@ export const useChatStore = create<ChatState>((set) => ({
         return state // Skip duplicate
       }
 
+      if (
+        normalizedEvent.type === 'thinking' &&
+        !(normalizedEvent.content || '').trim()
+      ) {
+        return state
+      }
+
       // Additional semantic dedupe for providers that resend the same status/reasoning
       // with a different event id during retries/reconnect windows.
       const lastEvent = currentEvents[currentEvents.length - 1]
       const sameAsPrevious =
         Boolean(lastEvent) &&
         lastEvent?.type === normalizedEvent.type &&
+        lastEvent?.type !== 'thinking' &&
+        normalizedEvent.type !== 'thinking' &&
         lastEvent?.type !== 'todo_update' &&
         lastEvent?.type !== 'todo_init' &&
         lastEvent?.type !== 'plan_permission_request' &&

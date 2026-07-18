@@ -112,6 +112,13 @@ AVAILABLE TOOL CATEGORIES (Require load_tool_context first):
 STANDALONE TOOLS (Self-contained, use directly without load_tool_context):
 - plan_tool: MUST be used to present an implementation plan before making invasive/multi-step code changes. You must wait for the user to approve the plan before proceeding.
 - todo_tool: MUST be used after plan approval (or for any multi-step task) to track execution progress. Initialize all steps as 'pending', then update them one by one to 'in_progress' and 'done' as you work. Keep the same todo ids/order across updates because the UI reuses one persistent progress widget from that data. When the checklist is completely finished, you MUST explicitly ask the user for permission to kill/clear the widget. If they approve, use action='clear'.
+- spawn_subagent: LAST RESORT delegation. Do the work yourself unless (a) the user asked for parallel isolated branches with separate worktrees, (b) you need a large read-only research pass that would bloat this context, or (c) the user explicitly requested a separate agent. NEVER spawn because terminal or file tools feel slow. NEVER spawn to create/edit files — use workspace_ops. NEVER spawn to run shell commands — use terminal_ops with user_visible:false.
+
+TOOL ROUTING (which tool for which job):
+- Create/edit/rename/delete files or search code → workspace_ops (NEVER echo/Set-Content/tee/heredoc in terminal)
+- npm/pip/build/test/lint/git/diagnostics → terminal_ops with user_visible:false (hidden on all OSes)
+- Dev server the user wants to watch in the panel → terminal_ops with user_visible:true + terminal_context
+- Parallel isolated git worktrees or explicit user-requested delegation → spawn_subagent
 
 Rules you always follow:
 - Reason step-by-step before acting
@@ -173,6 +180,32 @@ def _model_name(config: WorkerConfig, model: str | None = None) -> str:
     return model or config.llm_model
 
 
+def _normalize_reasoning_effort(effort: str) -> str:
+    """Map config effort values to DeepSeek's reasoning_effort parameter.
+
+    DeepSeek accepts ``high`` and ``max`` natively; ``low``/``medium`` are
+    accepted for compatibility and mapped server-side to ``high``.
+    """
+    normalized = effort.strip().lower()
+    if normalized in {"max", "xhigh"}:
+        return "max"
+    if normalized in {"low", "medium", "high"}:
+        return normalized
+    return "medium"
+
+
+def _should_enable_thinking(config: WorkerConfig, model: str | None = None) -> bool:
+    if config.llm_reasoning_enabled:
+        return True
+
+    model_name = _model_name(config, model).lower()
+    base_url = config.llm_base_url.lower()
+    return "deepseek" in base_url and (
+        model_name.startswith("deepseek-v4")
+        or model_name == "deepseek-reasoner"
+    )
+
+
 def _build_request_payload(
     messages: List[Dict[str, Any]],
     config: WorkerConfig,
@@ -201,7 +234,8 @@ def _build_request_payload(
         "tool_choice": "auto",
     }
 
-    if config.llm_reasoning_enabled:
+    if _should_enable_thinking(config, model):
+        payload["reasoning_effort"] = _normalize_reasoning_effort(config.llm_reasoning_effort)
         payload["extra_body"] = {
             "thinking": {
                 "type": "enabled",
@@ -449,12 +483,12 @@ async def stream_chat_events(
     
     # Log request details for debugging
     logger.info(
-        "Initiating LLM stream: model=%s messages_count=%s has_tools=%s has_reasoning=%s has_extra_body=%s",
+        "Initiating LLM stream: model=%s messages_count=%s has_tools=%s reasoning_effort=%s thinking_enabled=%s",
         payload.get("model"),
         len(payload.get("messages", [])),
         bool(payload.get("tools")),
-        bool(payload.get("reasoning")),
-        bool(payload.get("extra_body")),
+        payload.get("reasoning_effort"),
+        bool(payload.get("extra_body", {}).get("thinking", {}).get("type") == "enabled"),
     )
     
     # Log message roles to debug the conversation structure

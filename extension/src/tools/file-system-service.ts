@@ -167,6 +167,8 @@ interface ExecFileCommandResult {
 
 export class FileSystemService {
   private readonly workspaceRequestCache = new Map<string, CachedWorkspaceResult>();
+  /** session_id -> normalized paths blocked until read_file/search_text */
+  private readonly editRetryBlockedPaths = new Map<string, Set<string>>();
 
   private async list_dir(dirPath: string, context: ToolContext): Promise<ToolResult> {
     const startMs = Date.now();
@@ -1022,6 +1024,12 @@ export class FileSystemService {
           const searchRequest = this.parseSearchTextPayload(request.payload);
           const searchExecution = await this.grep_workspace(searchRequest, context);
           const result = searchExecution.toolResult;
+          if (result.status === 'success') {
+            this.recordEditRetryDiscovery(
+              context.session_id,
+              this.extractSearchHitPaths(result.content)
+            );
+          }
           const existingData = this.optionalObjectArg(result.data) ?? {};
           return this.cacheWorkspaceResult(
             request.requestId,
@@ -1056,6 +1064,9 @@ export class FileSystemService {
           const endLine = this.optionalIntegerField(request.payload, 'endLine')
             ?? (startLine + HARD_LIMITS.maxPaginatedRangeLines - 1);
           const result = await this.read_file_paginated(path, startLine, endLine, context);
+          if (result.status === 'success') {
+            this.recordEditRetryDiscovery(context.session_id, [path]);
+          }
           return this.cacheWorkspaceResult(
             request.requestId,
             this.withToolName(result, 'workspace_ops', {
@@ -1078,6 +1089,12 @@ export class FileSystemService {
         case 'bulk_files_read': {
           const paths = this.requireArrayField(request.payload, 'paths');
           const result = await this.read_files_bulk(paths as string[], context);
+          if (result.status === 'success' && Array.isArray(result.files)) {
+            const readPaths = result.files
+              .filter((entry) => entry?.status === 'success' && typeof entry.path === 'string')
+              .map((entry) => entry.path as string);
+            this.recordEditRetryDiscovery(context.session_id, readPaths);
+          }
           return this.cacheWorkspaceResult(
             request.requestId,
             this.withToolName(result, 'workspace_ops', {
@@ -1134,8 +1151,19 @@ export class FileSystemService {
     context: ToolContext,
     startMs: number
   ): Promise<ToolResult> {
+    let editPath: string | undefined;
     try {
       const path = this.requireStringField(request.payload, 'path');
+      editPath = path;
+
+      if (this.isEditRetryBlocked(context.session_id, path)) {
+        return this.cacheWorkspaceResult(request.requestId, this.buildEditRetryBlockedResult(
+          request,
+          context,
+          startMs
+        ));
+      }
+
       const rawEdits = this.requireArrayField(request.payload, 'edits');
 
       if (rawEdits.length === 0) {
@@ -1171,6 +1199,7 @@ export class FileSystemService {
         path
       );
       if (concurrencyError) {
+        this.markEditRetryBlocked(context.session_id, path);
         return this.cacheWorkspaceResult(request.requestId, concurrencyError);
       }
 
@@ -1182,6 +1211,7 @@ export class FileSystemService {
 
       const overlapViolation = this.findOverlappingEdit(normalizedEdits);
       if (overlapViolation) {
+        this.markEditRetryBlocked(context.session_id, path);
         return this.errorResult(
           'workspace_ops',
           context,
@@ -1230,6 +1260,7 @@ export class FileSystemService {
 
       const applied = await vscode.workspace.applyEdit(workspaceEdit);
       if (!applied) {
+        this.markEditRetryBlocked(context.session_id, path);
         return this.cacheWorkspaceResult(request.requestId, this.errorResult(
           'workspace_ops',
           context,
@@ -1238,6 +1269,8 @@ export class FileSystemService {
           startMs
         ));
       }
+
+      this.clearEditRetryBlock(context.session_id, path);
 
       const refreshedDocument = await vscode.workspace.openTextDocument(fileUri);
       await refreshedDocument.save();
@@ -1268,6 +1301,9 @@ export class FileSystemService {
         startMs
       ));
     } catch (error) {
+      if (editPath) {
+        this.markEditRetryBlocked(context.session_id, editPath);
+      }
       return this.cacheWorkspaceResult(request.requestId, this.errorResult(
         'workspace_ops',
         context,
@@ -1276,6 +1312,75 @@ export class FileSystemService {
         startMs
       ));
     }
+  }
+
+  private buildEditRetryBlockedResult(
+    request: WorkspaceOpsRequest,
+    context: ToolContext,
+    startMs: number
+  ): ToolResult {
+    return {
+      tool_name: 'workspace_ops',
+      tool_call_id: context.tool_call_id,
+      session_id: context.session_id,
+      chat_id: context.chat_id,
+      message_id: context.message_id,
+      request_id: request.requestId,
+      action: request.action,
+      status: 'error',
+      content: 'blocked: no discovery call since last failed edit on this path',
+      summary: 'blocked: no discovery call since last failed edit on this path',
+      data: {},
+      conflict: null,
+      error_code: 'EDIT_RETRY_BLOCKED',
+      execution_time_ms: Date.now() - startMs,
+    };
+  }
+
+  private getSessionGatePaths(sessionId: string): Set<string> {
+    let paths = this.editRetryBlockedPaths.get(sessionId);
+    if (!paths) {
+      paths = new Set();
+      this.editRetryBlockedPaths.set(sessionId, paths);
+    }
+    return paths;
+  }
+
+  private normalizePathForGate(inputPath: string): string {
+    return this.resolveWorkspacePath(inputPath).fsPath.toLowerCase();
+  }
+
+  private isEditRetryBlocked(sessionId: string, inputPath: string): boolean {
+    return this.getSessionGatePaths(sessionId).has(this.normalizePathForGate(inputPath));
+  }
+
+  private markEditRetryBlocked(sessionId: string, inputPath: string): void {
+    this.getSessionGatePaths(sessionId).add(this.normalizePathForGate(inputPath));
+  }
+
+  private clearEditRetryBlock(sessionId: string, inputPath: string): void {
+    this.getSessionGatePaths(sessionId).delete(this.normalizePathForGate(inputPath));
+  }
+
+  private recordEditRetryDiscovery(sessionId: string, paths: string[]): void {
+    for (const path of paths) {
+      try {
+        this.clearEditRetryBlock(sessionId, path);
+      } catch {
+        // Ignore paths outside the workspace — search hits may reference externals.
+      }
+    }
+  }
+
+  private extractSearchHitPaths(searchContent: string): string[] {
+    const paths = new Set<string>();
+    for (const line of searchContent.split(/\r?\n/)) {
+      const match = line.match(/^(.*?):(\d+):\s/);
+      if (match?.[1]) {
+        paths.add(match[1]);
+      }
+    }
+    return [...paths];
   }
 
   private async runCreateFile(
@@ -1431,6 +1536,13 @@ export class FileSystemService {
         }
       }
 
+      this.recordEditRetryDiscovery(
+        context.session_id,
+        filesToCreate
+          .filter((file) => file.content !== undefined && file.content !== null && !file.path.endsWith('/') && !file.path.endsWith('\\'))
+          .map((file) => file.path)
+      );
+
       return this.cacheWorkspaceResult(request.requestId, this.successResult(
         'workspace_ops',
         context,
@@ -1540,6 +1652,8 @@ export class FileSystemService {
         useTrash,
       });
 
+      this.recordEditRetryDiscovery(context.session_id, [path]);
+
       return this.cacheWorkspaceResult(request.requestId, this.successResult(
         'workspace_ops',
         context,
@@ -1637,6 +1751,8 @@ export class FileSystemService {
 
       await this.ensureParentDirectory(newUri);
       await vscode.workspace.fs.rename(oldUri, newUri, { overwrite });
+
+      this.recordEditRetryDiscovery(context.session_id, [oldPath, newPath]);
 
       return this.cacheWorkspaceResult(request.requestId, this.successResult(
         'workspace_ops',

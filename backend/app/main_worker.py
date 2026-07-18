@@ -9,7 +9,7 @@ from app.config import WorkerConfig
 from app.nats_client import NATSClient
 from app.stdio_transport import StdioTransport
 from app.orchestrator import LLMOrchestrator
-from app.utils.auth_validator import validate_entitlement, EntitlementError
+from app.utils.auth_validator import validate_entitlement, EntitlementError, configure_jwks_url
 
 logger = logging.getLogger(__name__)
 
@@ -27,6 +27,12 @@ class WorkerNode:
             if not base_path:
                 raise ValueError("base_path is required")
 
+            auth_jwks_url = params.get("auth_jwks_url", "")
+            # Configure the JWKS client as early as possible so
+            # validate_entitlement() below can fetch the public key.
+            if auth_jwks_url:
+                configure_jwks_url(auth_jwks_url)
+
             self.config = WorkerConfig(
                 base_path=Path(base_path),
                 llm_key=params.get("llm_key", ""),
@@ -34,10 +40,11 @@ class WorkerNode:
                 entitlement_token=params.get("entitlement_token", ""),
                 platform=params.get("platform", sys.platform),
                 llm_base_url=params.get("llm_base_url", "https://api.deepseek.com/v1"),
-                llm_model=params.get("llm_model", "deepseek-chat"),
-                llm_fallback_model=params.get("llm_fallback_model", "deepseek-chat"),
-                llm_reasoning_enabled=params.get("llm_reasoning_enabled", False),
-                llm_reasoning_effort=params.get("llm_reasoning_effort", "low"),
+                llm_model=params.get("llm_model", "deepseek-v4-pro"),
+                llm_fallback_model=params.get("llm_fallback_model", "deepseek-v4-pro"),
+                llm_reasoning_enabled=params.get("llm_reasoning_enabled", True),
+                llm_reasoning_effort=params.get("llm_reasoning_effort", "medium"),
+                auth_jwks_url=auth_jwks_url,
             )
             
             # Strict JWT Entitlement Validation

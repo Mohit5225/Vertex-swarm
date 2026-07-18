@@ -8,18 +8,7 @@ import { getVsCodeApi } from '../lib/vscode'
 import { ChevronDown, Undo2 } from 'lucide-react'
 import TodoWidget from './TodoWidget'
 
-import { buildAgentRunBlocks } from '../lib/agentRunBlocks'
-
-const FILE_ACTIONS = new Set([
-  'edit_file',
-  'create_file',
-  'delete_path',
-  'rename_path',
-  'write_file',
-  'replace_file_content',
-  'multi_replace_file_content',
-  'delete_file'
-])
+import { collectMessageDiffs } from '../lib/messageDiffs'
 
 const starterPrompts = [
   {
@@ -69,70 +58,22 @@ interface LiveDiff {
   messageId?: string
 }
 
-const LiveFileEditBar: React.FC<{ messages: ChatMessage[] }> = ({ messages }) => {
+const LiveFileEditBar: React.FC<{ messages: ChatMessage[]; isStreaming: boolean }> = ({
+  messages,
+  isStreaming,
+}) => {
   const [isExpanded, setIsExpanded] = useState(false)
-  if (messages.length === 0) return null
+  if (!isStreaming || messages.length === 0) return null
   const lastMessage = messages[messages.length - 1]
   if (lastMessage.type !== 'agent' || !lastMessage.events?.length) return null
-  if (Date.now() - (lastMessage.timestamp || 0) > 1000 * 60 * 60) return null // Hide if older than 1 hour
 
   const lastAgent = lastMessage
+  const { diffs: mergedDiffs, snapshotId: topSnapshotId, sessionId: topSessionId, messageId: topMessageId } =
+    collectMessageDiffs(lastAgent.events || [], lastAgent.content)
 
-  const blocks = buildAgentRunBlocks(lastAgent.events || [], lastAgent.content)
-
-  // Key: filename → merged diff. Only accumulate from SUCCESSFUL file-op nodes.
-  const diffMap = new Map<string, LiveDiff>()
-  let topSnapshotId = '', topSessionId = '', topMessageId = ''
-
-  for (const block of blocks) {
-    if (block.kind !== 'process') continue
-    for (const step of block.steps) {
-      if (step.kind !== 'node') continue
-      if (!FILE_ACTIONS.has(step.node.action ?? '')) continue
-      // Skip failed / still-running nodes — only count actual edits
-      if (step.node.state !== 'success') continue
-
-      const data = (step.node.resultDebug as any)?.data
-      const diffs: any[] = data?.snapshot_diffs ?? []
-
-      // Capture snapshot metadata from the first successful node
-      if (!topSnapshotId && data?.snapshot_id) {
-        topSnapshotId = data.snapshot_id ?? ''
-        topSessionId  = data.snapshot_session_id ?? ''
-        topMessageId  = data.snapshot_id ?? ''
-      }
-
-      for (const d of diffs) {
-        const filename: string = d.file ?? ''
-        if (!filename) continue
-        const existing = diffMap.get(filename)
-        if (existing) {
-          // Same file edited again — take the latest delta since it is computed against the base snapshot
-          existing.additions = d.additions ?? 0
-          existing.deletions = d.deletions ?? 0
-          // Keep the most-recent snapshot refs so Undo/Review targets the latest snapshot
-          if (d.snapshotPath) existing.snapshotPath = d.snapshotPath
-          if (d.originalUri) existing.originalUri   = d.originalUri
-        } else {
-          diffMap.set(filename, {
-            file:        filename,
-            additions:   d.additions ?? 0,
-            deletions:   d.deletions ?? 0,
-            originalUri: d.originalUri,
-            snapshotPath: d.snapshotPath,
-            snapshotId:  data?.snapshot_id,
-            sessionId:   data?.snapshot_session_id,
-            messageId:   data?.snapshot_id,
-          })
-        }
-      }
-    }
-  }
-
-  const mergedDiffs = Array.from(diffMap.values())
-  const fileCount  = mergedDiffs.length
-  const totalAdds  = mergedDiffs.reduce((s, d) => s + d.additions, 0)
-  const totalDels  = mergedDiffs.reduce((s, d) => s + d.deletions, 0)
+  const fileCount = mergedDiffs.length
+  const totalAdds = mergedDiffs.reduce((s, d) => s + d.additions, 0)
+  const totalDels = mergedDiffs.reduce((s, d) => s + d.deletions, 0)
 
   if (fileCount === 0) return null
 
@@ -155,10 +96,15 @@ const LiveFileEditBar: React.FC<{ messages: ChatMessage[] }> = ({ messages }) =>
 
   const handleUndoFile = (e: React.MouseEvent, d: LiveDiff) => {
     e.stopPropagation()
-    if (!d.snapshotId || !d.originalUri) return
+    if (!topSnapshotId || !d.originalUri) return
     getVsCodeApi()?.postMessage({
       type: 'undo-snapshot-file',
-      payload: { snapshotId: d.snapshotId, sessionId: d.sessionId, messageId: d.messageId, originalUri: d.originalUri }
+      payload: {
+        snapshotId: topSnapshotId,
+        sessionId: topSessionId,
+        messageId: topMessageId,
+        originalUri: d.originalUri,
+      }
     })
   }
 
@@ -191,9 +137,8 @@ const LiveFileEditBar: React.FC<{ messages: ChatMessage[] }> = ({ messages }) =>
             </button>
           )}
           <span
-            className={`inline-flex h-5 w-5 items-center justify-center rounded-full text-[#6f81a1] transition ${
-              isExpanded ? 'rotate-180' : ''
-            }`}
+            className={`inline-flex h-5 w-5 items-center justify-center rounded-full text-[#6f81a1] transition ${isExpanded ? 'rotate-180' : ''
+              }`}
           >
             <ChevronDown className="h-3.5 w-3.5" />
           </span>
@@ -204,7 +149,7 @@ const LiveFileEditBar: React.FC<{ messages: ChatMessage[] }> = ({ messages }) =>
         <div className="px-2 pb-2">
           {mergedDiffs.map((d) => (
             <div
-              key={d.file}
+              key={d.originalUri || d.file}
               className="flex items-center justify-between px-3 py-1.5 rounded-md hover:bg-white/[0.03] transition-colors group"
             >
               <span
@@ -217,9 +162,15 @@ const LiveFileEditBar: React.FC<{ messages: ChatMessage[] }> = ({ messages }) =>
               <div className="flex items-center gap-2 opacity-70 group-hover:opacity-100 transition-opacity">
                 <span className="text-[10px] font-mono text-[#2dd4bf]">+{d.additions}</span>
                 <span className="text-[10px] font-mono text-[#f43f5e]">-{d.deletions}</span>
-                {d.snapshotId && (
+                {topSnapshotId && (
                   <button
-                    onClick={(e) => handleUndoFile(e, d)}
+                    onClick={(e) => handleUndoFile(e, {
+                      file: d.file,
+                      additions: d.additions,
+                      deletions: d.deletions,
+                      originalUri: d.originalUri,
+                      snapshotPath: d.snapshotPath,
+                    })}
                     className="flex items-center gap-0.5 text-[10px] font-medium text-[#c6d2e7] hover:text-white transition-colors ml-0.5"
                     title={`Undo changes to ${d.file}`}
                   >
@@ -364,10 +315,10 @@ const ChatPanel: React.FC = () => {
       }
     };
     window.addEventListener('message', handleMessage);
-    
+
     // Request initial config
     getVsCodeApi()?.postMessage({ type: 'get-config' });
-    
+
     return () => window.removeEventListener('message', handleMessage);
   }, []);
 
@@ -417,130 +368,130 @@ const ChatPanel: React.FC = () => {
     <>
       <div className="flex h-full min-h-0 flex-col overflow-hidden relative">
 
-          {showHistoryPanel && (
-            <div
-              ref={historyPanelRef}
-              className="absolute right-2 top-2 z-20 w-[min(20rem,calc(100vw-1rem))] rounded-[22px] border border-white/10 bg-[#0c1220]/96 p-4 shadow-[0_22px_60px_rgba(0,0,0,0.38)] backdrop-blur-xl"
-            >
-              <div className="flex items-center justify-between gap-3">
-                <p className="text-[11px] font-medium uppercase tracking-[0.2em] text-[#7d89a6]">
-                  Recent chats
-                </p>
-                <span className="text-[11px] text-[#8f9cb7]">
-                  {chats.length}
+        {showHistoryPanel && (
+          <div
+            ref={historyPanelRef}
+            className="absolute right-2 top-2 z-20 w-[min(20rem,calc(100vw-1rem))] rounded-[22px] border border-white/10 bg-[#0c1220]/96 p-4 shadow-[0_22px_60px_rgba(0,0,0,0.38)] backdrop-blur-xl"
+          >
+            <div className="flex items-center justify-between gap-3">
+              <p className="text-[11px] font-medium uppercase tracking-[0.2em] text-[#7d89a6]">
+                Recent chats
+              </p>
+              <span className="text-[11px] text-[#8f9cb7]">
+                {chats.length}
+              </span>
+            </div>
+
+            {chats.length === 0 ? (
+              <p className="mt-3 text-sm leading-6 text-[#95a2bd]">
+                No saved chats yet.
+              </p>
+            ) : (
+              <div className="mt-3 max-h-[22rem] space-y-2 overflow-y-auto pr-1">
+                {chats.map((chat) => {
+                  const isActiveChat = currentChatId === chat.chatId
+                  const chatTitle =
+                    chat.title?.trim() || 'Untitled chat'
+
+                  return (
+                    <button
+                      key={chat.chatId}
+                      type="button"
+                      onClick={() => handleOpenChat(chat.chatId)}
+                      disabled={isStreaming}
+                      className={`w-full rounded-[16px] border px-3 py-3 text-left transition ${isActiveChat
+                        ? 'border-[#8bd7ff]/30 bg-[#8bd7ff]/10'
+                        : 'border-white/6 bg-white/[0.03] hover:bg-white/[0.06]'
+                        } ${isStreaming ? 'cursor-not-allowed opacity-60' : ''
+                        }`}
+                    >
+                      <div className="truncate text-sm font-medium text-[#f3f6ff]">
+                        {chatTitle}
+                      </div>
+                      <div className="mt-1 text-[11px] leading-5 text-[#8f9cb7]">
+                        <span>{formatRelativeTime(chat.updatedAt)}</span>
+                        <span className="mx-2 text-white/15">|</span>
+                        <span>{new Date(chat.updatedAt).toLocaleString()}</span>
+                      </div>
+                    </button>
+                  )
+                })}
+              </div>
+            )}
+          </div>
+        )}
+
+        {showSessionPanel && (
+          <div
+            ref={sessionPanelRef}
+            className="absolute right-2 top-2 z-20 w-[min(17rem,calc(100vw-1rem))] rounded-[22px] border border-white/10 bg-[#0c1220]/96 p-4 shadow-[0_22px_60px_rgba(0,0,0,0.38)] backdrop-blur-xl"
+          >
+            <div className="flex items-center justify-between gap-3">
+              <span className="truncate text-[13px] font-medium leading-none text-white">
+                Provider Config
+              </span>
+              <span className="text-[11px] text-[#8f9cb7]">
+                {sessionStateLabel}
+              </span>
+            </div>
+            <p className="mt-3 truncate text-sm font-medium text-[#f3f6ff]">
+              {config?.llmBaseUrl ? new URL(config.llmBaseUrl).hostname : 'Local Provider'}
+            </p>
+            <div className="mt-3 space-y-1 text-[12px] leading-5 text-[#95a2bd]">
+              <p>Model: {config?.llmModel || 'Default Model'}</p>
+              <p>Keys are stored securely in your OS keychain.</p>
+            </div>
+
+            <div className="mt-4 border-t border-white/10 pt-3">
+              <label className="text-[11px] font-medium text-[#7d89a6] block mb-1">
+                Snapshot Retention (Days)
+              </label>
+              <div className="flex items-center gap-2">
+                <input
+                  type="range"
+                  min="1"
+                  max="7"
+                  value={snapshotRetentionDays}
+                  onChange={(e) => {
+                    const val = parseInt(e.target.value, 10);
+                    setSnapshotRetentionDays(val);
+                    getVsCodeApi()?.postMessage({
+                      type: 'set-config',
+                      payload: { snapshotRetentionDays: val }
+                    });
+                  }}
+                  className="flex-1 h-1.5 bg-white/10 rounded-full appearance-none [&::-webkit-slider-thumb]:appearance-none [&::-webkit-slider-thumb]:w-3 [&::-webkit-slider-thumb]:h-3 [&::-webkit-slider-thumb]:rounded-full [&::-webkit-slider-thumb]:bg-[#8bd7ff] cursor-pointer"
+                />
+                <span className="text-[12px] font-mono text-[#8bd7ff] min-w-[1.5rem] text-right">
+                  {snapshotRetentionDays}
                 </span>
               </div>
-
-              {chats.length === 0 ? (
-                <p className="mt-3 text-sm leading-6 text-[#95a2bd]">
-                  No saved chats yet.
-                </p>
-              ) : (
-                <div className="mt-3 max-h-[22rem] space-y-2 overflow-y-auto pr-1">
-                  {chats.map((chat) => {
-                    const isActiveChat = currentChatId === chat.chatId
-                    const chatTitle =
-                      chat.title?.trim() || 'Untitled chat'
-
-                    return (
-                      <button
-                        key={chat.chatId}
-                        type="button"
-                        onClick={() => handleOpenChat(chat.chatId)}
-                        disabled={isStreaming}
-                        className={`w-full rounded-[16px] border px-3 py-3 text-left transition ${isActiveChat
-                          ? 'border-[#8bd7ff]/30 bg-[#8bd7ff]/10'
-                          : 'border-white/6 bg-white/[0.03] hover:bg-white/[0.06]'
-                          } ${isStreaming ? 'cursor-not-allowed opacity-60' : ''
-                          }`}
-                      >
-                        <div className="truncate text-sm font-medium text-[#f3f6ff]">
-                          {chatTitle}
-                        </div>
-                        <div className="mt-1 text-[11px] leading-5 text-[#8f9cb7]">
-                          <span>{formatRelativeTime(chat.updatedAt)}</span>
-                          <span className="mx-2 text-white/15">|</span>
-                          <span>{new Date(chat.updatedAt).toLocaleString()}</span>
-                        </div>
-                      </button>
-                    )
-                  })}
-                </div>
-              )}
             </div>
-          )}
 
-          {showSessionPanel && (
-            <div
-              ref={sessionPanelRef}
-              className="absolute right-2 top-2 z-20 w-[min(17rem,calc(100vw-1rem))] rounded-[22px] border border-white/10 bg-[#0c1220]/96 p-4 shadow-[0_22px_60px_rgba(0,0,0,0.38)] backdrop-blur-xl"
-            >
-              <div className="flex items-center justify-between gap-3">
-                  <span className="truncate text-[13px] font-medium leading-none text-white">
-                    Provider Config
-                  </span>
-                  <span className="text-[11px] text-[#8f9cb7]">
-                    {sessionStateLabel}
-                  </span>
-              </div>
-              <p className="mt-3 truncate text-sm font-medium text-[#f3f6ff]">
-                {config?.llmBaseUrl ? new URL(config.llmBaseUrl).hostname : 'Local Provider'}
-              </p>
-              <div className="mt-3 space-y-1 text-[12px] leading-5 text-[#95a2bd]">
-                <p>Model: {config?.llmModel || 'Default Model'}</p>
-                <p>Keys are stored securely in your OS keychain.</p>
-              </div>
-
-              <div className="mt-4 border-t border-white/10 pt-3">
-                <label className="text-[11px] font-medium text-[#7d89a6] block mb-1">
-                  Snapshot Retention (Days)
-                </label>
-                <div className="flex items-center gap-2">
-                  <input
-                    type="range"
-                    min="1"
-                    max="7"
-                    value={snapshotRetentionDays}
-                    onChange={(e) => {
-                      const val = parseInt(e.target.value, 10);
-                      setSnapshotRetentionDays(val);
-                      getVsCodeApi()?.postMessage({
-                        type: 'set-config',
-                        payload: { snapshotRetentionDays: val }
-                      });
-                    }}
-                    className="flex-1 h-1.5 bg-white/10 rounded-full appearance-none [&::-webkit-slider-thumb]:appearance-none [&::-webkit-slider-thumb]:w-3 [&::-webkit-slider-thumb]:h-3 [&::-webkit-slider-thumb]:rounded-full [&::-webkit-slider-thumb]:bg-[#8bd7ff] cursor-pointer"
-                  />
-                  <span className="text-[12px] font-mono text-[#8bd7ff] min-w-[1.5rem] text-right">
-                    {snapshotRetentionDays}
-                  </span>
-                </div>
-              </div>
-
-              <div className="mt-4 flex flex-wrap gap-2">
-                {messages.length > 0 && (
-                  <button
-                    type="button"
-                    onClick={handleStartFresh}
-                    disabled={isStreaming}
-                    className="ghost-btn !rounded-xl !px-3 !py-2"
-                  >
-                    New task
-                  </button>
-                )}
+            <div className="mt-4 flex flex-wrap gap-2">
+              {messages.length > 0 && (
                 <button
                   type="button"
-                  onClick={() => {
-                    setShowSessionPanel(false)
-                    setShowLogoutConfirm(true)
-                  }}
+                  onClick={handleStartFresh}
+                  disabled={isStreaming}
                   className="ghost-btn !rounded-xl !px-3 !py-2"
                 >
-                  Settings
+                  New task
                 </button>
-              </div>
+              )}
+              <button
+                type="button"
+                onClick={() => {
+                  setShowSessionPanel(false)
+                  setShowLogoutConfirm(true)
+                }}
+                className="ghost-btn !rounded-xl !px-3 !py-2"
+              >
+                Settings
+              </button>
             </div>
-          )}
+          </div>
+        )}
 
         <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
           <div className="flex-1 overflow-hidden">
@@ -590,7 +541,7 @@ const ChatPanel: React.FC = () => {
           {showTodoBar && currentTodo && (
             <TodoWidget items={currentTodo.items} isStreaming={isStreaming} onClose={clearTodo} />
           )}
-          <LiveFileEditBar messages={messages} />
+          <LiveFileEditBar messages={messages} isStreaming={isStreaming} />
 
           <div className="border-t chat-divider bg-[linear-gradient(180deg,rgba(255,255,255,0.02),transparent)] px-3 pb-3 pt-2 sm:px-4">
             <InputArea

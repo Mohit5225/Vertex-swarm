@@ -5,6 +5,8 @@
 workspace_ops is the single source of truth for all file system operations.
 Every call requires: action, request_id, mode, payload.
 
+**Never write files via the terminal.** Do not use `echo`, `Set-Content`, `Out-File`, `tee`, or heredocs in `terminal_ops` to create or edit source files. Use `create_file` and `edit_file` here instead — they are faster, hash-safe, and do not open the user's terminal.
+
 ---
 
 ### HASH-BASED CONCURRENCY PROTOCOL (MANDATORY)
@@ -109,6 +111,7 @@ The same logical change across retries must have the same request_id. This is yo
 ### HANDLING ERRORS
 
 - Never retry a failed action with the same arguments.
+- If `EDIT_RETRY_BLOCKED`: you must run a discovery call before retrying `edit_file` on that path. Qualifying calls: `read_file` or `bulk_files_read` on that path, `search_text` that returns hits for that path, or a successful `create_file` / `delete_path` / `rename_path` that touches that path. Blind retries are rejected server-side.
 - If HASH_CONFLICT: re-read, get new hash, retry.
 - If MISSING_CONCURRENCY_GUARD: find `data.current_hash` from your last `workspace_ops` result (action `read_file` or per-file hash from `bulk_files_read`) and include it as `expected_hash`.
 - If a tool returns empty or unexpected data twice: stop and report to user. Do not loop.

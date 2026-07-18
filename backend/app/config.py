@@ -1,4 +1,4 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
@@ -10,8 +10,12 @@ class WorkerConfig:
     entitlement_token: str
     platform: str
     llm_base_url: str = "https://api.deepseek.com/v1"
-    llm_model: str = "deepseek-chat"
-    llm_fallback_model: str = "deepseek-chat"
-    llm_reasoning_enabled: bool = False
-    llm_reasoning_effort: str = "low"
+    llm_model: str = "deepseek-v4-pro"
+    llm_fallback_model: str = "deepseek-v4-pro"
+    llm_reasoning_enabled: bool = True
+    llm_reasoning_effort: str = "medium"
     worktree_path: Optional[Path] = None
+    # URL of the hosted auth service JWKS endpoint.
+    # The worker fetches the RS256 public key from here once per session
+    # so no key is ever hardcoded in source code.
+    auth_jwks_url: str = ""

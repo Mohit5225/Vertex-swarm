@@ -105,8 +105,19 @@
         },
         "vertexSwarm.llmModel": {
           "type": "string",
-          "default": "deepseek-chat",
+          "default": "deepseek-v4-pro",
           "description": "Model identifier to use for inference"
+        },
+        "vertexSwarm.llmReasoningEnabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Enable DeepSeek thinking mode (reasoning_content) for better tool-use accuracy"
+        },
+        "vertexSwarm.llmReasoningEffort": {
+          "type": "string",
+          "default": "medium",
+          "enum": ["low", "medium", "high", "max", "xhigh"],
+          "description": "Reasoning depth for DeepSeek thinking mode."
         }
       }
     }

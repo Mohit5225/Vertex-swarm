@@ -546,7 +546,6 @@ export class VertexSwarmChatRuntime {
 
   public async syncWebviewConfig(): Promise<boolean> {
     let token = await this.entitlementClient.getToken();
-
     if (token) {
       const check = await this.entitlementClient.checkEntitlement(token);
       if (!check.valid && check.exp === 0) {
@@ -570,8 +569,20 @@ export class VertexSwarmChatRuntime {
       return false;
     }
 
-    // Pass mock user payload on successful auth check for now
-    this.post({ type: 'authenticated', payload: { user: { id: 'jwt-user', email: 'user@vertex-swarm.com', provider: 'google' } } });
+    // Decode the token to read the actual user identity for the webview.
+    // Client-side decode only — the local backend does the authoritative RS256 check.
+    const tokenClaims = await this.entitlementClient.checkEntitlement(token);
+    this.post({
+      type: 'authenticated',
+      payload: {
+        user: {
+          id: tokenClaims.sub || 'unknown',
+          email: tokenClaims.email || '',
+          provider: 'google',
+          role: tokenClaims.role || 'authenticated',
+        }
+      }
+    });
 
     const hasConfig = await this.configManager.hasValidConfig();
     if (!hasConfig) {
@@ -587,8 +598,6 @@ export class VertexSwarmChatRuntime {
         await this.processManager.start(this.context, this.outputChannel, config, sessionToken);
       } catch (err: any) {
         this.log(`Failed to respawn backend: ${err.message}`);
-
-        // Trap the explicit RS256 validation errors from the python backend
         if (err.code === -32000) {
           await this.entitlementClient.logout();
           this.post({ type: 'auth-required' });

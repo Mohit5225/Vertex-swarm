@@ -876,36 +876,13 @@ async def _run_agent_loop_impl(
                         if not isinstance(tool_name_evt, str) or not isinstance(tool_call_id_evt, str):
                             logger.warning("Skipping malformed tool_call event: %s", event)
                             continue
-
-                        profiler.log_turn(llm_round, "assistant_reasoning", assistant_reasoning_content)
-                        profiler.log_turn(llm_round, f"tool_output_{tool_name}", tool_result.content)
-
-                        llm_messages.append(
-                            _assistant_tool_call_message(
-                                assistant_turn_content,
-                                tool_name,
-                                tool_call_id,
-                                tool_args,
-                                assistant_reasoning_content,
-                            )
-                        )
-                    
-                        llm_messages.append(
-                            {
-                                "role": "tool",
-                                "tool_call_id": tool_call_id,
-                                "content": format_tool_response(
-                                    tool_status=tool_result.status,
-                                    tool_content=tool_result.content,
-                                    error_code=tool_result.error_code,
-                                    tool_data=tool_result.data,
-                                    tool_conflict=tool_result.conflict,
-                                ),
-                            }
-                        )
-
-                        tool_call_requested = True
-                        break
+                        
+                        collected_tool_calls.append({
+                            "tool_name": tool_name_evt,
+                            "tool_call_id": tool_call_id_evt,
+                            "args": tool_args_evt,
+                        })
+                        continue
 
                 if stream_aborted:
                     break

@@ -68,7 +68,7 @@ export const SnapshotCard: React.FC<SnapshotCardProps> = ({ snapshotId, sessionI
           <span className="text-[11px] font-mono text-[#f43f5e] mr-1">-{totalDeletions}</span>
         </div>
         <div className="flex items-center gap-2">
-          {!isHistorical && (
+          {!isHistorical && snapshotId && sessionId && (
             <button
               onClick={handleUndo}
               className="flex items-center gap-1.5 rounded-md px-2 py-1 text-[11px] font-medium text-[#c6d2e7] hover:bg-white/[0.1] transition-colors"

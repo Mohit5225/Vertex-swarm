@@ -21,6 +21,8 @@ export interface TerminalActionPayload {
   cwd?: string;
   intent?: JobIntent;
   mode?: string;
+  /** When true, run hidden (alias for user_visible: false). */
+  hide?: boolean;
   user_visible?: boolean;
   estimated_duration_seconds?: number;
   terminal_name?: string;
@@ -198,7 +200,15 @@ export class TerminalService {
     const cwd = payload.cwd;
     // Map deprecated 'mode' to new 'intent' and 'user_visible'
     let intent = (payload.intent || (payload.mode === 'background' ? 'observe' : 'await_result')) as JobIntent;
-    let user_visible = payload.user_visible ?? (payload.mode !== 'background');
+    let user_visible: boolean;
+    if (payload.user_visible !== undefined) {
+      user_visible = payload.user_visible;
+    } else if (payload.hide !== undefined) {
+      user_visible = !payload.hide;
+    } else {
+      // Hidden child_process on all platforms unless the caller opts into a visible terminal.
+      user_visible = false;
+    }
     let estimated_duration = payload.estimated_duration_seconds;
     let chatId = (payload as any).chat_id;
 
@@ -437,12 +447,15 @@ export class TerminalService {
   ): Promise<TerminalActionResponse> {
     this.log(`Terminal: Running via Fallback (child_process): ${command}`);
 
+    // On Windows, detached: true allocates a new console window and ignores windowsHide.
+    // Process-tree killing on Windows uses taskkill /T instead (see killProcessTree).
+    const isWin = process.platform === 'win32';
     const proc = cp.spawn(command, {
       shell: true,
       cwd,
-      detached: true, // For process group killing
+      detached: !isWin,
       windowsHide: true,
-      stdio: ['ignore', 'pipe', 'pipe']
+      stdio: ['ignore', 'pipe', 'pipe'],
     });
 
     if (proc.pid) {

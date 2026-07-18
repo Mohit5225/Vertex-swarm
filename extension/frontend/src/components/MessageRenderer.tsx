@@ -9,6 +9,8 @@ import { buildAgentRunBlocks } from '../lib/agentRunBlocks'
 import { describePendingMessage } from '../lib/trace'
 import { getVsCodeApi } from '../lib/vscode'
 import PlanCard from './PlanCard'
+import { SnapshotCard } from './SnapshotCard'
+import { collectMessageDiffs } from '../lib/messageDiffs'
 
 interface Props {
   message: ChatMessage
@@ -52,6 +54,14 @@ const MessageRenderer: React.FC<Props> = ({ message }) => {
     message.type === 'agent' && Boolean(message.events?.length)
   const blocks = useMemo(
     () => (shouldRenderProcess ? buildAgentRunBlocks(message.events || [], message.content) : []),
+    [message.events, message.content, shouldRenderProcess]
+  )
+
+  const turnDiffSummary = useMemo(
+    () =>
+      shouldRenderProcess
+        ? collectMessageDiffs(message.events || [], message.content)
+        : { diffs: [], snapshotId: '', sessionId: '', messageId: '' },
     [message.events, message.content, shouldRenderProcess]
   )
 
@@ -117,6 +127,8 @@ const MessageRenderer: React.FC<Props> = ({ message }) => {
             <div className="flex flex-col gap-1.5">
               {blocks.map((block, index) => {
                 if (block.kind === 'narrative') {
+                  const isStreamingNarrative =
+                    isStreamingMessage && index === blocks.length - 1
                   return (
                     <div
                       key={block.id}
@@ -126,6 +138,7 @@ const MessageRenderer: React.FC<Props> = ({ message }) => {
                         }`}
                     >
                       {renderAssistantText(block.text)}
+                      {isStreamingNarrative ? <StreamingCursor /> : null}
                     </div>
                   )
                 }
@@ -147,13 +160,11 @@ const MessageRenderer: React.FC<Props> = ({ message }) => {
                 }
 
                 if (block.kind === 'process') {
-                  const isActiveBlock = index === blocks.length - 1
                   return (
                     <AgentTimeline
                       key={block.id}
                       block={block}
                       isStreamingMessage={isStreamingMessage}
-                      isActiveBlock={isActiveBlock}
                     />
                   )
                 }
@@ -170,6 +181,16 @@ const MessageRenderer: React.FC<Props> = ({ message }) => {
                 }
                 return <PlanCard status={planStatus} />;
               })()}
+
+              {!isStreamingMessage && turnDiffSummary.diffs.length > 0 && (
+                <SnapshotCard
+                  diffs={turnDiffSummary.diffs}
+                  snapshotId={turnDiffSummary.snapshotId}
+                  sessionId={turnDiffSummary.sessionId}
+                  messageId={turnDiffSummary.messageId}
+                  isHistorical={isHistorical}
+                />
+              )}
             </div>
           ) : (
             <>

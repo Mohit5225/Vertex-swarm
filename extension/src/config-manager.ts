@@ -5,6 +5,8 @@ export interface VertexConfig {
   llmModel: string;
   llmKey: string;
   exaKey: string;
+  llmReasoningEnabled: boolean;
+  llmReasoningEffort: string;
 }
 
 export class ConfigManager {
@@ -49,7 +51,9 @@ export class ConfigManager {
     
     // Default to DeepSeek if not provided
     const llmBaseUrl = config.get<string>('llmBaseUrl') || 'https://api.deepseek.com/v1';
-    const llmModel = config.get<string>('llmModel') || 'deepseek-chat';
+    const llmModel = config.get<string>('llmModel') || 'deepseek-v4-pro';
+    const llmReasoningEnabled = config.get<boolean>('llmReasoningEnabled', true);
+    const llmReasoningEffort = config.get<string>('llmReasoningEffort') || 'medium';
     
     // Read secrets directly — no retry here; callers that need startup resilience
     // should go through hasValidConfig() first, which uses waitForSecret().
@@ -60,7 +64,9 @@ export class ConfigManager {
       llmBaseUrl,
       llmModel,
       llmKey,
-      exaKey
+      exaKey,
+      llmReasoningEnabled,
+      llmReasoningEffort,
     };
   }
 

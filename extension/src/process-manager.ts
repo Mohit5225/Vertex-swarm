@@ -139,6 +139,9 @@ export class VertexProcessManager implements vscode.Disposable {
       try {
         outputChannel.appendLine(`[ProcessManager] Sending initialize JSON-RPC handshake...`);
         const timeoutMs = 30_000;
+        const authBaseUrl = (process.env.VERTEX_HOSTED_AUTH_URL || 'http://localhost:8080').replace(/\/$/, '');
+        const authJwksUrl = `${authBaseUrl}/.well-known/jwks.json`;
+
         const initResult = await Promise.race([
           this._rpcClient.sendRequest('initialize', {
             protocol_version: '1.0',
@@ -147,9 +150,12 @@ export class VertexProcessManager implements vscode.Disposable {
             exa_key: config.exaKey,
             llm_base_url: config.llmBaseUrl,
             llm_model: config.llmModel,
+            llm_reasoning_enabled: config.llmReasoningEnabled,
+            llm_reasoning_effort: config.llmReasoningEffort,
             entitlement_token: entitlementToken,
             platform: platform,
-            nats_port: this.natsPort
+            nats_port: this.natsPort,
+            auth_jwks_url: authJwksUrl,
           }),
           new Promise((_, reject) =>
             setTimeout(() => reject(new Error(`Worker handshake timed out after ${timeoutMs / 1000}s`)), timeoutMs)

@@ -415,7 +415,7 @@ export const buildAgentRunBlocks = (events: SessionEvent[], content?: string): A
   for (const event of events) {
     if (event.type === 'output') {
       const text = normalizeEventText(event.content)
-      if (!text) {
+      if (!text.trim()) {
         continue
       }
 
@@ -431,7 +431,7 @@ export const buildAgentRunBlocks = (events: SessionEvent[], content?: string): A
 
     if (event.type === 'thinking') {
       const text = normalizeEventText(event.content)
-      if (!text) {
+      if (!text.trim()) {
         continue
       }
 
@@ -568,7 +568,23 @@ export const buildAgentRunBlocks = (events: SessionEvent[], content?: string): A
   }
 
   const hasNarrative = blocks.some((b) => b.kind === 'narrative')
-  if (!hasNarrative && content && content.trim()) {
+  const hasOutputEvents = events.some(
+    (event) => event.type === 'output' || event.type === 'code'
+  )
+  const hasThinkingSteps = blocks.some(
+    (block) =>
+      block.kind === 'process' &&
+      block.steps.some((step) => step.kind === 'thinking')
+  )
+  // Only fall back to raw content for legacy turns without structured output events.
+  // Never mirror thinking text as narrative — that belongs in the process accordion.
+  if (
+    !hasNarrative &&
+    !hasOutputEvents &&
+    !hasThinkingSteps &&
+    content &&
+    content.trim()
+  ) {
     blocks.push({
       kind: 'narrative',
       id: `narrative-fallback-${Date.now()}`,
@@ -577,11 +593,24 @@ export const buildAgentRunBlocks = (events: SessionEvent[], content?: string): A
     })
   }
 
-  return blocks.filter((block) => {
-    if (block.kind === 'process') {
-      return block.steps.length > 0
-    }
+  return blocks
+    .map((block) => {
+      if (block.kind !== 'process') {
+        return block
+      }
 
-    return Boolean(block.text)
-  })
+      return {
+        ...block,
+        steps: block.steps.filter(
+          (step) => step.kind !== 'thinking' || step.text.trim().length > 0
+        ),
+      }
+    })
+    .filter((block) => {
+      if (block.kind === 'process') {
+        return block.steps.length > 0
+      }
+
+      return Boolean(block.text)
+    })
 }

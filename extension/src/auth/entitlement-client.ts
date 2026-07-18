@@ -4,7 +4,12 @@ import * as crypto from 'crypto';
 
 export interface EntitlementResult {
   valid: boolean;
-  tier: 'free' | 'pro' | 'team' | 'none';
+  /** The token's role claim (e.g. 'authenticated', 'admin'). */
+  role: string;
+  /** The subject (user ID) from the JWT sub claim. */
+  sub: string;
+  /** The user's email from the JWT email claim. */
+  email: string;
   exp: number;
 }
 
@@ -67,11 +72,12 @@ export class EntitlementClient {
    * The extension only needs to decode the unverified payload to check the expiration time
    * so it knows when to silently request a refresh from the cloud.
    */
-  async checkEntitlement(jwt: string): Promise<EntitlementResult> {
+  async checkEntitlement(token: string): Promise<EntitlementResult> {
+    const empty: EntitlementResult = { valid: false, role: 'none', sub: '', email: '', exp: 0 };
     try {
-      const payloadBase64 = jwt.split('.')[1];
+      const payloadBase64 = token.split('.')[1];
       if (!payloadBase64) {
-        return { valid: false, tier: 'none', exp: 0 };
+        return empty;
       }
 
       const payloadStr = Buffer.from(payloadBase64, 'base64').toString('utf8');
@@ -79,16 +85,19 @@ export class EntitlementClient {
 
       if (payload.iss !== 'vertex-swarm-backend') {
         this.warn(`Invalid or missing issuer: ${String(payload.iss)}`);
-        return { valid: false, tier: 'none', exp: 0 };
+        return empty;
       }
 
       const exp = typeof payload.exp === 'number' ? payload.exp : 0;
       const valid = Number.isFinite(exp) && exp * 1000 > Date.now();
+      const role = typeof payload.role === 'string' && payload.role ? payload.role : 'authenticated';
+      const sub = typeof payload.sub === 'string' ? payload.sub : '';
+      const email = typeof payload.email === 'string' ? payload.email : '';
 
-      return { valid, tier: payload.tier || 'free', exp };
+      return { valid, role, sub, email, exp };
     } catch (err) {
       this.warn(`Failed to parse JWT: ${err instanceof Error ? err.message : String(err)}`);
-      return { valid: false, tier: 'none', exp: 0 };
+      return empty;
     }
   }
 

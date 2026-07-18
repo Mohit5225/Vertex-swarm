@@ -112,10 +112,10 @@ class Settings(BaseSettings):
 
     deepseek_base_url: str = "https://api.deepseek.com"
     deepseek_api_key: str = ""
-    deepseek_model: str = "deepseek-v4-flash"
-    deepseek_fallback_model: str = "deepseek-v4-flash"
-    deepseek_reasoning_enabled: bool = False
-    deepseek_reasoning_effort: str = "low"
+    deepseek_model: str = "deepseek-v4-pro"
+    deepseek_fallback_model: str = "deepseek-v4-pro"
+    deepseek_reasoning_enabled: bool = True
+    deepseek_reasoning_effort: str = "medium"
 
     modal_base_url: str = "https://api.us-west-2.modal.direct/v1"
     modal_api_key: str = ""

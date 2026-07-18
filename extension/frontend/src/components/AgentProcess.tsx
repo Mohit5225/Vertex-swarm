@@ -20,11 +20,11 @@ import {
 } from 'lucide-react'
 import { getVsCodeApi } from '../lib/vscode'
 import { SnapshotCard, type DiffStat } from './SnapshotCard'
+import { FILE_MUTATION_ACTIONS, normalizeDiffStat } from '../lib/messageDiffs'
 
 interface Props {
   block: ProcessBlock
   isStreamingMessage?: boolean
-  isActiveBlock?: boolean
 }
 
 type TimelineGroupItem = {
@@ -136,7 +136,12 @@ const groupTimelineItems = (steps: ProcessBlock['steps']): TimelineItem[] => {
   for (const step of steps) {
     if (step.kind === 'thinking') {
       flushNodes()
-      items.push(step)
+      const lastItem = items[items.length - 1]
+      if (lastItem?.kind === 'thinking') {
+        lastItem.text = `${lastItem.text}${step.text}`
+      } else {
+        items.push({ ...step })
+      }
     } else if (step.kind === 'node') {
       nodesBuffer.push(step.node)
     }
@@ -181,17 +186,7 @@ const actionIcon = (action?: string) => {
   }
 }
 
-const FILE_OPS = new Set([
-  'edit_file',
-  'create_file',
-  'delete_path',
-  'rename_path',
-  'write_file',
-  'write_to_file',
-  'replace_file_content',
-  'multi_replace_file_content',
-  'delete_file'
-])
+const FILE_OPS = FILE_MUTATION_ACTIONS
 
 const stateIndicator = (state: ToolExecutionNode['state']) => {
   switch (state) {
@@ -252,7 +247,7 @@ const TerminalCard: React.FC<{
     | undefined
 
   const payload = (node.requestDebug as any)?.args?.payload || {}
-  const userVisible = payload.user_visible ?? (payload.mode !== 'background')
+  const userVisible = payload.user_visible ?? (payload.hide !== undefined ? !payload.hide : false)
   
   const terminalName = data?.terminal_name ?? payload.terminal_context?.name ?? payload.terminal_name ?? 'Vertex Worker'
   const command = data?.command ?? payload.command ?? ''
@@ -352,7 +347,8 @@ const FileEditRow: React.FC<{
   onToggle: () => void
 }> = ({ node, expanded, onToggle }) => {
   const Icon = actionIcon(node.action)
-  const diffs: DiffStat[] = (node.resultDebug as any)?.data?.snapshot_diffs ?? []
+  const rawDiffs: DiffStat[] = (node.resultDebug as any)?.data?.snapshot_diffs ?? []
+  const diffs = rawDiffs.map(normalizeDiffStat)
   const additions = diffs.reduce((s, d) => s + d.additions, 0)
   const deletions = diffs.reduce((s, d) => s + d.deletions, 0)
   const hasDiffStats = node.state === 'success' && (additions > 0 || deletions > 0)
@@ -622,7 +618,7 @@ const GroupAccordion: React.FC<{
   )
 }
 
-const AgentTimeline: React.FC<Props> = ({ block, isStreamingMessage, isActiveBlock = false }) => {
+const AgentTimeline: React.FC<Props> = ({ block, isStreamingMessage }) => {
   const [expandedGroups, setExpandedGroups] = useState<Record<string, boolean>>({})
   const [expandedNodes, setExpandedNodes] = useState<Record<string, boolean>>({})
   const [expandedFileOps, setExpandedFileOps] = useState<Record<string, boolean>>({})
@@ -641,14 +637,19 @@ const AgentTimeline: React.FC<Props> = ({ block, isStreamingMessage, isActiveBlo
   const items = useMemo(() => groupTimelineItems(sanitizedSteps), [sanitizedSteps])
   const scrollRef = useRef<HTMLDivElement>(null)
 
-  const isRunning = !isHistorical && (sanitizedSteps.some(
-    step => step.kind === 'node' && step.node.state === 'running'
-  ) || Boolean(isStreamingMessage && isActiveBlock))
+  const isRunning = !isHistorical && (
+    isStreamingMessage ||
+    sanitizedSteps.some(
+      (step) => step.kind === 'node' && step.node.state === 'running'
+    )
+  )
 
   const [processExpanded, setProcessExpanded] = useState<boolean>(isRunning)
 
   useEffect(() => {
-    setProcessExpanded(isRunning)
+    if (isRunning) {
+      setProcessExpanded(true)
+    }
   }, [isRunning])
 
   useEffect(() => {
@@ -669,28 +670,17 @@ const AgentTimeline: React.FC<Props> = ({ block, isStreamingMessage, isActiveBlo
     }
   }
 
-  // Aggregate all diffs from completed file-op nodes for the turn-level SnapshotCard
-  const turnDiffs: DiffStat[] = []
-  let turnSnapshotId = ''
-  let turnSessionId = ''
-  let turnMessageId = ''
-  for (const node of fileOpNodes) {
-    const data = (node.resultDebug as any)?.data
-    if (data?.snapshot_diffs && Array.isArray(data.snapshot_diffs)) {
-      turnDiffs.push(...data.snapshot_diffs)
-      if (!turnSnapshotId) turnSnapshotId = data.snapshot_id ?? ''
-      if (!turnSessionId) turnSessionId = data.snapshot_session_id ?? ''
-      if (!turnMessageId) turnMessageId = data.snapshot_id ?? ''
+  // Filter items for the accordion (exclude file-op nodes and empty thinking fragments)
+  const accordionItems = items.filter((item) => {
+    if (item.kind === 'thinking') {
+      return Boolean(item.text.trim())
     }
-  }
-
-  // Filter items for the accordion (exclude file-op nodes)
-  const accordionItems = items.filter(item => {
-    if (item.kind === 'thinking') return true
     if (item.kind === 'group') return !FILE_OPS.has(item.action ?? '')
     if (item.kind === 'node') return !FILE_OPS.has(item.node.action ?? '')
     return true
   })
+
+  const hasVisibleAccordionItems = accordionItems.length > 0
 
   return (
     <div>
@@ -711,7 +701,7 @@ const AgentTimeline: React.FC<Props> = ({ block, isStreamingMessage, isActiveBlo
       )}
 
       {/* Accordion for non-file ops (reads, searches, terminal, thinking) */}
-      {hasNonFileOpSteps && (
+      {hasNonFileOpSteps && hasVisibleAccordionItems && (
         <>
           <button
             type="button"
@@ -738,19 +728,14 @@ const AgentTimeline: React.FC<Props> = ({ block, isStreamingMessage, isActiveBlo
             >
               {accordionItems.map((item) => {
                 if (item.kind === 'thinking') {
-                  const paragraphs = item.text.split(/\n{2,}/).filter(Boolean)
                   return (
-                    <div key={item.id} className="relative py-1">
-                      <div className="absolute left-[9px] top-3 bottom-1 w-px bg-[#313641]" />
-                      <div className="space-y-3">
-                        {paragraphs.map((paragraph, index) => (
-                          <div key={index} className="relative pl-8">
-                            <div className="absolute left-[6px] top-[9px] z-10 h-[6px] w-[6px] rounded-full bg-[#5e6ad2]/50 ring-[3px] ring-[#0c0e15]" />
-                            <div className="whitespace-pre-wrap text-[13px] leading-6 text-[#b4c4de]">
-                              {paragraph}
-                            </div>
-                          </div>
-                        ))}
+                    <div key={item.id} className="relative py-2">
+                      <div className="absolute left-[9px] top-3 bottom-2 w-px bg-[#313641]" />
+                      <div className="relative pl-8">
+                        <div className="absolute left-[6px] top-[9px] z-10 h-[6px] w-[6px] rounded-full bg-[#5e6ad2]/50 ring-[3px] ring-[#0c0e15]" />
+                        <div className="whitespace-pre-wrap text-[13px] leading-6 text-[#b4c4de]">
+                          {item.text}
+                        </div>
                       </div>
                     </div>
                   )
@@ -794,17 +779,6 @@ const AgentTimeline: React.FC<Props> = ({ block, isStreamingMessage, isActiveBlo
             </div>
           )}
         </>
-      )}
-
-      {/* Turn-level SnapshotCard — one card aggregating all file edits in this turn */}
-      {!isRunning && turnDiffs.length > 0 && turnSnapshotId && turnSessionId && (
-        <SnapshotCard
-          diffs={turnDiffs}
-          snapshotId={turnSnapshotId}
-          sessionId={turnSessionId}
-          messageId={turnMessageId}
-          isHistorical={isHistorical}
-        />
       )}
     </div>
   )
