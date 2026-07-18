@@ -58,6 +58,7 @@ interface ChatState {
   replaceMessages: (
     chatId: string,
     messages: ChatMessage[],
+    
     ideContextEnabled?: boolean
   ) => void
   setCurrentIdeContextEnabled: (enabled: boolean) => void

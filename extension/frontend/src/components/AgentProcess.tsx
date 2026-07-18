@@ -137,7 +137,7 @@ const groupTimelineItems = (steps: ProcessBlock['steps']): TimelineItem[] => {
     if (step.kind === 'thinking') {
       flushNodes()
       items.push(step)
-    } else {
+    } else if (step.kind === 'node') {
       nodesBuffer.push(step.node)
     }
   }

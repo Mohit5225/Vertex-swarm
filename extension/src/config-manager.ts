@@ -8,7 +8,41 @@ export interface VertexConfig {
 }
 
 export class ConfigManager {
+  /**
+   * Maximum total time (ms) to wait for SecretStorage to become available after
+   * VS Code starts. The OS keychain can take several seconds to unlock on login.
+   */
+  private static readonly SECRET_STORAGE_READY_TIMEOUT_MS = 6000;
+
   constructor(private context: vscode.ExtensionContext) {}
+
+  /**
+   * Polls SecretStorage for the given key until it returns a non-empty value or
+   * the timeout elapses. Uses exponential backoff starting at 200ms.
+   * Returns the value if found, or an empty string if the timeout expires.
+   */
+  private async waitForSecret(key: string): Promise<string> {
+    const deadline = Date.now() + ConfigManager.SECRET_STORAGE_READY_TIMEOUT_MS;
+    let delay = 200;
+
+    // First attempt immediately — fast path for the common case.
+    const initial = await this.context.secrets.get(key);
+    if (initial) {
+      return initial;
+    }
+
+    while (Date.now() < deadline) {
+      await new Promise(resolve => setTimeout(resolve, delay));
+      const value = await this.context.secrets.get(key);
+      if (value) {
+        return value;
+      }
+      // Exponential backoff capped at 1 second between attempts.
+      delay = Math.min(delay * 2, 1000);
+    }
+
+    return '';
+  }
 
   public async getConfig(): Promise<VertexConfig> {
     const config = vscode.workspace.getConfiguration('vertexSwarm');
@@ -17,12 +51,9 @@ export class ConfigManager {
     const llmBaseUrl = config.get<string>('llmBaseUrl') || 'https://api.deepseek.com/v1';
     const llmModel = config.get<string>('llmModel') || 'deepseek-chat';
     
-    let llmKey = await this.context.secrets.get('llm_key') || '';
-    if (!llmKey) {
-      // Retry once after 500ms in case SecretStorage is still initializing on startup
-      await new Promise(resolve => setTimeout(resolve, 500));
-      llmKey = await this.context.secrets.get('llm_key') || '';
-    }
+    // Read secrets directly — no retry here; callers that need startup resilience
+    // should go through hasValidConfig() first, which uses waitForSecret().
+    const llmKey = await this.context.secrets.get('llm_key') || '';
     const exaKey = await this.context.secrets.get('exa_key') || '';
 
     return {
@@ -33,10 +64,14 @@ export class ConfigManager {
     };
   }
 
+  /**
+   * Returns true only if a non-empty LLM key is stored. On startup, blocks
+   * (with exponential backoff) until SecretStorage is ready or the timeout
+   * elapses, preventing the spurious "Configure Provider" flash.
+   */
   public async hasValidConfig(): Promise<boolean> {
-    const config = await this.getConfig();
-    // For now, the only strict requirement is having an LLM key.
-    return config.llmKey.trim().length > 0;
+    const llmKey = await this.waitForSecret('llm_key');
+    return llmKey.trim().length > 0;
   }
 
   public async updateConfig(updates: Partial<VertexConfig>): Promise<void> {

@@ -88,9 +88,14 @@ const handleExtensionMessage = (event: MessageEvent) => {
   switch (message?.type) {
     case "authenticated": {
       const { user } = message.payload;
+      // Keep loading:true so the UI stays on "Checking Configuration..." while
+      // syncWebviewConfig() finishes its async work before sending config-ready
+      // or config-missing. Without this, the Configure Provider screen flashes
+      // briefly on every sign-in (isAuthenticated=true, hasConfig=false, loading=false).
       useConfigStore.setState({
         user,
         isAuthenticated: true,
+        loading: true,
         error: null,
       });
       break;

@@ -5,11 +5,10 @@ import MessageRenderer from './MessageRenderer'
 import InputArea from './InputArea'
 import ConfirmDialog from './ConfirmDialog'
 import { getVsCodeApi } from '../lib/vscode'
-import { Package, ChevronDown, Undo2 } from 'lucide-react'
+import { ChevronDown, Undo2 } from 'lucide-react'
 import TodoWidget from './TodoWidget'
 
-import { TOAST_STATUS_PHASES, buildAgentRunBlocks } from '../lib/agentRunBlocks'
-import { getEventPhase } from '../lib/sessionEvents'
+import { buildAgentRunBlocks } from '../lib/agentRunBlocks'
 
 const FILE_ACTIONS = new Set([
   'edit_file',
