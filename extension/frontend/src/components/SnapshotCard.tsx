@@ -1,6 +1,9 @@
 import React from 'react';
 import { Undo2, Search, FileSignature } from 'lucide-react';
 import { getVsCodeApi } from '../lib/vscode';
+import { fileChangeDetail, shouldShowLineStats, summarizeFileChanges } from '../lib/fileChangeStats';
+
+export type FileChangeOperation = 'edit' | 'create' | 'delete' | 'rename';
 
 export interface DiffStat {
   file: string;
@@ -9,6 +12,9 @@ export interface DiffStat {
   additions: number;
   deletions: number;
   diffText: string;
+  operation?: FileChangeOperation;
+  renamedFrom?: string;
+  renamedTo?: string;
 }
 
 interface SnapshotCardProps {
@@ -22,7 +28,6 @@ interface SnapshotCardProps {
 export const SnapshotCard: React.FC<SnapshotCardProps> = ({ snapshotId, sessionId, messageId, diffs, isHistorical }) => {
   const totalAdditions = diffs.reduce((acc, d) => acc + d.additions, 0);
   const totalDeletions = diffs.reduce((acc, d) => acc + d.deletions, 0);
-  const fileCount = diffs.length;
 
   const handleUndo = () => {
     getVsCodeApi()?.postMessage({
@@ -62,10 +67,14 @@ export const SnapshotCard: React.FC<SnapshotCardProps> = ({ snapshotId, sessionI
         <div className="flex items-center gap-2">
           <FileSignature className="h-4 w-4 text-[#7f91b4]" />
           <span className="text-[12px] font-medium text-[#c6d2e7]">
-            Edited {fileCount} file{fileCount !== 1 ? 's' : ''}
+            {summarizeFileChanges(diffs)}
           </span>
-          <span className="text-[11px] font-mono text-[#2dd4bf] ml-1">+{totalAdditions}</span>
-          <span className="text-[11px] font-mono text-[#f43f5e] mr-1">-{totalDeletions}</span>
+          {(totalAdditions > 0 || totalDeletions > 0) && (
+            <>
+              <span className="text-[11px] font-mono text-[#2dd4bf] ml-1">+{totalAdditions}</span>
+              <span className="text-[11px] font-mono text-[#f43f5e] mr-1">-{totalDeletions}</span>
+            </>
+          )}
         </div>
         <div className="flex items-center gap-2">
           {!isHistorical && snapshotId && sessionId && (
@@ -89,8 +98,15 @@ export const SnapshotCard: React.FC<SnapshotCardProps> = ({ snapshotId, sessionI
           <div key={i} className="flex items-center justify-between px-3 py-1.5 rounded-md hover:bg-white/[0.03] transition-colors group cursor-pointer" onClick={() => handleReviewFile(d)}>
             <span className="text-[11px] text-[#91a0bb] font-mono truncate max-w-[200px]">{d.file}</span>
             <div className="flex items-center gap-2 opacity-70 group-hover:opacity-100 transition-opacity">
-              <span className="text-[10px] font-mono text-[#2dd4bf]">+{d.additions}</span>
-              <span className="text-[10px] font-mono text-[#f43f5e]">-{d.deletions}</span>
+              {fileChangeDetail(d) ? (
+                <span className="text-[10px] font-medium text-[#9eb1ff]">{fileChangeDetail(d)}</span>
+              ) : null}
+              {shouldShowLineStats(d) ? (
+                <>
+                  <span className="text-[10px] font-mono text-[#2dd4bf]">+{d.additions}</span>
+                  <span className="text-[10px] font-mono text-[#f43f5e]">-{d.deletions}</span>
+                </>
+              ) : null}
             </div>
           </div>
         ))}

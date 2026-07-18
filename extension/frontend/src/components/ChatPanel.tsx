@@ -9,6 +9,7 @@ import { ChevronDown, Undo2 } from 'lucide-react'
 import TodoWidget from './TodoWidget'
 
 import { collectMessageDiffs } from '../lib/messageDiffs'
+import { fileChangeDetail, shouldShowLineStats, summarizeFileChanges } from '../lib/fileChangeStats'
 
 const starterPrompts = [
   {
@@ -116,7 +117,7 @@ const LiveFileEditBar: React.FC<{ messages: ChatMessage[]; isStreaming: boolean 
       >
         <div className="flex items-center gap-2">
           <span className="text-[12px] font-medium text-[#c6d2e7]">
-            {fileCount} file{fileCount !== 1 ? 's' : ''} changed
+            {summarizeFileChanges(mergedDiffs)}
           </span>
           {(totalAdds > 0 || totalDels > 0) && (
             <div className="flex items-center gap-1.5 font-mono text-[11px]">
@@ -160,8 +161,15 @@ const LiveFileEditBar: React.FC<{ messages: ChatMessage[]; isStreaming: boolean 
                 {d.file}
               </span>
               <div className="flex items-center gap-2 opacity-70 group-hover:opacity-100 transition-opacity">
-                <span className="text-[10px] font-mono text-[#2dd4bf]">+{d.additions}</span>
-                <span className="text-[10px] font-mono text-[#f43f5e]">-{d.deletions}</span>
+                {fileChangeDetail(d) ? (
+                  <span className="text-[10px] font-medium text-[#9eb1ff]">{fileChangeDetail(d)}</span>
+                ) : null}
+                {shouldShowLineStats(d) ? (
+                  <>
+                    <span className="text-[10px] font-mono text-[#2dd4bf]">+{d.additions}</span>
+                    <span className="text-[10px] font-mono text-[#f43f5e]">-{d.deletions}</span>
+                  </>
+                ) : null}
                 {topSnapshotId && (
                   <button
                     onClick={(e) => handleUndoFile(e, {

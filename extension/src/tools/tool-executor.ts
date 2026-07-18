@@ -7,6 +7,20 @@ import { DiffService } from '../snapshot/diff-service';
 import * as fs from 'fs/promises';
 import * as path from 'path';
 
+type FileChangeOperation = 'edit' | 'create' | 'delete' | 'rename';
+
+interface SnapshotDiffEntry {
+  file: string;
+  originalUri: string;
+  snapshotPath: string;
+  additions: number;
+  deletions: number;
+  diffText: string;
+  operation?: FileChangeOperation;
+  renamedFrom?: string;
+  renamedTo?: string;
+}
+
 export class ToolExecutor {
   constructor(
     private readonly fileSystemService: FileSystemService,
@@ -113,7 +127,16 @@ export class ToolExecutor {
               sessionId: context.session_id,
               messageId: context.message_id
             });
-            const diffs = [];
+            const diffs: SnapshotDiffEntry[] = [];
+            const action = this.optionalStringArg(resolvedArgs.action) ?? '';
+            const payload = resolvedArgs.payload;
+            const renameOldPath = payload && typeof payload === 'object'
+              ? this.optionalStringArg((payload as Record<string, unknown>).oldPath)
+              : undefined;
+            const renameNewPath = payload && typeof payload === 'object'
+              ? this.optionalStringArg((payload as Record<string, unknown>).newPath)
+              : undefined;
+
             for (const uri of fileUris) {
               // Use the EXACT same path derivation as DiskSnapshotManager.createSnapshot
               // so that the snapshot file is guaranteed to exist at this path.
@@ -128,21 +151,45 @@ export class ToolExecutor {
                 // File was new (didn't exist before), so snapshot has no content
               }
 
-              let newText = '';
-              try {
-                const doc = await vscode.workspace.openTextDocument(uri);
-                newText = doc.getText();
-              } catch {
-                // File might have been deleted by the tool
-              }
+              let newText = await this.readWorkspaceText(uri);
 
               const diff = DiffService.computeDiff(path.basename(uri.fsPath), oldText, newText);
-              diffs.push({
+              const operation = this.resolveFileChangeOperation(
+                action,
+                relativePath,
+                renameOldPath,
+                renameNewPath,
+                oldText,
+                newText
+              );
+
+              let additions = diff.additions;
+              let deletions = diff.deletions;
+              if (operation === 'create' && additions === 0 && deletions === 0 && newText) {
+                additions = this.countTextLines(newText);
+              } else if (operation === 'delete' && additions === 0 && deletions === 0 && oldText) {
+                deletions = this.countTextLines(oldText);
+              }
+
+              const entry: SnapshotDiffEntry = {
                 file: path.basename(uri.fsPath),
                 originalUri: uri.toString(),
                 snapshotPath,
-                ...diff
-              });
+                additions,
+                deletions,
+                diffText: diff.diffText,
+                operation,
+              };
+
+              if (operation === 'rename') {
+                if (renameOldPath && this.pathsMatch(relativePath, renameOldPath)) {
+                  entry.renamedTo = renameNewPath ? path.basename(renameNewPath) : undefined;
+                } else if (renameNewPath && this.pathsMatch(relativePath, renameNewPath)) {
+                  entry.renamedFrom = renameOldPath ? path.basename(renameOldPath) : undefined;
+                }
+              }
+
+              diffs.push(entry);
             }
 
             toolResult.data = {
@@ -206,14 +253,26 @@ export class ToolExecutor {
   }
 
   private extractFileUris(args: Record<string, any>): vscode.Uri[] {
-    const uris: vscode.Uri[] = [];
+    const uriMap = new Map<string, vscode.Uri>();
     const action = args.action;
     const payload = args.payload;
 
-    if (!payload) return uris;
+    if (!payload) return [];
 
-    // Handle both LLM-facing action names (edit_file, create_file) and
-    // internal workspace_ops action names (write_file, replace_file_content, etc.)
+    const pushPath = (filePath: unknown) => {
+      if (!filePath || typeof filePath !== 'string') {
+        return;
+      }
+
+      try {
+        const uri = this.fileSystemService.resolveWorkspacePath(filePath);
+        uriMap.set(uri.toString(), uri);
+      } catch {
+        const uri = vscode.Uri.file(filePath);
+        uriMap.set(uri.toString(), uri);
+      }
+    };
+
     const isFileWrite = [
       'write_file',
       'replace_file_content',
@@ -223,27 +282,89 @@ export class ToolExecutor {
     ].includes(action);
 
     if (isFileWrite) {
-      // Try TargetFile first (Antigravity-style tools), then path (LLM-style)
-      const filePath = payload.TargetFile || payload.path || payload.target;
-      if (filePath && typeof filePath === 'string') {
-        try {
-          uris.push(this.fileSystemService.resolveWorkspacePath(filePath));
-        } catch {
-          uris.push(vscode.Uri.file(filePath));
+      const filesPayload = payload.files;
+      if (action === 'create_file' && Array.isArray(filesPayload)) {
+        for (const file of filesPayload) {
+          if (file && typeof file === 'object' && typeof file.path === 'string') {
+            pushPath(file.path);
+          }
         }
+      } else {
+        pushPath(payload.TargetFile || payload.path || payload.target);
       }
     } else if (['delete_file', 'delete_path'].includes(action)) {
-      const filePath = payload.TargetPath || payload.path || payload.target;
-      if (filePath && typeof filePath === 'string') {
-        try {
-          uris.push(this.fileSystemService.resolveWorkspacePath(filePath));
-        } catch {
-          uris.push(vscode.Uri.file(filePath));
-        }
-      }
+      pushPath(payload.TargetPath || payload.path || payload.target);
+    } else if (action === 'rename_path') {
+      pushPath(payload.oldPath);
+      pushPath(payload.newPath);
     }
 
-    return uris;
+    return Array.from(uriMap.values());
+  }
+
+  private async readWorkspaceText(uri: vscode.Uri): Promise<string> {
+    try {
+      const doc = await vscode.workspace.openTextDocument(uri);
+      return doc.getText();
+    } catch {
+      try {
+        return await fs.readFile(uri.fsPath, 'utf8');
+      } catch {
+        return '';
+      }
+    }
+  }
+
+  private countTextLines(text: string): number {
+    if (!text.trim()) {
+      return 0;
+    }
+    return text.split('\n').length;
+  }
+
+  private normalizeWorkspacePath(value: string): string {
+    return value.replace(/\\/g, '/').replace(/^\.\//, '').toLowerCase();
+  }
+
+  private pathsMatch(left: string, right: string): boolean {
+    return this.normalizeWorkspacePath(left) === this.normalizeWorkspacePath(right);
+  }
+
+  private resolveFileChangeOperation(
+    action: string,
+    relativePath: string,
+    renameOldPath: string | undefined,
+    renameNewPath: string | undefined,
+    oldText: string,
+    newText: string
+  ): FileChangeOperation {
+    if (action === 'create_file' || action === 'write_file') {
+      return oldText ? 'edit' : 'create';
+    }
+
+    if (action === 'delete_path' || action === 'delete_file') {
+      return 'delete';
+    }
+
+    if (action === 'rename_path') {
+      if (renameNewPath && this.pathsMatch(relativePath, renameNewPath)) {
+        return 'rename';
+      }
+      if (renameOldPath && this.pathsMatch(relativePath, renameOldPath)) {
+        return 'delete';
+      }
+      return 'rename';
+    }
+
+    if (!oldText && newText) {
+      return 'create';
+    }
+
+    if (oldText && !newText) {
+      return 'delete';
+    }
+
+    return 'edit';
   }
 
 }

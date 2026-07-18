@@ -21,6 +21,7 @@ import {
 import { getVsCodeApi } from '../lib/vscode'
 import { SnapshotCard, type DiffStat } from './SnapshotCard'
 import { FILE_MUTATION_ACTIONS, normalizeDiffStat } from '../lib/messageDiffs'
+import { fileChangeDetail, shouldShowLineStats } from '../lib/fileChangeStats'
 
 interface Props {
   block: ProcessBlock
@@ -351,7 +352,9 @@ const FileEditRow: React.FC<{
   const diffs = rawDiffs.map(normalizeDiffStat)
   const additions = diffs.reduce((s, d) => s + d.additions, 0)
   const deletions = diffs.reduce((s, d) => s + d.deletions, 0)
+  const changeDetail = diffs.length === 1 ? fileChangeDetail(diffs[0]) : null
   const hasDiffStats = node.state === 'success' && (additions > 0 || deletions > 0)
+  const hasChangeDetail = node.state === 'success' && Boolean(changeDetail)
 
   return (
     <div className="mt-1">
@@ -366,6 +369,9 @@ const FileEditRow: React.FC<{
         <span className="flex-1 min-w-0 text-[13px] font-medium text-[#c6d2e7] truncate">
           {node.summary}
         </span>
+        {hasChangeDetail && (
+          <span className="shrink-0 text-[11px] font-medium text-[#9eb1ff]">{changeDetail}</span>
+        )}
         {hasDiffStats && (
           <span className="flex items-center gap-1.5 shrink-0">
             <span className="font-mono text-[11px] text-[#2dd4bf]">+{additions}</span>
@@ -385,16 +391,25 @@ const FileEditRow: React.FC<{
             <div className="px-3 py-2.5 space-y-2">
               {diffs.map((diff, idx) => (
                 <div key={idx}>
-                  <div className="mb-1 text-[10px] font-medium text-[#91a0bb] truncate">{diff.file}</div>
-                  <pre className="overflow-x-auto whitespace-pre-wrap break-words text-[11px] leading-5 font-mono max-h-[200px] custom-scrollbar">
-                    {diff.diffText.split('\n').map((line, i) => {
-                      let color = 'text-[#c6d2e7]'
-                      if (line.startsWith('+')) color = 'text-[#2dd4bf]'
-                      else if (line.startsWith('-')) color = 'text-[#f43f5e]'
-                      else if (line.startsWith('@')) color = 'text-[#5e6ad2]'
-                      return <div key={i} className={color}>{line}</div>
-                    })}
-                  </pre>
+                  <div className="mb-1 flex items-center gap-2 text-[10px] font-medium text-[#91a0bb] truncate">
+                    <span className="truncate">{diff.file}</span>
+                    {fileChangeDetail(diff) ? (
+                      <span className="shrink-0 text-[#9eb1ff]">{fileChangeDetail(diff)}</span>
+                    ) : null}
+                  </div>
+                  {shouldShowLineStats(diff) ? (
+                    <pre className="overflow-x-auto whitespace-pre-wrap break-words text-[11px] leading-5 font-mono max-h-[200px] custom-scrollbar">
+                      {diff.diffText.split('\n').map((line, i) => {
+                        let color = 'text-[#c6d2e7]'
+                        if (line.startsWith('+')) color = 'text-[#2dd4bf]'
+                        else if (line.startsWith('-')) color = 'text-[#f43f5e]'
+                        else if (line.startsWith('@')) color = 'text-[#5e6ad2]'
+                        return <div key={i} className={color}>{line}</div>
+                      })}
+                    </pre>
+                  ) : (
+                    <p className="text-[11px] text-[#6f81a1]">No line diff available.</p>
+                  )}
                 </div>
               ))}
             </div>

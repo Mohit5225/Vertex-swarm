@@ -112,6 +112,17 @@ export const collectMessageDiffs = (
           if (diff.diffText) {
             existing.diffText = diff.diffText
           }
+          if (diff.operation && diff.operation !== 'edit') {
+            existing.operation = diff.operation
+          } else if (!existing.operation && diff.operation) {
+            existing.operation = diff.operation
+          }
+          if (diff.renamedFrom) {
+            existing.renamedFrom = diff.renamedFrom
+          }
+          if (diff.renamedTo) {
+            existing.renamedTo = diff.renamedTo
+          }
         } else {
           diffMap.set(key, { ...diff })
         }
