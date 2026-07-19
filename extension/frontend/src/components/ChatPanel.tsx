@@ -12,11 +12,11 @@ import { collectMessageFileChanges } from '../lib/messageDiffs'
 import {
   canUndoChange,
   fileChangeDetail,
-  shouldShowLineStats,
   summarizeFileChanges,
 } from '../lib/fileChangeStats'
 import type { FileChange } from '../lib/fileChangeTypes'
 import { buildReviewPayload, canReviewChange } from '../lib/reviewPayload'
+import { ChangeStatBadges } from './ChangeStatBadges'
 
 const starterPrompts = [
   {
@@ -165,12 +165,7 @@ const LiveFileEditBar: React.FC<{ messages: ChatMessage[]; isStreaming: boolean 
                 {fileChangeDetail(change) ? (
                   <span className="text-[10px] font-medium text-[#9eb1ff]">{fileChangeDetail(change)}</span>
                 ) : null}
-                {shouldShowLineStats(change) ? (
-                  <>
-                    <span className="text-[10px] font-mono text-[#2dd4bf]">+{change.additions}</span>
-                    <span className="text-[10px] font-mono text-[#f43f5e]">-{change.deletions}</span>
-                  </>
-                ) : null}
+                <ChangeStatBadges change={change} />
                 {topSnapshotId && canUndoChange(change) && (
                   <button
                     onClick={(e) => handleUndoFile(e, change)}

@@ -12,6 +12,7 @@ export interface SnapshotManifestEntry {
   backend: 'disk' | 'git';
   snapshotPath?: string; // disk backend
   blob?: string;         // git backend
+  isBinary?: boolean;
 }
 
 export interface SnapshotManifest {

@@ -4,11 +4,12 @@ import { getVsCodeApi } from '../lib/vscode';
 import {
   canUndoChange,
   fileChangeDetail,
-  shouldShowLineStats,
   summarizeFileChanges,
+  binaryChangeStats,
 } from '../lib/fileChangeStats';
 import { buildReviewPayload, canReviewChange } from '../lib/reviewPayload';
 import type { FileChange, FileChangeOperation } from '../lib/fileChangeTypes';
+import { ChangeStatBadges } from './ChangeStatBadges';
 
 export type { FileChange, FileChangeOperation };
 
@@ -27,8 +28,10 @@ export const FileChangesCard: React.FC<FileChangesCardProps> = ({
   changes,
   isHistorical,
 }) => {
-  const totalAdditions = changes.reduce((acc, change) => acc + change.additions, 0);
-  const totalDeletions = changes.reduce((acc, change) => acc + change.deletions, 0);
+  const totalAdditions = changes.reduce((acc, change) => acc + (change.isBinary ? 0 : change.additions), 0);
+  const totalDeletions = changes.reduce((acc, change) => acc + (change.isBinary ? 0 : change.deletions), 0);
+  const hasTextStats = totalAdditions > 0 || totalDeletions > 0;
+  const hasBinaryStats = changes.some((change) => Boolean(binaryChangeStats(change).added || binaryChangeStats(change).removed));
   const hasUndoableChanges = changes.some(canUndoChange);
 
   const handleUndo = () => {
@@ -75,10 +78,19 @@ export const FileChangesCard: React.FC<FileChangesCardProps> = ({
           <span className="text-[12px] font-medium text-[#c6d2e7]">
             {summarizeFileChanges(changes)}
           </span>
-          {(totalAdditions > 0 || totalDeletions > 0) && (
+          {(hasTextStats || hasBinaryStats) && (
             <>
-              <span className="text-[11px] font-mono text-[#2dd4bf] ml-1">+{totalAdditions}</span>
-              <span className="text-[11px] font-mono text-[#f43f5e] mr-1">-{totalDeletions}</span>
+              {hasTextStats ? (
+                <>
+                  <span className="text-[11px] font-mono text-[#2dd4bf] ml-1">+{totalAdditions}</span>
+                  <span className="text-[11px] font-mono text-[#f43f5e] mr-1">-{totalDeletions}</span>
+                </>
+              ) : null}
+              {changes.some((change) => change.isBinary) ? (
+                <span className="text-[11px] text-[#9eb1ff]">
+                  {changes.filter((change) => change.isBinary).length} binary
+                </span>
+              ) : null}
             </>
           )}
         </div>
@@ -96,7 +108,7 @@ export const FileChangesCard: React.FC<FileChangesCardProps> = ({
               onClick={handleReview}
               className="flex items-center gap-1.5 rounded-md bg-[#5e6ad2]/20 px-2 py-1 text-[11px] font-medium text-[#9eb1ff] border border-[#5e6ad2]/30 hover:bg-[#5e6ad2]/30 transition-colors"
             >
-              <Search className="h-3 w-3" /> Review
+              <Search className="h-3 w-3" /> {changes.some((change) => change.isBinary && canReviewChange(change)) && !changes.some((change) => !change.isBinary && canReviewChange(change)) ? 'Open' : 'Review'}
             </button>
           )}
         </div>
@@ -118,12 +130,7 @@ export const FileChangesCard: React.FC<FileChangesCardProps> = ({
               {fileChangeDetail(change) ? (
                 <span className="text-[10px] font-medium text-[#9eb1ff]">{fileChangeDetail(change)}</span>
               ) : null}
-              {shouldShowLineStats(change) ? (
-                <>
-                  <span className="text-[10px] font-mono text-[#2dd4bf]">+{change.additions}</span>
-                  <span className="text-[10px] font-mono text-[#f43f5e]">-{change.deletions}</span>
-                </>
-              ) : null}
+              <ChangeStatBadges change={change} />
               {!canUndoChange(change) && canReviewChange(change) ? null : !canUndoChange(change) ? (
                 <span className="text-[10px] text-[#6f81a1]">Undo unavailable</span>
               ) : null}

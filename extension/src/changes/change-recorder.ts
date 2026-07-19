@@ -1,32 +1,39 @@
-import * as crypto from 'node:crypto';
-import * as fs from 'fs/promises';
 import * as path from 'path';
 import * as vscode from 'vscode';
 import { classifyFileForSnapshot } from '../snapshot/exclusion-list';
 import { DiffService } from '../snapshot/diff-service';
 import type { FileChange, FileChangeOperation } from './change-types';
+import { buildChangeId } from './change-id';
+import {
+  readWorkspaceFileState,
+  stateByteSize,
+  stateHasContent,
+  stateText,
+  type FileContentState,
+} from './file-content-state';
 
 export interface BuildChangesInput {
   action: string;
   payload: Record<string, unknown>;
   fileUris: vscode.Uri[];
-  beforeTexts: Map<string, string>;
+  beforeStates: Map<string, FileContentState>;
   snapshotDir: string;
+  requestId?: string;
 }
 
 export class ChangeRecorder {
-  async captureBeforeTexts(fileUris: vscode.Uri[]): Promise<Map<string, string>> {
-    const beforeTexts = new Map<string, string>();
+  async captureBeforeStates(fileUris: vscode.Uri[]): Promise<Map<string, FileContentState>> {
+    const beforeStates = new Map<string, FileContentState>();
 
     for (const uri of fileUris) {
-      beforeTexts.set(uri.toString(), await this.readWorkspaceText(uri));
+      beforeStates.set(uri.toString(), await readWorkspaceFileState(uri));
     }
 
-    return beforeTexts;
+    return beforeStates;
   }
 
   async buildChanges(input: BuildChangesInput): Promise<FileChange[]> {
-    const { action, payload, fileUris, beforeTexts, snapshotDir } = input;
+    const { action, payload, fileUris, beforeStates, snapshotDir, requestId } = input;
     const renameOldPath = optionalString(payload.oldPath);
     const renameNewPath = optionalString(payload.newPath);
     const folderHints = buildFolderHints(action, payload);
@@ -34,32 +41,51 @@ export class ChangeRecorder {
 
     for (const uri of fileUris) {
       const relativePath = vscode.workspace.asRelativePath(uri, false);
-      const oldText = beforeTexts.get(uri.toString()) ?? '';
-      const newText = await this.readWorkspaceText(uri);
-      const isDirectory = await this.isDirectory(uri, action, relativePath, oldText, newText, folderHints);
+      const oldState = beforeStates.get(uri.toString()) ?? { kind: 'missing' as const };
+      const newState = await readWorkspaceFileState(uri);
+      const isDirectory = this.isDirectoryState(oldState, newState, action, relativePath, folderHints);
+
+      const oldText = stateText(oldState);
+      const newText = stateText(newState);
+      const isBinary = oldState.kind === 'binary' || newState.kind === 'binary';
+      const byteSizeBefore = stateByteSize(oldState);
+      const byteSizeAfter = stateByteSize(newState);
 
       const operation = this.resolveOperation(
         action,
         relativePath,
         renameOldPath,
         renameNewPath,
-        oldText,
-        newText,
+        oldState,
+        newState,
         isDirectory
       );
 
-      if (operation === 'edit' && oldText === newText) {
-        continue;
+      if (operation === 'edit') {
+        if (isBinary) {
+          if (byteSizeBefore === byteSizeAfter) {
+            continue;
+          }
+        } else if (oldText === newText) {
+          continue;
+        }
       }
 
-      const diff = DiffService.computeDiff(path.basename(uri.fsPath), oldText, newText);
-      let additions = diff.additions;
-      let deletions = diff.deletions;
+      let additions = 0;
+      let deletions = 0;
+      let diffText = '';
 
-      if (operation === 'create' && additions === 0 && deletions === 0 && newText) {
-        additions = countTextLines(newText);
-      } else if (operation === 'delete' && additions === 0 && deletions === 0 && oldText) {
-        deletions = countTextLines(oldText);
+      if (!isBinary) {
+        const diff = DiffService.computeDiff(path.basename(uri.fsPath), oldText, newText);
+        additions = diff.additions;
+        deletions = diff.deletions;
+        diffText = diff.diffText;
+
+        if (operation === 'create' && additions === 0 && deletions === 0 && newText) {
+          additions = countTextLines(newText);
+        } else if (operation === 'delete' && additions === 0 && deletions === 0 && oldText) {
+          deletions = countTextLines(oldText);
+        }
       }
 
       const safeRelativePath = relativePath.replace(/[^a-zA-Z0-9.\-_\\/]/g, '_');
@@ -67,14 +93,18 @@ export class ChangeRecorder {
       const undoEligible = classifyFileForSnapshot(uri) === 'include' && !isDirectory;
 
       const change: FileChange = {
-        changeId: crypto.randomBytes(8).toString('hex'),
+        changeId: buildChangeId(requestId, relativePath),
         path: relativePath,
         file: path.basename(uri.fsPath),
         operation,
         additions,
         deletions,
-        diffText: diff.diffText,
+        diffText,
         applied: true,
+        requestId,
+        isBinary,
+        byteSizeBefore,
+        byteSizeAfter,
         undo: {
           undoAvailable: undoEligible,
           originalUri: uri.toString(),
@@ -98,40 +128,23 @@ export class ChangeRecorder {
     return changes;
   }
 
-  private async readWorkspaceText(uri: vscode.Uri): Promise<string> {
-    try {
-      const doc = await vscode.workspace.openTextDocument(uri);
-      return doc.getText();
-    } catch {
-      try {
-        return await fs.readFile(uri.fsPath, 'utf8');
-      } catch {
-        return '';
-      }
-    }
-  }
-
-  private async isDirectory(
-    uri: vscode.Uri,
+  private isDirectoryState(
+    oldState: FileContentState,
+    newState: FileContentState,
     action: string,
     relativePath: string,
-    oldText: string,
-    newText: string,
     folderHints: Set<string>
-  ): Promise<boolean> {
+  ): boolean {
     if (folderHints.has(normalizeWorkspacePath(relativePath))) {
       return true;
     }
-
-    try {
-      const stat = await vscode.workspace.fs.stat(uri);
-      return stat.type === vscode.FileType.Directory;
-    } catch {
-      if (action === 'delete_path' && oldText === '' && newText === '') {
-        return true;
-      }
-      return false;
+    if (oldState.kind === 'directory' || newState.kind === 'directory') {
+      return true;
     }
+    if (action === 'delete_path' && oldState.kind === 'missing' && newState.kind === 'missing') {
+      return true;
+    }
+    return false;
   }
 
   private resolveOperation(
@@ -139,19 +152,22 @@ export class ChangeRecorder {
     relativePath: string,
     renameOldPath: string | undefined,
     renameNewPath: string | undefined,
-    oldText: string,
-    newText: string,
+    oldState: FileContentState,
+    newState: FileContentState,
     isDirectory: boolean
   ): FileChangeOperation {
+    const hadContent = stateHasContent(oldState);
+    const hasContent = stateHasContent(newState);
+
     if (action === 'create_file') {
       if (isDirectory) {
         return 'create_folder';
       }
-      return oldText ? 'edit' : 'create';
+      return hadContent ? 'edit' : 'create';
     }
 
     if (action === 'write_file') {
-      return oldText ? 'edit' : 'create';
+      return hadContent ? 'edit' : 'create';
     }
 
     if (action === 'delete_path' || action === 'delete_file') {
@@ -168,11 +184,11 @@ export class ChangeRecorder {
       return 'rename';
     }
 
-    if (!oldText && newText) {
+    if (!hadContent && hasContent) {
       return 'create';
     }
 
-    if (oldText && !newText) {
+    if (hadContent && !hasContent) {
       return 'delete';
     }
 

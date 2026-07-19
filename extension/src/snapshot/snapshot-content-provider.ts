@@ -25,10 +25,23 @@ export class SnapshotContentProvider implements vscode.TextDocumentContentProvid
     const query = new URLSearchParams(uri.query);
     const isNewFile = query.get('newFile') === 'true';
     const isDeleted = query.get('deletedFile') === 'true';
+    const isBinary = query.get('isBinary') === 'true';
     const snapshotPath = query.get('snapshotPath');
 
     if (isDeleted) {
       return '';
+    }
+
+    if (isBinary) {
+      if (!snapshotPath) {
+        return '';
+      }
+      try {
+        const data = await fs.readFile(snapshotPath);
+        return `[Binary file, ${data.byteLength} bytes]`;
+      } catch {
+        return '[Binary file]';
+      }
     }
 
     if (isNewFile || !snapshotPath) {

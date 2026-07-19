@@ -98,9 +98,9 @@ export class ToolExecutor {
           ? extractMutationPaths(resolvedArgs, (filePath) => this.fileSystemService.resolveWorkspacePath(filePath))
           : [];
 
-        let beforeTexts = new Map<string, string>();
+        let beforeStates = new Map<string, import('../changes/file-content-state').FileContentState>();
         if (isMutation && isApply && fileUris.length > 0) {
-          beforeTexts = await this.changeRecorder.captureBeforeTexts(fileUris);
+          beforeStates = await this.changeRecorder.captureBeforeStates(fileUris);
         }
 
         // Snapshot layer — undo/review only; independent of summary ledger.
@@ -133,8 +133,9 @@ export class ToolExecutor {
               action,
               payload,
               fileUris,
-              beforeTexts,
+              beforeStates,
               snapshotDir,
+              requestId: this.optionalStringArg(resolvedArgs.request_id),
             });
 
             toolResult.data = {

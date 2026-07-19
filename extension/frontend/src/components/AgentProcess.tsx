@@ -24,7 +24,8 @@ import {
   extractFileChangesFromData,
   normalizeFileChange,
 } from '../lib/messageDiffs'
-import { fileChangeDetail, shouldShowLineStats } from '../lib/fileChangeStats'
+import { fileChangeDetail } from '../lib/fileChangeStats'
+import { ChangeStatBadges } from './ChangeStatBadges'
 
 interface Props {
   block: ProcessBlock
@@ -399,8 +400,11 @@ const FileEditRow: React.FC<{
                     {fileChangeDetail(diff) ? (
                       <span className="shrink-0 text-[#9eb1ff]">{fileChangeDetail(diff)}</span>
                     ) : null}
+                    <ChangeStatBadges change={diff} />
                   </div>
-                  {shouldShowLineStats(diff) ? (
+                  {diff.isBinary ? (
+                    <p className="text-[11px] text-[#6f81a1]">Binary file — use Review to open.</p>
+                  ) : diff.diffText ? (
                     <pre className="overflow-x-auto whitespace-pre-wrap break-words text-[11px] leading-5 font-mono max-h-[200px] custom-scrollbar">
                       {diff.diffText.split('\n').map((line, i) => {
                         let color = 'text-[#c6d2e7]'

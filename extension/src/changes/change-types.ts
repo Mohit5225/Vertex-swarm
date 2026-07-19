@@ -25,4 +25,10 @@ export interface FileChange {
   renamedFrom?: string;
   renamedTo?: string;
   undo?: UndoHandle;
+  /** workspace_ops request_id for idempotent correlation */
+  requestId?: string;
+  /** True when the file is non-text (image, pdf, etc.) */
+  isBinary?: boolean;
+  byteSizeBefore?: number;
+  byteSizeAfter?: number;
 }

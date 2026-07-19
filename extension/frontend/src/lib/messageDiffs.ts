@@ -2,9 +2,9 @@ import { type SessionEvent } from '../store/chatStore'
 import { buildAgentRunBlocks } from './agentRunBlocks'
 import {
   type FileChange,
-  type FileChangeOperation,
   type LegacyDiffStat,
 } from './fileChangeTypes'
+import { finalizeTurnChanges, mergeFileChanges, normalizePathKey } from './mergeFileChanges'
 
 /** workspace_ops actions that mutate files — read/search/list are excluded. */
 export const FILE_MUTATION_ACTIONS = new Set([
@@ -56,6 +56,10 @@ const legacyToFileChange = (legacy: LegacyDiffStat, index: number): FileChange =
 })
 
 export const normalizeFileChange = (change: FileChange): FileChange => {
+  if (change.isBinary) {
+    return change
+  }
+
   if ((change.additions > 0 || change.deletions > 0) || !change.diffText?.trim()) {
     return change
   }
@@ -91,43 +95,6 @@ export interface MessageFileChangeSummary {
   snapshotId: string
   sessionId: string
   messageId: string
-}
-
-const normalizePathKey = (value: string): string =>
-  value.replace(/\\/g, '/').replace(/^\.\//, '').toLowerCase()
-
-const collapseRenameChanges = (changes: FileChange[]): FileChange[] => {
-  const deletePaths = new Set<string>()
-
-  for (const change of changes) {
-    if (change.operation === 'rename' && change.renamedFrom) {
-      deletePaths.add(normalizePathKey(change.renamedFrom))
-    }
-    if (change.operation === 'delete' && change.renamedTo) {
-      deletePaths.add(normalizePathKey(change.path))
-    }
-  }
-
-  if (deletePaths.size === 0) {
-    return changes
-  }
-
-  return changes.filter((change) => {
-    if (change.operation !== 'delete') {
-      return true
-    }
-    return !deletePaths.has(normalizePathKey(change.path))
-  })
-}
-
-const mergeOperation = (
-  existing: FileChangeOperation,
-  incoming: FileChangeOperation
-): FileChangeOperation => {
-  if (incoming !== 'edit') {
-    return incoming
-  }
-  return existing
 }
 
 /**
@@ -177,28 +144,14 @@ export const collectMessageFileChanges = (
         }
 
         const change = normalizeFileChange(rawChange)
-        const key = change.path || change.undo?.originalUri || change.changeId
+        const key = normalizePathKey(change.path || change.undo?.originalUri || change.changeId)
         if (!key) {
           continue
         }
 
         const existing = changeMap.get(key)
         if (existing) {
-          existing.additions += change.additions
-          existing.deletions += change.deletions
-          existing.operation = mergeOperation(existing.operation, change.operation)
-          if (change.diffText) {
-            existing.diffText = change.diffText
-          }
-          if (change.renamedFrom) {
-            existing.renamedFrom = change.renamedFrom
-          }
-          if (change.renamedTo) {
-            existing.renamedTo = change.renamedTo
-          }
-          if (change.undo) {
-            existing.undo = change.undo
-          }
+          changeMap.set(key, mergeFileChanges(existing, change))
         } else {
           changeMap.set(key, { ...change })
         }
@@ -207,7 +160,7 @@ export const collectMessageFileChanges = (
   }
 
   return {
-    changes: collapseRenameChanges(Array.from(changeMap.values())),
+    changes: finalizeTurnChanges(Array.from(changeMap.values())),
     snapshotId,
     sessionId,
     messageId,

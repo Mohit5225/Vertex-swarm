@@ -8,6 +8,7 @@ export interface ReviewSnapshotPayload {
   operation: FileChangeOperation
   isNewFile: boolean
   isDeleted: boolean
+  isBinary: boolean
 }
 
 export const buildReviewPayload = (change: FileChange): ReviewSnapshotPayload | null => {
@@ -17,6 +18,8 @@ export const buildReviewPayload = (change: FileChange): ReviewSnapshotPayload | 
     return null
   }
 
+  const isBinary = Boolean(change.isBinary)
+
   if (operation === 'create' || operation === 'create_folder') {
     return {
       file: change.file,
@@ -24,11 +27,12 @@ export const buildReviewPayload = (change: FileChange): ReviewSnapshotPayload | 
       operation,
       isNewFile: true,
       isDeleted: false,
+      isBinary,
     }
   }
 
   if (operation === 'delete' || operation === 'delete_folder') {
-    if (!change.undo?.snapshotPath) {
+    if (!change.undo?.snapshotPath && !isBinary) {
       return null
     }
     return {
@@ -38,6 +42,7 @@ export const buildReviewPayload = (change: FileChange): ReviewSnapshotPayload | 
       operation,
       isNewFile: false,
       isDeleted: true,
+      isBinary,
     }
   }
 
@@ -49,11 +54,11 @@ export const buildReviewPayload = (change: FileChange): ReviewSnapshotPayload | 
       operation,
       isNewFile: false,
       isDeleted: false,
+      isBinary,
     }
   }
 
-  // Edits need a snapshot file for the VS Code diff view.
-  if (!change.undo?.snapshotPath) {
+  if (!isBinary && !change.undo?.snapshotPath) {
     return null
   }
 
@@ -64,6 +69,7 @@ export const buildReviewPayload = (change: FileChange): ReviewSnapshotPayload | 
     operation,
     isNewFile: false,
     isDeleted: false,
+    isBinary,
   }
 }
 

@@ -440,6 +440,7 @@ export class VertexSwarmChatRuntime {
           snapshotPath?: string;
           isNewFile?: boolean;
           isDeleted?: boolean;
+          isBinary?: boolean;
         };
         this.log(`review requested for snapshot file ${payload?.file}`);
         if (!payload?.originalUri) {
@@ -450,12 +451,16 @@ export class VertexSwarmChatRuntime {
           const liveUri = vscode.Uri.parse(payload.originalUri);
           const isNewFile = payload.isNewFile === true;
           const isDeleted = payload.isDeleted === true;
+          const isBinary = payload.isBinary === true;
+
+          if (isBinary && !isDeleted) {
+            await vscode.commands.executeCommand('vscode.open', liveUri);
+            break;
+          }
 
           const leftQuery = isNewFile
             ? 'newFile=true'
-            : isDeleted
-              ? `snapshotPath=${encodeURIComponent(payload.snapshotPath ?? '')}`
-              : `snapshotPath=${encodeURIComponent(payload.snapshotPath ?? '')}`;
+            : `snapshotPath=${encodeURIComponent(payload.snapshotPath ?? '')}${isBinary ? '&isBinary=true' : ''}`;
 
           const snapshotUri = vscode.Uri.parse(`vertex-snapshot:/${payload.file ?? 'file'}?${leftQuery}`);
 

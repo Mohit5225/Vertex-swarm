@@ -115,7 +115,7 @@ export type WebviewToExtensionMessage =
   | { type: 'log'; payload: string }
   | { type: 'undo-snapshot'; payload: { snapshotId: string; sessionId: string; messageId: string } }
   | { type: 'undo-snapshot-file'; payload: { snapshotId: string; sessionId: string; messageId: string; originalUri: string } }
-  | { type: 'review-snapshot'; payload: { file: string; originalUri: string; snapshotPath?: string; operation?: string; isNewFile?: boolean; isDeleted?: boolean } }
+  | { type: 'review-snapshot'; payload: { file: string; originalUri: string; snapshotPath?: string; operation?: string; isNewFile?: boolean; isDeleted?: boolean; isBinary?: boolean } }
   | { type: 'get-config' }
   | { type: 'set-config'; payload: { snapshotRetentionDays: number } }
   | { type: 'open-plan' }

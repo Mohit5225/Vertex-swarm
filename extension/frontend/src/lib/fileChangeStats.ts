@@ -83,7 +83,57 @@ export const summarizeFileChanges = (changes: FileChange[]): string => {
   return `Changed ${changes.length} ${suffix}`
 }
 
+export const formatByteSize = (bytes: number): string => {
+  if (bytes <= 0) {
+    return '0 B'
+  }
+
+  const units = ['B', 'KB', 'MB', 'GB']
+  let size = bytes
+  let unitIndex = 0
+
+  while (size >= 1024 && unitIndex < units.length - 1) {
+    size /= 1024
+    unitIndex += 1
+  }
+
+  const precision = size >= 10 || unitIndex === 0 ? 0 : 1
+  return `${size.toFixed(precision)} ${units[unitIndex]}`
+}
+
+export const binaryChangeStats = (
+  change: FileChange
+): { added: string | null; removed: string | null } => {
+  if (!change.isBinary) {
+    return { added: null, removed: null }
+  }
+
+  const before = change.byteSizeBefore ?? 0
+  const after = change.byteSizeAfter ?? 0
+  const delta = after - before
+
+  if (delta > 0) {
+    return { added: formatByteSize(delta), removed: null }
+  }
+  if (delta < 0) {
+    return { added: null, removed: formatByteSize(Math.abs(delta)) }
+  }
+  if (after > 0) {
+    return { added: formatByteSize(after), removed: null }
+  }
+
+  return { added: null, removed: null }
+}
+
+export const shouldShowBinaryStats = (change: FileChange): boolean => {
+  const stats = binaryChangeStats(change)
+  return Boolean(change.isBinary && (stats.added || stats.removed))
+}
+
 export const shouldShowLineStats = (change: FileChange): boolean => {
+  if (change.isBinary) {
+    return false
+  }
   const operation = inferOperation(change)
   if (
     operation === 'create' ||
@@ -99,6 +149,20 @@ export const shouldShowLineStats = (change: FileChange): boolean => {
 
 export const fileChangeDetail = (change: FileChange): string | null => {
   const operation = inferOperation(change)
+
+  if (change.isBinary) {
+    switch (operation) {
+      case 'create':
+        return 'Created (binary)'
+      case 'delete':
+        return 'Deleted (binary)'
+      case 'rename':
+        return change.renamedFrom ? `Renamed (binary) ${change.renamedFrom} → ${change.path}` : 'Renamed (binary)'
+      default:
+        return 'Binary'
+    }
+  }
+
   if (operation === 'rename' && change.renamedFrom) {
     return `${change.renamedFrom} → ${change.path}`
   }

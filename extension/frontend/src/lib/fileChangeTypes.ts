@@ -24,6 +24,9 @@ export interface FileChange {
   renamedFrom?: string
   renamedTo?: string
   undo?: UndoHandle
+  isBinary?: boolean;
+  byteSizeBefore?: number;
+  byteSizeAfter?: number;
 }
 
 /** @deprecated Use FileChange — kept for chat history recorded before file_changes existed. */
