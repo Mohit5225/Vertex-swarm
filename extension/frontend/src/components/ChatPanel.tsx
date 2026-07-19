@@ -8,8 +8,15 @@ import { getVsCodeApi } from '../lib/vscode'
 import { ChevronDown, Undo2 } from 'lucide-react'
 import TodoWidget from './TodoWidget'
 
-import { collectMessageDiffs } from '../lib/messageDiffs'
-import { fileChangeDetail, shouldShowLineStats, summarizeFileChanges } from '../lib/fileChangeStats'
+import { collectMessageFileChanges } from '../lib/messageDiffs'
+import {
+  canUndoChange,
+  fileChangeDetail,
+  shouldShowLineStats,
+  summarizeFileChanges,
+} from '../lib/fileChangeStats'
+import type { FileChange } from '../lib/fileChangeTypes'
+import { buildReviewPayload, canReviewChange } from '../lib/reviewPayload'
 
 const starterPrompts = [
   {
@@ -48,16 +55,7 @@ const formatRelativeTime = (isoTimestamp: string) => {
   return `${diffDays} day${diffDays === 1 ? '' : 's'} ago`
 }
 
-interface LiveDiff {
-  file: string
-  additions: number
-  deletions: number
-  originalUri?: string
-  snapshotPath?: string
-  snapshotId?: string
-  sessionId?: string
-  messageId?: string
-}
+interface LiveChange extends FileChange {}
 
 const LiveFileEditBar: React.FC<{ messages: ChatMessage[]; isStreaming: boolean }> = ({
   messages,
@@ -69,12 +67,13 @@ const LiveFileEditBar: React.FC<{ messages: ChatMessage[]; isStreaming: boolean 
   if (lastMessage.type !== 'agent' || !lastMessage.events?.length) return null
 
   const lastAgent = lastMessage
-  const { diffs: mergedDiffs, snapshotId: topSnapshotId, sessionId: topSessionId, messageId: topMessageId } =
-    collectMessageDiffs(lastAgent.events || [], lastAgent.content)
+  const { changes: mergedChanges, snapshotId: topSnapshotId, sessionId: topSessionId, messageId: topMessageId } =
+    collectMessageFileChanges(lastAgent.events || [], lastAgent.content)
 
-  const fileCount = mergedDiffs.length
-  const totalAdds = mergedDiffs.reduce((s, d) => s + d.additions, 0)
-  const totalDels = mergedDiffs.reduce((s, d) => s + d.deletions, 0)
+  const fileCount = mergedChanges.length
+  const totalAdds = mergedChanges.reduce((s, d) => s + d.additions, 0)
+  const totalDels = mergedChanges.reduce((s, d) => s + d.deletions, 0)
+  const hasUndoableChanges = mergedChanges.some(canUndoChange)
 
   if (fileCount === 0) return null
 
@@ -87,24 +86,26 @@ const LiveFileEditBar: React.FC<{ messages: ChatMessage[]; isStreaming: boolean 
     })
   }
 
-  const handleReviewFile = (e: React.MouseEvent, d: LiveDiff) => {
+  const handleReviewFile = (e: React.MouseEvent, change: LiveChange) => {
     e.stopPropagation()
+    const payload = buildReviewPayload(change)
+    if (!payload) return
     getVsCodeApi()?.postMessage({
       type: 'review-snapshot',
-      payload: { file: d.file, originalUri: d.originalUri, snapshotPath: d.snapshotPath }
+      payload,
     })
   }
 
-  const handleUndoFile = (e: React.MouseEvent, d: LiveDiff) => {
+  const handleUndoFile = (e: React.MouseEvent, change: LiveChange) => {
     e.stopPropagation()
-    if (!topSnapshotId || !d.originalUri) return
+    if (!topSnapshotId || !change.undo?.originalUri || !canUndoChange(change)) return
     getVsCodeApi()?.postMessage({
       type: 'undo-snapshot-file',
       payload: {
         snapshotId: topSnapshotId,
         sessionId: topSessionId,
         messageId: topMessageId,
-        originalUri: d.originalUri,
+        originalUri: change.undo.originalUri,
       }
     })
   }
@@ -117,7 +118,7 @@ const LiveFileEditBar: React.FC<{ messages: ChatMessage[]; isStreaming: boolean 
       >
         <div className="flex items-center gap-2">
           <span className="text-[12px] font-medium text-[#c6d2e7]">
-            {summarizeFileChanges(mergedDiffs)}
+            {summarizeFileChanges(mergedChanges)}
           </span>
           {(totalAdds > 0 || totalDels > 0) && (
             <div className="flex items-center gap-1.5 font-mono text-[11px]">
@@ -127,7 +128,7 @@ const LiveFileEditBar: React.FC<{ messages: ChatMessage[]; isStreaming: boolean 
           )}
         </div>
         <div className="flex items-center gap-2">
-          {topSnapshotId && (
+          {topSnapshotId && hasUndoableChanges && (
             <button
               onClick={handleUndoAll}
               className="flex items-center gap-1 rounded-md px-2 py-0.5 text-[11px] font-medium text-[#c6d2e7] hover:bg-white/[0.1] transition-colors"
@@ -146,52 +147,48 @@ const LiveFileEditBar: React.FC<{ messages: ChatMessage[]; isStreaming: boolean 
         </div>
       </div>
 
-      {isExpanded && mergedDiffs.length > 0 && (
+      {isExpanded && mergedChanges.length > 0 && (
         <div className="px-2 pb-2">
-          {mergedDiffs.map((d) => (
+          {mergedChanges.map((change) => (
             <div
-              key={d.originalUri || d.file}
+              key={change.changeId}
               className="flex items-center justify-between px-3 py-1.5 rounded-md hover:bg-white/[0.03] transition-colors group"
             >
               <span
-                className="text-[11px] text-[#91a0bb] font-mono truncate max-w-[160px] group-hover:text-[#c6d2e7] transition-colors cursor-pointer"
-                onClick={(e) => handleReviewFile(e, d)}
-                title={d.file}
+                className="text-[11px] text-[#91a0bb] font-mono truncate max-w-[200px] group-hover:text-[#c6d2e7] transition-colors cursor-pointer"
+                onClick={(e) => handleReviewFile(e, change)}
+                title={change.path}
               >
-                {d.file}
+                {change.path}
               </span>
               <div className="flex items-center gap-2 opacity-70 group-hover:opacity-100 transition-opacity">
-                {fileChangeDetail(d) ? (
-                  <span className="text-[10px] font-medium text-[#9eb1ff]">{fileChangeDetail(d)}</span>
+                {fileChangeDetail(change) ? (
+                  <span className="text-[10px] font-medium text-[#9eb1ff]">{fileChangeDetail(change)}</span>
                 ) : null}
-                {shouldShowLineStats(d) ? (
+                {shouldShowLineStats(change) ? (
                   <>
-                    <span className="text-[10px] font-mono text-[#2dd4bf]">+{d.additions}</span>
-                    <span className="text-[10px] font-mono text-[#f43f5e]">-{d.deletions}</span>
+                    <span className="text-[10px] font-mono text-[#2dd4bf]">+{change.additions}</span>
+                    <span className="text-[10px] font-mono text-[#f43f5e]">-{change.deletions}</span>
                   </>
                 ) : null}
-                {topSnapshotId && (
+                {topSnapshotId && canUndoChange(change) && (
                   <button
-                    onClick={(e) => handleUndoFile(e, {
-                      file: d.file,
-                      additions: d.additions,
-                      deletions: d.deletions,
-                      originalUri: d.originalUri,
-                      snapshotPath: d.snapshotPath,
-                    })}
+                    onClick={(e) => handleUndoFile(e, change)}
                     className="flex items-center gap-0.5 text-[10px] font-medium text-[#c6d2e7] hover:text-white transition-colors ml-0.5"
-                    title={`Undo changes to ${d.file}`}
+                    title={`Undo changes to ${change.path}`}
                   >
                     <Undo2 className="h-2.5 w-2.5" />
                     Undo
                   </button>
                 )}
-                <button
-                  onClick={(e) => handleReviewFile(e, d)}
-                  className="text-[10px] font-medium text-[#5e6ad2] hover:text-[#9eb1ff] transition-colors ml-0.5"
-                >
-                  Review
-                </button>
+                {canReviewChange(change) && (
+                  <button
+                    onClick={(e) => handleReviewFile(e, change)}
+                    className="text-[10px] font-medium text-[#5e6ad2] hover:text-[#9eb1ff] transition-colors ml-0.5"
+                  >
+                    Review
+                  </button>
+                )}
               </div>
             </div>
           ))}

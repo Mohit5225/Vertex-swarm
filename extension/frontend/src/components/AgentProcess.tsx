@@ -19,8 +19,11 @@ import {
   X
 } from 'lucide-react'
 import { getVsCodeApi } from '../lib/vscode'
-import { SnapshotCard, type DiffStat } from './SnapshotCard'
-import { FILE_MUTATION_ACTIONS, normalizeDiffStat } from '../lib/messageDiffs'
+import {
+  FILE_MUTATION_ACTIONS,
+  extractFileChangesFromData,
+  normalizeFileChange,
+} from '../lib/messageDiffs'
 import { fileChangeDetail, shouldShowLineStats } from '../lib/fileChangeStats'
 
 interface Props {
@@ -348,8 +351,8 @@ const FileEditRow: React.FC<{
   onToggle: () => void
 }> = ({ node, expanded, onToggle }) => {
   const Icon = actionIcon(node.action)
-  const rawDiffs: DiffStat[] = (node.resultDebug as any)?.data?.snapshot_diffs ?? []
-  const diffs = rawDiffs.map(normalizeDiffStat)
+  const rawChanges = extractFileChangesFromData((node.resultDebug as any)?.data)
+  const diffs = rawChanges.map(normalizeFileChange)
   const additions = diffs.reduce((s, d) => s + d.additions, 0)
   const deletions = diffs.reduce((s, d) => s + d.deletions, 0)
   const changeDetail = diffs.length === 1 ? fileChangeDetail(diffs[0]) : null
@@ -387,12 +390,12 @@ const FileEditRow: React.FC<{
       {expanded && (
         <div className="ml-7 mt-1 rounded-[14px] bg-[linear-gradient(180deg,rgba(18,25,39,0.95),rgba(12,18,29,0.98))] border border-white/[0.04] overflow-hidden">
           {diffs.length > 0 ? (
-            /* Tier 2: Quick-peek diff — shown when backend returns snapshot_diffs */
+            /* Tier 2: Quick-peek diff — shown when backend returns file_changes */
             <div className="px-3 py-2.5 space-y-2">
               {diffs.map((diff, idx) => (
                 <div key={idx}>
                   <div className="mb-1 flex items-center gap-2 text-[10px] font-medium text-[#91a0bb] truncate">
-                    <span className="truncate">{diff.file}</span>
+                    <span className="truncate" title={diff.path}>{diff.path}</span>
                     {fileChangeDetail(diff) ? (
                       <span className="shrink-0 text-[#9eb1ff]">{fileChangeDetail(diff)}</span>
                     ) : null}
@@ -448,7 +451,7 @@ const NodeAccordion: React.FC<{
   expanded: boolean
   onToggle: () => void
   isHistorical?: boolean
-}> = ({ node, expanded, onToggle, isHistorical }) => {
+}> = ({ node, expanded, onToggle, isHistorical: _isHistorical }) => {
   const Icon = actionIcon(node.action)
   const requestLabel = node.requestDebug ? 'Input' : 'Request'
   const resultLabel = node.resultDebug ? 'Output' : 'Result'
@@ -485,14 +488,14 @@ const NodeAccordion: React.FC<{
       )}
 
       {/* Snapshot quick peek: show inline diff instead of JSON if diff exists */}
-      {node.toolName !== 'terminal_ops' && expanded && (node.resultDebug as any)?.data?.snapshot_diffs?.length > 0 ? (
+      {node.toolName !== 'terminal_ops' && expanded && extractFileChangesFromData((node.resultDebug as any)?.data).length > 0 ? (
         <div className="mt-2 ml-0.5 rounded-[18px] bg-[linear-gradient(180deg,rgba(18,25,39,0.95),rgba(12,18,29,0.98))] px-3 py-3 shadow-[0_14px_30px_rgba(0,0,0,0.22)]">
           <div className="mb-2 flex items-center gap-2 text-[11px] font-medium text-[#7f91b4]">
             <FileSearch className="h-3.5 w-3.5" />
             <span>Quick Peek (Diff)</span>
           </div>
           <div className="space-y-2">
-            {((node.resultDebug as any).data.snapshot_diffs as DiffStat[]).map((diff, idx) => (
+            {extractFileChangesFromData((node.resultDebug as any)?.data).map((diff, idx) => (
               <div key={idx} className="rounded-2xl bg-white/[0.035] px-3 py-2.5">
                 <div className="mb-1.5 text-[11px] font-medium text-[#91a0bb] truncate">
                   {diff.file}
@@ -513,7 +516,7 @@ const NodeAccordion: React.FC<{
       ) : null}
 
       {/* All other tools: show debug view on expand */}
-      {node.toolName !== 'terminal_ops' && expanded && !(node.resultDebug as any)?.data?.snapshot_diffs ? (
+      {node.toolName !== 'terminal_ops' && expanded && extractFileChangesFromData((node.resultDebug as any)?.data).length === 0 ? (
         <div className="mt-2 ml-0.5 rounded-[18px] bg-[linear-gradient(180deg,rgba(18,25,39,0.95),rgba(12,18,29,0.98))] px-3 py-3 shadow-[0_14px_30px_rgba(0,0,0,0.22)]">
           <div className="mb-2 flex items-center gap-2 text-[11px] font-medium text-[#7f91b4]">
             <FileSearch className="h-3.5 w-3.5" />
@@ -542,16 +545,7 @@ const NodeAccordion: React.FC<{
         </div>
       ) : null}
 
-      {/* Snapshot Card (Tier 1 Awareness) - Always visible if diffs exist */}
-      {node.toolName !== 'terminal_ops' && (node.resultDebug as any)?.data?.snapshot_diffs?.length > 0 && (
-        <SnapshotCard
-          diffs={(node.resultDebug as any).data.snapshot_diffs}
-          snapshotId={(node.resultDebug as any).data.snapshot_id}
-          sessionId={(node.resultDebug as any).data.snapshot_session_id}
-          messageId={(node.resultDebug as any).data.snapshot_id}
-          isHistorical={isHistorical}
-        />
-      )}
+      {/* Per-tool diff details live in FileEditRow; turn summary is in MessageRenderer */}
     </div>
   )
 }
@@ -565,23 +559,6 @@ const GroupAccordion: React.FC<{
   isHistorical?: boolean
 }> = ({ item, expanded, expandedNodes, onToggleGroup, onToggleNode, isHistorical }) => {
   const Icon = actionIcon(item.action)
-
-  // Aggregate diffs across all nodes in this group
-  const allDiffs: DiffStat[] = [];
-  let snapshotId = '';
-  let sessionId = '';
-  let messageId = '';
-
-  for (const node of item.nodes) {
-    const data = (node.resultDebug as any)?.data;
-    if (data?.snapshot_diffs && Array.isArray(data.snapshot_diffs)) {
-      allDiffs.push(...data.snapshot_diffs);
-      // Use the first node that has snapshot data for IDs
-      if (!snapshotId) snapshotId = data.snapshot_id ?? '';
-      if (!sessionId) sessionId = data.snapshot_session_id ?? '';
-      if (!messageId) messageId = data.snapshot_id ?? ''; // messageId == snapshot_id (the message_id on the backend)
-    }
-  }
 
   return (
     <div className="relative pl-8">
@@ -605,16 +582,6 @@ const GroupAccordion: React.FC<{
           {renderChevron(expanded)}
         </div>
       </button>
-
-      {allDiffs.length > 0 && snapshotId && sessionId && (
-        <SnapshotCard
-          diffs={allDiffs}
-          snapshotId={snapshotId}
-          sessionId={sessionId}
-          messageId={messageId}
-          isHistorical={isHistorical}
-        />
-      )}
 
       {expanded ? (
         <div className="mt-1 space-y-1">

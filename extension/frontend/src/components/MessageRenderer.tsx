@@ -9,8 +9,8 @@ import { buildAgentRunBlocks } from '../lib/agentRunBlocks'
 import { describePendingMessage } from '../lib/trace'
 import { getVsCodeApi } from '../lib/vscode'
 import PlanCard from './PlanCard'
-import { SnapshotCard } from './SnapshotCard'
-import { collectMessageDiffs } from '../lib/messageDiffs'
+import { FileChangesCard } from './FileChangesCard'
+import { collectMessageFileChanges } from '../lib/messageDiffs'
 
 interface Props {
   message: ChatMessage
@@ -57,11 +57,11 @@ const MessageRenderer: React.FC<Props> = ({ message }) => {
     [message.events, message.content, shouldRenderProcess]
   )
 
-  const turnDiffSummary = useMemo(
+  const turnChangeSummary = useMemo(
     () =>
       shouldRenderProcess
-        ? collectMessageDiffs(message.events || [], message.content)
-        : { diffs: [], snapshotId: '', sessionId: '', messageId: '' },
+        ? collectMessageFileChanges(message.events || [], message.content)
+        : { changes: [], snapshotId: '', sessionId: '', messageId: '' },
     [message.events, message.content, shouldRenderProcess]
   )
 
@@ -182,12 +182,12 @@ const MessageRenderer: React.FC<Props> = ({ message }) => {
                 return <PlanCard status={planStatus} />;
               })()}
 
-              {!isStreamingMessage && turnDiffSummary.diffs.length > 0 && (
-                <SnapshotCard
-                  diffs={turnDiffSummary.diffs}
-                  snapshotId={turnDiffSummary.snapshotId}
-                  sessionId={turnDiffSummary.sessionId}
-                  messageId={turnDiffSummary.messageId}
+              {!isStreamingMessage && turnChangeSummary.changes.length > 0 && (
+                <FileChangesCard
+                  changes={turnChangeSummary.changes}
+                  snapshotId={turnChangeSummary.snapshotId}
+                  sessionId={turnChangeSummary.sessionId}
+                  messageId={turnChangeSummary.messageId}
                   isHistorical={isHistorical}
                 />
               )}

@@ -24,10 +24,14 @@ export class SnapshotContentProvider implements vscode.TextDocumentContentProvid
   async provideTextDocumentContent(uri: vscode.Uri): Promise<string> {
     const query = new URLSearchParams(uri.query);
     const isNewFile = query.get('newFile') === 'true';
+    const isDeleted = query.get('deletedFile') === 'true';
     const snapshotPath = query.get('snapshotPath');
 
+    if (isDeleted) {
+      return '';
+    }
+
     if (isNewFile || !snapshotPath) {
-      // If the file didn't exist before the snapshot, its old content is empty.
       return '';
     }
 
@@ -36,7 +40,7 @@ export class SnapshotContentProvider implements vscode.TextDocumentContentProvid
       return content;
     } catch (err) {
       console.error(`[SnapshotContentProvider] Failed to read snapshot file at ${snapshotPath}:`, err);
-      return `// Error loading snapshot content: ${String(err)}`;
+      return '';
     }
   }
 }

@@ -3,25 +3,13 @@ import type { ToolCallPayload, ToolContext, ToolResult } from '../types/index';
 import type { TerminalService } from './terminal-service';
 import * as vscode from 'vscode';
 import type { ISnapshotManager } from '../snapshot/types';
-import { DiffService } from '../snapshot/diff-service';
-import * as fs from 'fs/promises';
-import * as path from 'path';
-
-type FileChangeOperation = 'edit' | 'create' | 'delete' | 'rename';
-
-interface SnapshotDiffEntry {
-  file: string;
-  originalUri: string;
-  snapshotPath: string;
-  additions: number;
-  deletions: number;
-  diffText: string;
-  operation?: FileChangeOperation;
-  renamedFrom?: string;
-  renamedTo?: string;
-}
+import { ChangeRecorder } from '../changes/change-recorder';
+import { extractMutationPaths } from '../changes/extract-mutation-paths';
+import { isApplyMode, isMutationAction } from '../changes/mutation-actions';
 
 export class ToolExecutor {
+  private readonly changeRecorder = new ChangeRecorder();
+
   constructor(
     private readonly fileSystemService: FileSystemService,
     private readonly terminalService: TerminalService,
@@ -45,8 +33,6 @@ export class ToolExecutor {
     try {
       const allowedTools = ['workspace_ops', 'terminal_ops'];
 
-      // Resolve dotted-name hallucinations: e.g. "workspace_ops.run_json", "workspace_ops.list_dir"
-      // The model sometimes wraps a valid workspace_ops call inside a fake sub-tool name.
       const dottedMatch = message.tool_name.match(/^(workspace_ops|terminal_ops)\.(.+)$/);
       let resolvedToolName: string = message.tool_name;
       let resolvedArgs: Record<string, unknown> = message.args;
@@ -56,8 +42,6 @@ export class ToolExecutor {
         const inferredAction = dottedMatch[2];
         const nested = message.args;
 
-        // Case A: args already carry a complete workspace_ops call structure (e.g. workspace_ops.run_json).
-        // The model put the right args inside but used the wrong outer tool name — just unwrap.
         const hasValidStructure =
           typeof nested.action === 'string' &&
           typeof nested.request_id === 'string' &&
@@ -68,8 +52,6 @@ export class ToolExecutor {
           resolvedToolName = baseTool;
           resolvedArgs = nested;
         } else {
-          // Case B: args are flat (e.g. workspace_ops.list_dir with path/request_id at top level).
-          // Best-effort: inject the inferred action and wrap payload.
           const hasPayload = typeof nested.payload === 'object' && nested.payload !== null;
           resolvedToolName = baseTool;
           resolvedArgs = {
@@ -103,9 +85,26 @@ export class ToolExecutor {
       } else {
         this.normalizePayload(resolvedArgs);
 
-        // Phase 1: Snapshot Interception Boundary
-        const fileUris = this.extractFileUris(resolvedArgs);
-        if (fileUris.length > 0) {
+        const action = this.optionalStringArg(resolvedArgs.action) ?? '';
+        const mode = resolvedArgs.mode;
+        const isMutation = isMutationAction(action);
+        const isApply = isApplyMode(mode);
+        const payload =
+          resolvedArgs.payload && typeof resolvedArgs.payload === 'object'
+            ? (resolvedArgs.payload as Record<string, unknown>)
+            : {};
+
+        const fileUris = isMutation
+          ? extractMutationPaths(resolvedArgs, (filePath) => this.fileSystemService.resolveWorkspacePath(filePath))
+          : [];
+
+        let beforeTexts = new Map<string, string>();
+        if (isMutation && isApply && fileUris.length > 0) {
+          beforeTexts = await this.changeRecorder.captureBeforeTexts(fileUris);
+        }
+
+        // Snapshot layer — undo/review only; independent of summary ledger.
+        if (isMutation && isApply && fileUris.length > 0) {
           try {
             await this.snapshotManager.createSnapshot(fileUris, {
               sessionId: context.session_id,
@@ -114,98 +113,42 @@ export class ToolExecutor {
             this.log(`Snapshot created successfully for ${fileUris.length} files`);
           } catch (snapshotErr) {
             this.log(`Snapshot creation failed: ${snapshotErr}`);
-            throw new Error(`Failed to create snapshot for undo safety net: ${snapshotErr instanceof Error ? snapshotErr.message : String(snapshotErr)}`);
+            throw new Error(
+              `Failed to create snapshot for undo safety net: ${snapshotErr instanceof Error ? snapshotErr.message : String(snapshotErr)}`
+            );
           }
         }
 
         toolResult = await this.fileSystemService.workspace_ops(resolvedArgs, context);
 
-        // Compute diff if the tool succeeded and files were modified
-        if (toolResult.status === 'success' && fileUris.length > 0) {
+        // Change ledger — summary UI only; mutations in apply mode.
+        if (toolResult.status === 'success' && isMutation && isApply && fileUris.length > 0) {
           try {
             const snapshotDir = this.snapshotManager.getSnapshotDir({
               sessionId: context.session_id,
-              messageId: context.message_id
+              messageId: context.message_id,
             });
-            const diffs: SnapshotDiffEntry[] = [];
-            const action = this.optionalStringArg(resolvedArgs.action) ?? '';
-            const payload = resolvedArgs.payload;
-            const renameOldPath = payload && typeof payload === 'object'
-              ? this.optionalStringArg((payload as Record<string, unknown>).oldPath)
-              : undefined;
-            const renameNewPath = payload && typeof payload === 'object'
-              ? this.optionalStringArg((payload as Record<string, unknown>).newPath)
-              : undefined;
 
-            for (const uri of fileUris) {
-              // Use the EXACT same path derivation as DiskSnapshotManager.createSnapshot
-              // so that the snapshot file is guaranteed to exist at this path.
-              const relativePath = vscode.workspace.asRelativePath(uri, false);
-              const safeRelativePath = relativePath.replace(/[^a-zA-Z0-9.\-_\\/]/g, '_');
-              const snapshotPath = path.join(snapshotDir, safeRelativePath);
-
-              let oldText = '';
-              try {
-                oldText = await fs.readFile(snapshotPath, 'utf8');
-              } catch {
-                // File was new (didn't exist before), so snapshot has no content
-              }
-
-              let newText = await this.readWorkspaceText(uri);
-
-              const diff = DiffService.computeDiff(path.basename(uri.fsPath), oldText, newText);
-              const operation = this.resolveFileChangeOperation(
-                action,
-                relativePath,
-                renameOldPath,
-                renameNewPath,
-                oldText,
-                newText
-              );
-
-              let additions = diff.additions;
-              let deletions = diff.deletions;
-              if (operation === 'create' && additions === 0 && deletions === 0 && newText) {
-                additions = this.countTextLines(newText);
-              } else if (operation === 'delete' && additions === 0 && deletions === 0 && oldText) {
-                deletions = this.countTextLines(oldText);
-              }
-
-              const entry: SnapshotDiffEntry = {
-                file: path.basename(uri.fsPath),
-                originalUri: uri.toString(),
-                snapshotPath,
-                additions,
-                deletions,
-                diffText: diff.diffText,
-                operation,
-              };
-
-              if (operation === 'rename') {
-                if (renameOldPath && this.pathsMatch(relativePath, renameOldPath)) {
-                  entry.renamedTo = renameNewPath ? path.basename(renameNewPath) : undefined;
-                } else if (renameNewPath && this.pathsMatch(relativePath, renameNewPath)) {
-                  entry.renamedFrom = renameOldPath ? path.basename(renameOldPath) : undefined;
-                }
-              }
-
-              diffs.push(entry);
-            }
+            const fileChanges = await this.changeRecorder.buildChanges({
+              action,
+              payload,
+              fileUris,
+              beforeTexts,
+              snapshotDir,
+            });
 
             toolResult.data = {
               ...(typeof toolResult.data === 'object' && toolResult.data !== null ? toolResult.data : {}),
-              snapshot_diffs: diffs,
-              // Pass both IDs so the frontend can issue a correct undo-snapshot message
+              file_changes: fileChanges,
               snapshot_id: context.message_id,
-              snapshot_session_id: context.session_id
+              snapshot_session_id: context.session_id,
             };
-          } catch (e) {
-            this.log(`Failed to compute diff: ${e}`);
+          } catch (error) {
+            this.log(`Failed to record file changes: ${error}`);
           }
         }
       }
     } catch (error) {
-      const workspaceMeta = this.extractWorkspaceMeta(message.args);
       toolResult = {
         tool_name: message.tool_name,
         tool_call_id: context.tool_call_id,
@@ -251,120 +194,4 @@ export class ToolExecutor {
     const trimmed = value.trim();
     return trimmed ? trimmed : undefined;
   }
-
-  private extractFileUris(args: Record<string, any>): vscode.Uri[] {
-    const uriMap = new Map<string, vscode.Uri>();
-    const action = args.action;
-    const payload = args.payload;
-
-    if (!payload) return [];
-
-    const pushPath = (filePath: unknown) => {
-      if (!filePath || typeof filePath !== 'string') {
-        return;
-      }
-
-      try {
-        const uri = this.fileSystemService.resolveWorkspacePath(filePath);
-        uriMap.set(uri.toString(), uri);
-      } catch {
-        const uri = vscode.Uri.file(filePath);
-        uriMap.set(uri.toString(), uri);
-      }
-    };
-
-    const isFileWrite = [
-      'write_file',
-      'replace_file_content',
-      'multi_replace_file_content',
-      'edit_file',
-      'create_file',
-    ].includes(action);
-
-    if (isFileWrite) {
-      const filesPayload = payload.files;
-      if (action === 'create_file' && Array.isArray(filesPayload)) {
-        for (const file of filesPayload) {
-          if (file && typeof file === 'object' && typeof file.path === 'string') {
-            pushPath(file.path);
-          }
-        }
-      } else {
-        pushPath(payload.TargetFile || payload.path || payload.target);
-      }
-    } else if (['delete_file', 'delete_path'].includes(action)) {
-      pushPath(payload.TargetPath || payload.path || payload.target);
-    } else if (action === 'rename_path') {
-      pushPath(payload.oldPath);
-      pushPath(payload.newPath);
-    }
-
-    return Array.from(uriMap.values());
-  }
-
-  private async readWorkspaceText(uri: vscode.Uri): Promise<string> {
-    try {
-      const doc = await vscode.workspace.openTextDocument(uri);
-      return doc.getText();
-    } catch {
-      try {
-        return await fs.readFile(uri.fsPath, 'utf8');
-      } catch {
-        return '';
-      }
-    }
-  }
-
-  private countTextLines(text: string): number {
-    if (!text.trim()) {
-      return 0;
-    }
-    return text.split('\n').length;
-  }
-
-  private normalizeWorkspacePath(value: string): string {
-    return value.replace(/\\/g, '/').replace(/^\.\//, '').toLowerCase();
-  }
-
-  private pathsMatch(left: string, right: string): boolean {
-    return this.normalizeWorkspacePath(left) === this.normalizeWorkspacePath(right);
-  }
-
-  private resolveFileChangeOperation(
-    action: string,
-    relativePath: string,
-    renameOldPath: string | undefined,
-    renameNewPath: string | undefined,
-    oldText: string,
-    newText: string
-  ): FileChangeOperation {
-    if (action === 'create_file' || action === 'write_file') {
-      return oldText ? 'edit' : 'create';
-    }
-
-    if (action === 'delete_path' || action === 'delete_file') {
-      return 'delete';
-    }
-
-    if (action === 'rename_path') {
-      if (renameNewPath && this.pathsMatch(relativePath, renameNewPath)) {
-        return 'rename';
-      }
-      if (renameOldPath && this.pathsMatch(relativePath, renameOldPath)) {
-        return 'delete';
-      }
-      return 'rename';
-    }
-
-    if (!oldText && newText) {
-      return 'create';
-    }
-
-    if (oldText && !newText) {
-      return 'delete';
-    }
-
-    return 'edit';
-  }
-
 }

@@ -1,7 +1,12 @@
 import { type SessionEvent } from '../store/chatStore'
-import { type DiffStat } from '../components/SnapshotCard'
 import { buildAgentRunBlocks } from './agentRunBlocks'
+import {
+  type FileChange,
+  type FileChangeOperation,
+  type LegacyDiffStat,
+} from './fileChangeTypes'
 
+/** workspace_ops actions that mutate files — read/search/list are excluded. */
 export const FILE_MUTATION_ACTIONS = new Set([
   'edit_file',
   'create_file',
@@ -32,36 +37,109 @@ const countLinesFromDiffText = (diffText: string) => {
   return { additions, deletions }
 }
 
-export const normalizeDiffStat = (diff: DiffStat): DiffStat => {
-  if ((diff.additions > 0 || diff.deletions > 0) || !diff.diffText?.trim()) {
-    return diff
+const legacyToFileChange = (legacy: LegacyDiffStat, index: number): FileChange => ({
+  changeId: legacy.originalUri || `${legacy.file}-${index}`,
+  path: legacy.path || legacy.file,
+  file: legacy.file,
+  operation: legacy.operation ?? 'edit',
+  additions: legacy.additions,
+  deletions: legacy.deletions,
+  diffText: legacy.diffText ?? '',
+  applied: true,
+  renamedFrom: legacy.renamedFrom,
+  renamedTo: legacy.renamedTo,
+  undo: {
+    undoAvailable: Boolean(legacy.snapshotPath),
+    originalUri: legacy.originalUri,
+    snapshotPath: legacy.snapshotPath,
+  },
+})
+
+export const normalizeFileChange = (change: FileChange): FileChange => {
+  if ((change.additions > 0 || change.deletions > 0) || !change.diffText?.trim()) {
+    return change
   }
 
-  const counted = countLinesFromDiffText(diff.diffText)
+  const counted = countLinesFromDiffText(change.diffText)
   return {
-    ...diff,
+    ...change,
     additions: counted.additions,
     deletions: counted.deletions,
   }
 }
 
-export interface MessageDiffSummary {
-  diffs: DiffStat[]
+export const extractFileChangesFromData = (
+  data?: Record<string, unknown>
+): FileChange[] => {
+  if (!data) {
+    return []
+  }
+
+  if (Array.isArray(data.file_changes)) {
+    return (data.file_changes as FileChange[]).map(normalizeFileChange)
+  }
+
+  if (Array.isArray(data.snapshot_diffs)) {
+    return (data.snapshot_diffs as LegacyDiffStat[]).map(legacyToFileChange)
+  }
+
+  return []
+}
+
+export interface MessageFileChangeSummary {
+  changes: FileChange[]
   snapshotId: string
   sessionId: string
   messageId: string
 }
 
+const normalizePathKey = (value: string): string =>
+  value.replace(/\\/g, '/').replace(/^\.\//, '').toLowerCase()
+
+const collapseRenameChanges = (changes: FileChange[]): FileChange[] => {
+  const deletePaths = new Set<string>()
+
+  for (const change of changes) {
+    if (change.operation === 'rename' && change.renamedFrom) {
+      deletePaths.add(normalizePathKey(change.renamedFrom))
+    }
+    if (change.operation === 'delete' && change.renamedTo) {
+      deletePaths.add(normalizePathKey(change.path))
+    }
+  }
+
+  if (deletePaths.size === 0) {
+    return changes
+  }
+
+  return changes.filter((change) => {
+    if (change.operation !== 'delete') {
+      return true
+    }
+    return !deletePaths.has(normalizePathKey(change.path))
+  })
+}
+
+const mergeOperation = (
+  existing: FileChangeOperation,
+  incoming: FileChangeOperation
+): FileChangeOperation => {
+  if (incoming !== 'edit') {
+    return incoming
+  }
+  return existing
+}
+
 /**
- * Collects and merges per-file diff stats across every process block in an agent turn.
- * Incremental edits to the same file are summed so totals match the full turn.
+ * Collects and merges mutation records across an agent turn.
+ * Read-only workspace_ops (read_file, search_text, list_dir) are never included.
  */
-export const collectMessageDiffs = (
+export const collectMessageFileChanges = (
   events: SessionEvent[],
   content = ''
-): MessageDiffSummary => {
+): MessageFileChangeSummary => {
   const blocks = buildAgentRunBlocks(events, content)
-  const diffMap = new Map<string, DiffStat>()
+  const changeMap = new Map<string, FileChange>()
   let snapshotId = ''
   let sessionId = ''
   let messageId = ''
@@ -85,9 +163,7 @@ export const collectMessageDiffs = (
       }
 
       const data = (step.node.resultDebug as { data?: Record<string, unknown> })?.data
-      const rawDiffs = Array.isArray(data?.snapshot_diffs)
-        ? (data.snapshot_diffs as DiffStat[])
-        : []
+      const rawChanges = extractFileChangesFromData(data)
 
       if (!snapshotId && typeof data?.snapshot_id === 'string') {
         snapshotId = data.snapshot_id
@@ -95,45 +171,62 @@ export const collectMessageDiffs = (
         messageId = data.snapshot_id
       }
 
-      for (const rawDiff of rawDiffs) {
-        const diff = normalizeDiffStat(rawDiff)
-        const key = diff.originalUri || diff.file
+      for (const rawChange of rawChanges) {
+        if (!rawChange.applied) {
+          continue
+        }
+
+        const change = normalizeFileChange(rawChange)
+        const key = change.path || change.undo?.originalUri || change.changeId
         if (!key) {
           continue
         }
 
-        const existing = diffMap.get(key)
+        const existing = changeMap.get(key)
         if (existing) {
-          existing.additions += diff.additions
-          existing.deletions += diff.deletions
-          if (diff.snapshotPath) {
-            existing.snapshotPath = diff.snapshotPath
+          existing.additions += change.additions
+          existing.deletions += change.deletions
+          existing.operation = mergeOperation(existing.operation, change.operation)
+          if (change.diffText) {
+            existing.diffText = change.diffText
           }
-          if (diff.diffText) {
-            existing.diffText = diff.diffText
+          if (change.renamedFrom) {
+            existing.renamedFrom = change.renamedFrom
           }
-          if (diff.operation && diff.operation !== 'edit') {
-            existing.operation = diff.operation
-          } else if (!existing.operation && diff.operation) {
-            existing.operation = diff.operation
+          if (change.renamedTo) {
+            existing.renamedTo = change.renamedTo
           }
-          if (diff.renamedFrom) {
-            existing.renamedFrom = diff.renamedFrom
-          }
-          if (diff.renamedTo) {
-            existing.renamedTo = diff.renamedTo
+          if (change.undo) {
+            existing.undo = change.undo
           }
         } else {
-          diffMap.set(key, { ...diff })
+          changeMap.set(key, { ...change })
         }
       }
     }
   }
 
   return {
-    diffs: Array.from(diffMap.values()),
+    changes: collapseRenameChanges(Array.from(changeMap.values())),
     snapshotId,
     sessionId,
     messageId,
   }
 }
+
+/** @deprecated Use collectMessageFileChanges */
+export const collectMessageDiffs = (
+  events: SessionEvent[],
+  content = ''
+) => {
+  const summary = collectMessageFileChanges(events, content)
+  return {
+    diffs: summary.changes,
+    snapshotId: summary.snapshotId,
+    sessionId: summary.sessionId,
+    messageId: summary.messageId,
+  }
+}
+
+/** @deprecated Use normalizeFileChange */
+export const normalizeDiffStat = normalizeFileChange

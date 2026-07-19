@@ -434,18 +434,45 @@ export class VertexSwarmChatRuntime {
       }
 
       case 'review-snapshot': {
-        const payload = message.payload as any;
+        const payload = message.payload as {
+          file?: string;
+          originalUri?: string;
+          snapshotPath?: string;
+          isNewFile?: boolean;
+          isDeleted?: boolean;
+        };
         this.log(`review requested for snapshot file ${payload?.file}`);
-        if (payload?.originalUri && payload?.snapshotPath) {
-          try {
-            const liveUri = vscode.Uri.parse(payload.originalUri);
-            const snapshotUri = vscode.Uri.parse(`vertex-snapshot:/${payload.file}?snapshotPath=${encodeURIComponent(payload.snapshotPath)}`);
-            const title = `${payload.file} (Snapshot vs Live)`;
+        if (!payload?.originalUri) {
+          break;
+        }
 
-            await vscode.commands.executeCommand('vscode.diff', snapshotUri, liveUri, title);
-          } catch (e) {
-            this.log(`review failed: ${e}`);
-          }
+        try {
+          const liveUri = vscode.Uri.parse(payload.originalUri);
+          const isNewFile = payload.isNewFile === true;
+          const isDeleted = payload.isDeleted === true;
+
+          const leftQuery = isNewFile
+            ? 'newFile=true'
+            : isDeleted
+              ? `snapshotPath=${encodeURIComponent(payload.snapshotPath ?? '')}`
+              : `snapshotPath=${encodeURIComponent(payload.snapshotPath ?? '')}`;
+
+          const snapshotUri = vscode.Uri.parse(`vertex-snapshot:/${payload.file ?? 'file'}?${leftQuery}`);
+
+          const rightQuery = isDeleted ? 'deletedFile=true' : '';
+          const rightUri = isDeleted
+            ? vscode.Uri.parse(`vertex-snapshot:/${payload.file ?? 'file'}?${rightQuery}`)
+            : liveUri;
+
+          const title = isDeleted
+            ? `${payload.file} (Before delete)`
+            : isNewFile
+              ? `${payload.file} (Created)`
+              : `${payload.file} (Before vs After)`;
+
+          await vscode.commands.executeCommand('vscode.diff', snapshotUri, rightUri, title);
+        } catch (e) {
+          this.log(`review failed: ${e}`);
         }
         break;
       }
