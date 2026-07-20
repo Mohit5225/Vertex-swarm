@@ -135,10 +135,10 @@ export class VertexProcessManager implements vscode.Disposable {
 
       this._rpcClient = new RpcClient(this._backendProcess);
       
-      // Perform handshake (30s timeout)
+      // Perform handshake (90s: Render free-tier JWKS cold starts often exceed 30s)
       try {
         outputChannel.appendLine(`[ProcessManager] Sending initialize JSON-RPC handshake...`);
-        const timeoutMs = 30_000;
+        const timeoutMs = 90_000;
         const authBaseUrl = (process.env.VERTEX_HOSTED_AUTH_URL || 'http://localhost:8080').replace(/\/$/, '');
         const authJwksUrl = `${authBaseUrl}/.well-known/jwks.json`;
 

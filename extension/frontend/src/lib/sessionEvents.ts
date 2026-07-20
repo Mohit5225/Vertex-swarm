@@ -268,6 +268,81 @@ export const normalizeSessionEvent = (
   }
 }
 
+export const shouldMergeSessionEvents = (
+  previous: SessionEvent | undefined,
+  next: SessionEvent
+) => {
+  if (!previous) {
+    return false
+  }
+
+  if (previous.type === 'thinking' && next.type === 'thinking') {
+    return true
+  }
+
+  if (previous.type === 'output' && next.type === 'output') {
+    return true
+  }
+
+  return false
+}
+
+export const mergeSessionEvents = (
+  previous: SessionEvent,
+  next: SessionEvent
+): SessionEvent => {
+  const content =
+    previous.type === 'thinking' && next.type === 'thinking'
+      ? `${previous.content || ''}${next.content || ''}`
+      : previous.type === 'output' && next.type === 'output'
+        ? `${previous.content || ''}${next.content || ''}`
+        : next.content || previous.content || ''
+
+  const metadata: Record<string, unknown> = {
+    ...(previous.metadata || {}),
+    ...(next.metadata || {}),
+  }
+
+  if (previous.type === 'thinking' && next.type === 'thinking') {
+    const reasoningStartedAt =
+      typeof previous.metadata?.reasoningStartedAt === 'number'
+        ? previous.metadata.reasoningStartedAt
+        : previous.timestamp
+
+    if (typeof reasoningStartedAt === 'number') {
+      metadata.reasoningStartedAt = reasoningStartedAt
+    }
+
+    if (typeof next.timestamp === 'number') {
+      metadata.reasoningCompletedAt = next.timestamp
+    }
+  }
+
+  return {
+    ...previous,
+    content,
+    timestamp: next.timestamp,
+    metadata: Object.keys(metadata).length > 0 ? metadata : undefined,
+  }
+}
+
+/** Merge consecutive thinking/output fragments — mirrors live stream compaction. */
+export const compactSessionEvents = (events: SessionEvent[]): SessionEvent[] => {
+  const compacted: SessionEvent[] = []
+
+  for (const event of events) {
+    const previous = compacted[compacted.length - 1]
+    if (previous && shouldMergeSessionEvents(previous, event)) {
+      compacted[compacted.length - 1] = mergeSessionEvents(previous, event)
+      continue
+    }
+
+    compacted.push(event)
+  }
+
+  return compacted
+}
+
 export const getEventPhase = (event: SessionEvent) =>
   stringValue(event.metadata?.phase)
 

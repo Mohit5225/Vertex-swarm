@@ -65,7 +65,11 @@ export class LocalChatStore {
           role: parsed.role || 'user',
           content: parsed.content || '',
           events: parsed.events || [],
-          createdAt: parsed.created_at || parsed.timestamp || new Date().toISOString()
+          createdAt: parsed.created_at || parsed.timestamp || new Date().toISOString(),
+          turn_duration_ms:
+            typeof parsed.turn_duration_ms === 'number'
+              ? parsed.turn_duration_ms
+              : undefined,
         };
       });
     } catch (error) {

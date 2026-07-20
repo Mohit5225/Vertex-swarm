@@ -1,5 +1,6 @@
 import logging
 import os
+import time
 import urllib.request
 import urllib.error
 import json
@@ -37,7 +38,8 @@ def configure_jwks_url(url: str) -> None:
     _jwks_url = url.rstrip("/")
     # PyJWKClient handles in-memory caching and automatic refresh on unknown kid.
     # lifespan=3600 means it re-fetches the JWKS at most once per hour.
-    _jwks_client = PyJWKClient(_jwks_url, lifespan=3600, timeout=10)
+    # 30s timeout: hosted auth on Render free tier often cold-starts past 10s.
+    _jwks_client = PyJWKClient(_jwks_url, lifespan=3600, timeout=30)
     logger.info("JWKS client configured: %s", _jwks_url)
 
 
@@ -56,10 +58,21 @@ def _get_signing_key(token: str):
                 "Set VERTEX_HOSTED_AUTH_URL so the worker can fetch the public key."
             ),
         )
-    try:
-        return _jwks_client.get_signing_key_from_jwt(token)
-    except PyJWKClientError as exc:
-        raise EntitlementError(code=-32000, message=f"jwks_fetch_failed: {exc}") from exc
+    last_exc: Exception | None = None
+    # Retry a few times — cold starts / brief network blips should not fail auth.
+    for attempt in range(3):
+        try:
+            return _jwks_client.get_signing_key_from_jwt(token)
+        except PyJWKClientError as exc:
+            last_exc = exc
+            logger.warning(
+                "JWKS fetch attempt %s/3 failed: %s", attempt + 1, exc
+            )
+            if attempt < 2:
+                time.sleep(1.5 * (attempt + 1))
+    raise EntitlementError(
+        code=-32000, message=f"jwks_fetch_failed: {last_exc}"
+    ) from last_exc
 
 
 def validate_entitlement(token: str) -> dict:

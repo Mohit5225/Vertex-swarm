@@ -1,4 +1,9 @@
 import { create } from 'zustand'
+import { resolveStreamingAgentMessageId } from '../lib/liveAgentTurn'
+import {
+  mergeSessionEvents,
+  shouldMergeSessionEvents,
+} from '../lib/sessionEvents'
 
 export interface SessionEvent {
   id: string
@@ -31,6 +36,8 @@ export interface ChatMessage {
   content: string
   events?: SessionEvent[]
   timestamp: number
+  /** Persisted wall-clock duration for completed turns (reload-safe). */
+  turnDurationMs?: number
 }
 
 export interface ChatSummary {
@@ -116,6 +123,37 @@ const extractTodoStateFromEvent = (
   }
 }
 
+const isGhostAgentMessage = (message: ChatMessage) => {
+  if (message.type !== 'agent') {
+    return false
+  }
+
+  if (message.content?.trim()) {
+    return false
+  }
+
+  const events = message.events || []
+  if (events.length === 0) {
+    return true
+  }
+
+  return events.every(
+    (event) =>
+      event.type === 'status' &&
+      !(event.content || '').trim()
+  )
+}
+
+const pruneTrailingGhostAgents = (messages: ChatMessage[]) => {
+  const result = [...messages]
+
+  while (result.length > 0 && isGhostAgentMessage(result[result.length - 1])) {
+    result.pop()
+  }
+
+  return result
+}
+
 const extractTodoStateFromMessages = (messages: ChatMessage[]): TodoState | null => {
   for (let messageIndex = messages.length - 1; messageIndex >= 0; messageIndex -= 1) {
     const message = messages[messageIndex]
@@ -177,53 +215,32 @@ const appendEventContent = (currentContent: string, event: SessionEvent): string
 }
 
 const shouldMergeEvent = (previous: SessionEvent | undefined, next: SessionEvent) => {
-  if (!previous) {
-    return false
-  }
-
-  if (previous.type === 'thinking' && next.type === 'thinking') {
+  if (
+    previous?.type === 'token' as SessionEvent['type'] &&
+    next.type === 'token' as SessionEvent['type']
+  ) {
     return true
   }
 
-  if (previous.type === 'output' && next.type === 'output') {
-    return true
-  }
-
-  // Also handle raw backend type 'token' which Stream client normalizes to 'output'
-  if (previous.type === 'token' as any && next.type === 'token' as any) {
-     return true;
-  }
-
-  return false
+  return shouldMergeSessionEvents(previous, next)
 }
 
 const normalizeEventComparisonContent = (content?: string) =>
   typeof content === 'string' ? content.replace(/\s+/g, ' ').trim() : ''
 
-const mergeEventContent = (previous: SessionEvent, next: SessionEvent): string => {
-  const previousContent = previous.content || ''
-  const nextContent = next.content || ''
+const mergeEvent = (previous: SessionEvent, next: SessionEvent): SessionEvent => {
+  const previousType = previous.type === ('token' as SessionEvent['type']) ? 'output' : previous.type
+  const nextType = next.type === ('token' as SessionEvent['type']) ? 'output' : next.type
 
-  if (previous.type === 'thinking' && next.type === 'thinking') {
-    return `${previousContent}${nextContent}`
+  if (previousType === 'output' && nextType === 'output') {
+    return mergeSessionEvents(
+      previousType === previous.type ? previous : { ...previous, type: 'output' },
+      nextType === next.type ? next : { ...next, type: 'output' },
+    )
   }
 
-  if (previous.type === 'output' && next.type === 'output') {
-    return `${previousContent}${nextContent}`
-  }
-
-  return appendEventContent(previousContent, next)
+  return mergeSessionEvents(previous, next)
 }
-
-const mergeEvent = (previous: SessionEvent, next: SessionEvent): SessionEvent => ({
-  ...previous,
-  content: mergeEventContent(previous, next),
-  timestamp: next.timestamp,
-  metadata: {
-    ...(previous.metadata || {}),
-    ...(next.metadata || {}),
-  },
-})
 
 export const useChatStore = create<ChatState>((set) => ({
   currentChatId: null,
@@ -353,10 +370,18 @@ export const useChatStore = create<ChatState>((set) => ({
         timestamp: event.timestamp || Date.now(),
       }
 
-      let activeMessageId = state.activeMessageId
       const messages = [...state.messages]
+      let activeMessageId = resolveStreamingAgentMessageId(
+        messages,
+        state.activeMessageId,
+        state.isStreaming,
+      )
 
       if (!activeMessageId) {
+        if (!state.isStreaming) {
+          return state
+        }
+
         activeMessageId = `agent-${Date.now()}`
         messages.push({
           id: activeMessageId,
@@ -449,7 +474,11 @@ export const useChatStore = create<ChatState>((set) => ({
   },
 
   finishStreaming: () => {
-    set({ isStreaming: false, activeMessageId: null })
+    set((state) => ({
+      isStreaming: false,
+      activeMessageId: null,
+      messages: pruneTrailingGhostAgents(state.messages),
+    }))
   },
 
   patchMessageId: (tempId: string, realId: string) => {

@@ -83,6 +83,18 @@ def _build_event(
     return event
 
 
+def _compute_turn_duration_ms(trace_events: list[dict[str, Any]]) -> int | None:
+    if not trace_events:
+        return None
+
+    start_ts = trace_events[0].get("timestamp")
+    end_ts = trace_events[-1].get("timestamp")
+    if not isinstance(start_ts, (int, float)) or not isinstance(end_ts, (int, float)):
+        return None
+
+    return max(0, int(end_ts) - int(start_ts))
+
+
 def _preview(value: str, limit: int = 180) -> str:
     normalized = " ".join(value.split())
     if len(normalized) <= limit:
@@ -1082,7 +1094,14 @@ async def _run_agent_loop_impl(
             )
         )
 
-    await orchestrator.file_store.append_message(chat_id, "assistant", full_response, events=trace_events, message_id=f"msg_{uuid4().hex[:12]}")
+    await orchestrator.file_store.append_message(
+        chat_id,
+        "assistant",
+        full_response,
+        events=trace_events,
+        message_id=f"msg_{uuid4().hex[:12]}",
+        turn_duration_ms=_compute_turn_duration_ms(trace_events),
+    )
 
     logger.info(
         "final response completed user_id=%s chat_id=%s session_id=%s message_id=%s failed=%s trace_events=%s response_chars=%s response_preview=%s",

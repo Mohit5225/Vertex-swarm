@@ -630,13 +630,23 @@ export class VertexSwarmChatRuntime {
         await this.processManager.start(this.context, this.outputChannel, config, sessionToken);
       } catch (err: any) {
         this.log(`Failed to respawn backend: ${err.message}`);
-        if (err.code === -32000) {
-          await this.entitlementClient.logout();
-          this.post({ type: 'auth-required' });
-        } else if (err.code === -32001) {
+        const message = String(err.message || '');
+        // Only wipe the session on definitive token rejection. Transient failures
+        // (JWKS cold-start, network, generic init) used to call logout() and look
+        // like "signed in then immediately signed out" after a successful OAuth.
+        const definitiveAuthFailure =
+          err.code === -32000 &&
+          /invalid_entitlement|invalid_token_type|no_entitlement/.test(message);
+        if (err.code === -32001 || definitiveAuthFailure) {
+          if (definitiveAuthFailure) {
+            await this.entitlementClient.logout();
+          }
           this.post({ type: 'auth-required' });
         } else {
-          this.post({ type: 'error', payload: `Backend process failed to start: ${err.message}` });
+          this.post({
+            type: 'error',
+            payload: `Backend process failed to start: ${message}. Your sign-in was kept — retry in a moment if the auth service was waking up.`,
+          });
         }
         return false;
       }
@@ -660,7 +670,8 @@ export class VertexSwarmChatRuntime {
             return;
           }
           if (params.event.type === 'done') {
-            this.post({ type: 'cancel-stream' });
+            this.post({ type: 'stream-complete' });
+            return;
           }
           this.post({ type: 'event', payload: params.event });
         }

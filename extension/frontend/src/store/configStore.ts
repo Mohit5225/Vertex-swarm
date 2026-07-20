@@ -1,7 +1,7 @@
 import { create } from "zustand";
 import { getVsCodeApi } from "../lib/vscode";
 import { useChatStore } from "./chatStore";
-import { normalizeSessionEvent } from "../lib/sessionEvents";
+import { normalizeSessionEvent, compactSessionEvents } from "../lib/sessionEvents";
 
 export interface VertexConfig {
   llmBaseUrl: string;
@@ -141,8 +141,18 @@ const handleExtensionMessage = (event: MessageEvent) => {
       });
       break;
 
-    case "event":
+    case "event": {
+      if (message.payload?.type === "done") {
+        useChatStore.getState().finishStreaming();
+        break;
+      }
+
       useChatStore.getState().addEvent(normalizeSessionEvent(message.payload));
+      break;
+    }
+
+    case "stream-complete":
+      useChatStore.getState().finishStreaming();
       break;
 
     case "chat-list": {
@@ -173,6 +183,7 @@ const handleExtensionMessage = (event: MessageEvent) => {
             role: string;
             content: string;
             createdAt: string;
+            turn_duration_ms?: number;
             events?: Array<Record<string, unknown>>;
           }) => ({
             id: message.messageId,
@@ -183,13 +194,18 @@ const handleExtensionMessage = (event: MessageEvent) => {
                   ? "system"
                   : "user",
             content: message.content,
-            events: (Array.isArray(message.events) ? message.events : []).map(
-              (event, index) => ({
-                ...normalizeSessionEvent(event, {
-                  id: `${message.messageId}-evt-${index}`,
-                  timestamp: Date.parse(message.createdAt) || Date.now(),
+            turnDurationMs:
+              typeof message.turn_duration_ms === "number"
+                ? message.turn_duration_ms
+                : undefined,
+            events: compactSessionEvents(
+              (Array.isArray(message.events) ? message.events : []).map(
+                (event, index) => ({
+                  ...normalizeSessionEvent(event, {
+                    id: `${message.messageId}-evt-${index}`,
+                  }),
                 }),
-              }),
+              ),
             ),
             timestamp: Date.parse(message.createdAt) || Date.now(),
           }),

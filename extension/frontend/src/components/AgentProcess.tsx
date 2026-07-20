@@ -238,11 +238,6 @@ const extractTerminalOutput = (resultDebug: any): string => {
   }
 }
 
-/**
- * TerminalCard — shown instead of raw debug output for terminal_ops nodes.
- * Displays command + exit status and a "Show Terminal" button that focuses
- * the actual terminal panel instance. Now supports expanding to view output!
- */
 const TerminalCard: React.FC<{
   node: ToolExecutionNode
   expanded?: boolean
@@ -341,11 +336,6 @@ const TerminalCard: React.FC<{
   )
 }
 
-/**
- * FileEditRow — inline first-class row shown directly in the chat thread
- * for every file-mutation tool call (edit, create, delete, rename).
- * Mirrors the Codex / Claude Code "Editing a file" pill UI.
- */
 const FileEditRow: React.FC<{
   node: ToolExecutionNode
   expanded: boolean
@@ -623,12 +613,16 @@ const AgentTimeline: React.FC<Props> = ({ block, isStreamingMessage }) => {
   const items = useMemo(() => groupTimelineItems(sanitizedSteps), [sanitizedSteps])
   const scrollRef = useRef<HTMLDivElement>(null)
 
-  const isRunning = !isHistorical && (
-    isStreamingMessage ||
-    sanitizedSteps.some(
-      (step) => step.kind === 'node' && step.node.state === 'running'
-    )
+  const hasRunningTool = sanitizedSteps.some(
+    (step) => step.kind === 'node' && step.node.state === 'running'
   )
+  const hasOpenThinking =
+    sanitizedSteps.length > 0 &&
+    sanitizedSteps[sanitizedSteps.length - 1]?.kind === 'thinking'
+
+  const isRunning =
+    !isHistorical &&
+    (Boolean(isStreamingMessage) || hasRunningTool || hasOpenThinking)
 
   const [processExpanded, setProcessExpanded] = useState<boolean>(isRunning)
 
@@ -770,4 +764,5 @@ const AgentTimeline: React.FC<Props> = ({ block, isStreamingMessage }) => {
   )
 }
 
+export { FileEditRow, TerminalCard }
 export default AgentTimeline

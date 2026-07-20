@@ -1,16 +1,16 @@
 import React, { useMemo } from 'react'
 import { type ChatMessage } from '../store/chatStore'
 import { useChatStore } from '../store/chatStore'
-import AgentTimeline from './AgentProcess'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import { Copy, Edit2 } from 'lucide-react'
-import { buildAgentRunBlocks } from '../lib/agentRunBlocks'
 import { describePendingMessage } from '../lib/trace'
+import { isLiveAgentTurn } from '../lib/liveAgentTurn'
 import { getVsCodeApi } from '../lib/vscode'
 import PlanCard from './PlanCard'
 import { FileChangesCard } from './FileChangesCard'
 import { collectMessageFileChanges } from '../lib/messageDiffs'
+import AgentTurnView from './AgentTurnView'
 
 interface Props {
   message: ChatMessage
@@ -19,15 +19,6 @@ interface Props {
 const normalizeAssistantContent = (content: string) => {
   return content.replace(/\r\n/g, '\n')
 }
-
-const StreamingCursor = () => (
-  <span
-    aria-hidden="true"
-    className="ml-0.5 inline-block align-baseline text-[#5e6ad2] animate-pulse"
-  >
-    ▍
-  </span>
-)
 
 const renderAssistantText = (content: string) => (
   <div className="message-markdown">
@@ -40,22 +31,24 @@ const renderAssistantText = (content: string) => (
 const MessageRenderer: React.FC<Props> = ({ message }) => {
   const isUser = message.type === 'user'
   const isSystem = message.type === 'system'
-  const { activeMessageId, isStreaming, currentChatId, planReadyForMessageId } = useChatStore((state) => ({
-    activeMessageId: state.activeMessageId,
-    isStreaming: state.isStreaming,
-    currentChatId: state.currentChatId,
-    planReadyForMessageId: state.planReadyForMessageId,
-  }))
-  const isStreamingMessage =
-    message.type === 'agent' && isStreaming && activeMessageId === message.id
+  const { activeMessageId, isStreaming, messages, currentChatId, planReadyForMessageId } =
+    useChatStore((state) => ({
+      activeMessageId: state.activeMessageId,
+      isStreaming: state.isStreaming,
+      messages: state.messages,
+      currentChatId: state.currentChatId,
+      planReadyForMessageId: state.planReadyForMessageId,
+    }))
+  const isStreamingMessage = isLiveAgentTurn(
+    message,
+    isStreaming,
+    activeMessageId,
+    messages,
+  )
   const isHistorical = message.type === 'agent' && !isStreamingMessage
   const pendingLabel = describePendingMessage(message)
   const shouldRenderProcess =
     message.type === 'agent' && Boolean(message.events?.length)
-  const blocks = useMemo(
-    () => (shouldRenderProcess ? buildAgentRunBlocks(message.events || [], message.content) : []),
-    [message.events, message.content, shouldRenderProcess]
-  )
 
   const turnChangeSummary = useMemo(
     () =>
@@ -78,9 +71,12 @@ const MessageRenderer: React.FC<Props> = ({ message }) => {
       aria-live="polite"
     >
       <span>{message.content}</span>
-      <StreamingCursor />
     </div>
   ) : null
+
+  const hasRenderableTurn =
+    shouldRenderProcess &&
+    (Boolean(message.events?.length) || Boolean(message.content?.trim()))
 
   if (isSystem) {
     return (
@@ -94,7 +90,14 @@ const MessageRenderer: React.FC<Props> = ({ message }) => {
     )
   }
 
-  if (isHistorical && !message.content && blocks.length === 0 && !hasPlanPermissionRequest) {
+  if (
+    !isUser &&
+    !isSystem &&
+    !isStreamingMessage &&
+    !message.content?.trim() &&
+    !hasRenderableTurn &&
+    !hasPlanPermissionRequest
+  ) {
     return null
   }
 
@@ -110,67 +113,19 @@ const MessageRenderer: React.FC<Props> = ({ message }) => {
           }`}
       >
         <div
-          className={`mb-1.5 flex items-center gap-2 text-[11px] font-medium ${isUser ? 'justify-end text-[#91a0bb]' : 'text-[#7f91b4]'
-            }`}
-        >
-          <span
-            className={`h-1.5 w-1.5 rounded-full ${isUser ? 'bg-[#8b9ebf]' : 'bg-[#5e6ad2]'
-              }`}
-          />
-          <span>{isUser ? 'You' : 'Agent'}</span>
-        </div>
-
-        <div
           className={isUser ? 'user-bubble inline-block max-w-full' : 'agent-thread w-full min-w-0'}
         >
           {shouldRenderProcess ? (
             <div className="flex flex-col gap-1.5">
-              {blocks.map((block, index) => {
-                if (block.kind === 'narrative') {
-                  const isStreamingNarrative =
-                    isStreamingMessage && index === blocks.length - 1
-                  return (
-                    <div
-                      key={block.id}
-                      className={`break-words text-[15px] leading-7 ${block.tone === 'code'
-                        ? 'font-medium text-[#d9e6fb]'
-                        : 'text-[#edf3ff]'
-                        }`}
-                    >
-                      {renderAssistantText(block.text)}
-                      {isStreamingNarrative ? <StreamingCursor /> : null}
-                    </div>
-                  )
-                }
-
-                if (block.kind === 'system') {
-                  return (
-                    <div
-                      key={block.id}
-                      className={`rounded-2xl px-3 py-2.5 text-[13px] leading-6 ${block.tone === 'error'
-                        ? 'bg-[#f27d75]/10 text-[#ffbeb8]'
-                        : block.tone === 'warning'
-                          ? 'bg-[#f1cb78]/10 text-[#f3d69a]'
-                          : 'bg-white/[0.03] text-[#9fb0cd]'
-                        }`}
-                    >
-                      {block.text}
-                    </div>
-                  )
-                }
-
-                if (block.kind === 'process') {
-                  return (
-                    <AgentTimeline
-                      key={block.id}
-                      block={block}
-                      isStreamingMessage={isStreamingMessage}
-                    />
-                  )
-                }
-
-                return null
-              })}
+              {hasRenderableTurn ? (
+                <AgentTurnView
+                  events={message.events || []}
+                  content={message.content}
+                  messageStartedAt={message.timestamp}
+                  turnDurationMs={message.turnDurationMs}
+                  isLive={isStreamingMessage}
+                />
+              ) : null}
 
               {hasPlanPermissionRequest && (() => {
                 let planStatus: 'generating' | 'ready' | 'executed' = 'generating';
@@ -216,7 +171,6 @@ const MessageRenderer: React.FC<Props> = ({ message }) => {
           )}
         </div>
 
-        {/* Action Buttons for User Messages */}
         {isUser && !isStreaming && (
           <div className="absolute -left-2 top-1/2 -translate-x-full -translate-y-1/2 opacity-0 group-hover:opacity-100 transition-opacity flex items-center gap-1.5 pr-2">
             <button

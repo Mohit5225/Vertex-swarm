@@ -89,6 +89,7 @@ export type ExtensionToWebviewMessage =
   | { type: 'chat-list'; payload: ChatListPayload }
   | { type: 'chat-opened'; payload: ChatOpenedPayload }
   | { type: 'error'; payload: string }
+  | { type: 'stream-complete' }
   | { type: 'cancel-stream'; payload: { sessionId: string } }
   | { type: 'config-state'; payload: { snapshotRetentionDays: number } }
   | { type: 'message-id-assigned'; payload: { tempId: string; realId: string } }
@@ -150,6 +151,7 @@ export interface ChatMessageData {
   content: string;
   events?: SessionEvent[];
   createdAt: string;
+  turn_duration_ms?: number;
 }
 
 export interface ChatListPayload {

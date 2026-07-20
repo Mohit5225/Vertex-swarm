@@ -210,9 +210,29 @@ const ChatPanel: React.FC = () => {
   const [showSessionPanel, setShowSessionPanel] = useState(false)
   const [showHistoryPanel, setShowHistoryPanel] = useState(false)
   const [snapshotRetentionDays, setSnapshotRetentionDays] = useState(7)
+  const messagesScrollRef = useRef<HTMLDivElement>(null)
   const messagesEndRef = useRef<HTMLDivElement>(null)
+  const stickToBottomRef = useRef(true)
+  const wasStreamingRef = useRef(false)
   const sessionPanelRef = useRef<HTMLDivElement>(null)
   const historyPanelRef = useRef<HTMLDivElement>(null)
+
+  const SCROLL_STICK_THRESHOLD_PX = 96
+
+  const isNearBottom = (container: HTMLElement) => {
+    const distanceFromBottom =
+      container.scrollHeight - container.scrollTop - container.clientHeight
+    return distanceFromBottom <= SCROLL_STICK_THRESHOLD_PX
+  }
+
+  const handleMessagesScroll = () => {
+    const container = messagesScrollRef.current
+    if (!container) {
+      return
+    }
+
+    stickToBottomRef.current = isNearBottom(container)
+  }
 
   const sessionStateLabel = isStreaming
     ? 'Running'
@@ -233,10 +253,31 @@ const ChatPanel: React.FC = () => {
   }, [currentTodo, isStreaming])
 
   useEffect(() => {
-    // Only smooth scroll if there are messages and we're not streaming super fast, 
-    // or just let native scroll happen. But auto-scroll is crucial for chat UX.
+    if (isStreaming && !wasStreamingRef.current) {
+      stickToBottomRef.current = true
+    }
+
+    wasStreamingRef.current = isStreaming
+  }, [isStreaming])
+
+  useEffect(() => {
+    if (!stickToBottomRef.current) {
+      return
+    }
+
+    const container = messagesScrollRef.current
+    if (!container) {
+      return
+    }
+
+    if (isStreaming) {
+      container.scrollTop = container.scrollHeight
+      return
+    }
+
     messagesEndRef.current?.scrollIntoView({
-      behavior: isStreaming ? 'auto' : 'smooth', // 'auto' removes the laggy smooth-scroll animation during high-frequency tokens
+      behavior: 'smooth',
+      block: 'end',
     })
   }, [messages, isStreaming])
 
@@ -495,7 +536,11 @@ const ChatPanel: React.FC = () => {
 
         <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
           <div className="flex-1 overflow-hidden">
-            <div className="h-full overflow-y-auto overflow-x-hidden">
+            <div
+              ref={messagesScrollRef}
+              onScroll={handleMessagesScroll}
+              className="h-full overflow-y-auto overflow-x-hidden"
+            >
               {messages.length === 0 ? (
                 <div className="mx-auto flex h-full w-full max-w-[42rem] flex-col justify-end px-3 pb-8 pt-8">
                   <p className="text-[11px] font-medium uppercase tracking-[0.2em] text-[#7082a4]">

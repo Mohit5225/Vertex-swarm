@@ -25,6 +25,7 @@ export interface ToolExecutionNode {
   resultDebug?: unknown
   startedAt?: number
   completedAt?: number
+  executionTimeMs?: number
 }
 
 export interface NarrativeBlock {
@@ -318,17 +319,36 @@ const nodeStateFromResult = (event: SessionEvent): ToolExecutionState => {
   return 'success'
 }
 
+const readExecutionTimeMs = (event: SessionEvent, resultDebug: unknown) => {
+  const metadataMs = event.metadata?.execution_time_ms
+  if (typeof metadataMs === 'number' && Number.isFinite(metadataMs)) {
+    return metadataMs
+  }
+
+  const resultRecord = asRecord(resultDebug)
+  const resultMs = resultRecord?.execution_time_ms
+  if (typeof resultMs === 'number' && Number.isFinite(resultMs)) {
+    return resultMs
+  }
+
+  return undefined
+}
+
 const applyToolResultToNode = (node: ToolExecutionNode, event: SessionEvent) => {
   const action = getEventAction(event) ?? node.action
   const toolName = getEventToolName(event) ?? node.toolName
   const state = nodeStateFromResult(event)
   const resultDebug = getEventDebugResult(event)
+  const executionTimeMs = readExecutionTimeMs(event, resultDebug)
 
   node.action = action
   node.toolName = toolName
   node.state = state
   node.resultDebug = resultDebug
   node.completedAt = event.timestamp
+  if (executionTimeMs !== undefined) {
+    node.executionTimeMs = executionTimeMs
+  }
   node.summary = summarizeToolExecution({
     action,
     toolName,
@@ -343,6 +363,7 @@ const createToolNodeFromResult = (event: SessionEvent): ToolExecutionNode => {
   const toolName = getEventToolName(event)
   const resultDebug = getEventDebugResult(event)
   const state = nodeStateFromResult(event)
+  const executionTimeMs = readExecutionTimeMs(event, resultDebug)
 
   return {
     id: getEventToolCallId(event) ?? event.id,
@@ -358,6 +379,7 @@ const createToolNodeFromResult = (event: SessionEvent): ToolExecutionNode => {
     }),
     resultDebug,
     completedAt: event.timestamp,
+    ...(executionTimeMs !== undefined ? { executionTimeMs } : {}),
   }
 }
 
@@ -613,4 +635,12 @@ export const buildAgentRunBlocks = (events: SessionEvent[], content?: string): A
 
       return Boolean(block.text)
     })
+}
+
+export {
+  createToolNodeFromCall,
+  applyToolResultToNode,
+  createToolNodeFromResult,
+  summarizeToolExecution,
+  systemToneFromPhase,
 }
