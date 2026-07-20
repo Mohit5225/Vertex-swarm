@@ -256,13 +256,13 @@ const InputArea: React.FC<Props> = ({
             </button>
 
             {showQuickActions && (
-              <div className="absolute bottom-[calc(100%+0.5rem)] left-0 z-20 w-[16rem] rounded-xl border border-white/10 bg-[#12141c]/95 p-1.5 shadow-[0_12px_40px_rgba(0,0,0,0.4)] backdrop-blur-md">
+              <div className="popover-panel popover-panel-padded absolute bottom-[calc(100%+0.5rem)] left-0 z-20 w-[16rem]">
                 <button
                   type="button"
                   disabled={disabled}
-                  className="flex w-full items-center gap-3 rounded-xl px-3 py-2.5 text-left text-[15px] text-[#e6ecfa] transition hover:bg-white/[0.06] disabled:cursor-not-allowed disabled:opacity-50"
+                  className="popover-row disabled:cursor-not-allowed disabled:opacity-50"
                 >
-                  <Paperclip className="h-4 w-4 text-[#d9d3a5]" />
+                  <Paperclip className="h-4 w-4 text-[#a4b4cb]" />
                   <span>Add photos & files</span>
                 </button>
 
@@ -270,7 +270,7 @@ const InputArea: React.FC<Props> = ({
                   type="button"
                   disabled={disabled}
                   onClick={() => onToggleIdeContext(!ideContextEnabled)}
-                  className="flex w-full items-center justify-between gap-3 rounded-xl px-3 py-2.5 text-left text-[15px] text-[#e6ecfa] transition hover:bg-white/[0.06] disabled:cursor-not-allowed disabled:opacity-50"
+                  className="popover-row justify-between disabled:cursor-not-allowed disabled:opacity-50"
                 >
                   <div className="flex items-center gap-3">
                     <Sparkles className="h-4 w-4 text-[#b57cff]" />
@@ -290,7 +290,7 @@ const InputArea: React.FC<Props> = ({
                 <button
                   type="button"
                   disabled
-                  className="flex w-full items-center gap-3 rounded-xl px-3 py-2.5 text-left text-[15px] text-[#9ca8c2]"
+                  className="popover-row text-[#7f91b4]"
                 >
                   <ListChecks className="h-4 w-4" />
                   <span>Plan mode</span>
@@ -299,7 +299,7 @@ const InputArea: React.FC<Props> = ({
                 <button
                   type="button"
                   disabled
-                  className="flex w-full items-center justify-between gap-3 rounded-xl px-3 py-2.5 text-left text-[15px] text-[#9ca8c2]"
+                  className="popover-row justify-between text-[#7f91b4]"
                 >
                   <div className="flex items-center gap-3">
                     <Zap className="h-4 w-4" />

@@ -479,11 +479,20 @@ const reconcileTimelineWithContent = (
   return [...result, narrativeSegment]
 }
 
+const TERMINAL_CARD_ACTIONS = new Set([
+  'run_command',
+  'send_input',
+  'new_terminal',
+])
+
 const classifyNode = (node: ToolExecutionNode) => {
   if (node.action === 'context_loaded') {
     return 'context' as const
   }
-  if (node.toolName === 'terminal_ops') {
+  if (
+    node.toolName === 'terminal_ops' &&
+    (!node.action || TERMINAL_CARD_ACTIONS.has(node.action))
+  ) {
     return 'terminal' as const
   }
   if (FILE_MUTATION_ACTIONS.has(node.action ?? '')) {
@@ -992,4 +1001,5 @@ export const summarizeTurnRollup = (segments: TurnSegment[]) => {
 export const segmentIsAlwaysVisible = (segment: TurnSegment) =>
   segment.kind === 'narrative' ||
   segment.kind === 'edit' ||
+  segment.kind === 'terminal' ||
   segment.kind === 'system'

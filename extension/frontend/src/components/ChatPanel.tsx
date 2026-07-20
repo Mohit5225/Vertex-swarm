@@ -4,6 +4,7 @@ import { useChatStore, type ChatMessage } from '../store/chatStore'
 import MessageRenderer from './MessageRenderer'
 import InputArea from './InputArea'
 import ConfirmDialog from './ConfirmDialog'
+import SessionPanel from './SessionPanel'
 import { getVsCodeApi } from '../lib/vscode'
 import { ChevronDown, Undo2 } from 'lucide-react'
 import TodoWidget from './TodoWidget'
@@ -194,7 +195,7 @@ const LiveFileEditBar: React.FC<{ messages: ChatMessage[]; isStreaming: boolean 
 }
 
 const ChatPanel: React.FC = () => {
-  const { config, logout } = useConfigStore()
+  const { config, logout, openProviderSettings, user } = useConfigStore()
   const { clearMessages, messages, isStreaming, error, chats, currentChatId, currentTodo, clearTodo } =
     useChatStore()
   const {
@@ -234,11 +235,11 @@ const ChatPanel: React.FC = () => {
     stickToBottomRef.current = isNearBottom(container)
   }
 
-  const sessionStateLabel = isStreaming
-    ? 'Running'
+  const sessionState = isStreaming
+    ? 'running'
     : messages.length > 0
-      ? 'Ready'
-      : 'Idle'
+      ? 'ready'
+      : 'idle'
 
   const showTodoBar = useMemo(() => {
     if (!currentTodo?.items.length) {
@@ -363,7 +364,7 @@ const ChatPanel: React.FC = () => {
     return () => window.removeEventListener('message', handleMessage);
   }, []);
 
-  const handleConfirmConfigReset = () => {
+  const handleConfirmLogout = () => {
     setShowLogoutConfirm(false)
     logout()
   }
@@ -412,27 +413,24 @@ const ChatPanel: React.FC = () => {
         {showHistoryPanel && (
           <div
             ref={historyPanelRef}
-            className="absolute right-2 top-2 z-20 w-[min(20rem,calc(100vw-1rem))] rounded-[22px] border border-white/10 bg-[#0c1220]/96 p-4 shadow-[0_22px_60px_rgba(0,0,0,0.38)] backdrop-blur-xl"
+            className="popover-panel popover-panel-padded absolute right-2 top-2 z-20 w-[min(18rem,calc(100vw-1rem))]"
           >
-            <div className="flex items-center justify-between gap-3">
-              <p className="text-[11px] font-medium uppercase tracking-[0.2em] text-[#7d89a6]">
-                Recent chats
-              </p>
-              <span className="text-[11px] text-[#8f9cb7]">
-                {chats.length}
-              </span>
+            <div className="popover-header">
+              <p className="popover-eyebrow">History</p>
+              <span className="text-[12px] text-[#7f91b4]">{chats.length}</span>
             </div>
 
+            <div className="popover-divider" />
+
             {chats.length === 0 ? (
-              <p className="mt-3 text-sm leading-6 text-[#95a2bd]">
+              <p className="popover-section text-[15px] leading-6 text-[#7f91b4]">
                 No saved chats yet.
               </p>
             ) : (
-              <div className="mt-3 max-h-[22rem] space-y-2 overflow-y-auto pr-1">
+              <div className="popover-list">
                 {chats.map((chat) => {
                   const isActiveChat = currentChatId === chat.chatId
-                  const chatTitle =
-                    chat.title?.trim() || 'Untitled chat'
+                  const chatTitle = chat.title?.trim() || 'Untitled chat'
 
                   return (
                     <button
@@ -440,19 +438,13 @@ const ChatPanel: React.FC = () => {
                       type="button"
                       onClick={() => handleOpenChat(chat.chatId)}
                       disabled={isStreaming}
-                      className={`w-full rounded-[16px] border px-3 py-3 text-left transition ${isActiveChat
-                        ? 'border-[#8bd7ff]/30 bg-[#8bd7ff]/10'
-                        : 'border-white/6 bg-white/[0.03] hover:bg-white/[0.06]'
-                        } ${isStreaming ? 'cursor-not-allowed opacity-60' : ''
-                        }`}
+                      className={`popover-list-item ${isActiveChat ? 'popover-list-item--active' : ''}`}
                     >
-                      <div className="truncate text-sm font-medium text-[#f3f6ff]">
+                      <div className="truncate text-[15px] text-[#e6ecfa]">
                         {chatTitle}
                       </div>
-                      <div className="mt-1 text-[11px] leading-5 text-[#8f9cb7]">
-                        <span>{formatRelativeTime(chat.updatedAt)}</span>
-                        <span className="mx-2 text-white/15">|</span>
-                        <span>{new Date(chat.updatedAt).toLocaleString()}</span>
+                      <div className="mt-0.5 text-[12px] leading-5 text-[#7f91b4]">
+                        {formatRelativeTime(chat.updatedAt)}
                       </div>
                     </button>
                   )
@@ -463,75 +455,31 @@ const ChatPanel: React.FC = () => {
         )}
 
         {showSessionPanel && (
-          <div
-            ref={sessionPanelRef}
-            className="absolute right-2 top-2 z-20 w-[min(17rem,calc(100vw-1rem))] rounded-[22px] border border-white/10 bg-[#0c1220]/96 p-4 shadow-[0_22px_60px_rgba(0,0,0,0.38)] backdrop-blur-xl"
-          >
-            <div className="flex items-center justify-between gap-3">
-              <span className="truncate text-[13px] font-medium leading-none text-white">
-                Provider Config
-              </span>
-              <span className="text-[11px] text-[#8f9cb7]">
-                {sessionStateLabel}
-              </span>
-            </div>
-            <p className="mt-3 truncate text-sm font-medium text-[#f3f6ff]">
-              {config?.llmBaseUrl ? new URL(config.llmBaseUrl).hostname : 'Local Provider'}
-            </p>
-            <div className="mt-3 space-y-1 text-[12px] leading-5 text-[#95a2bd]">
-              <p>Model: {config?.llmModel || 'Default Model'}</p>
-              <p>Keys are stored securely in your OS keychain.</p>
-            </div>
-
-            <div className="mt-4 border-t border-white/10 pt-3">
-              <label className="text-[11px] font-medium text-[#7d89a6] block mb-1">
-                Snapshot Retention (Days)
-              </label>
-              <div className="flex items-center gap-2">
-                <input
-                  type="range"
-                  min="1"
-                  max="7"
-                  value={snapshotRetentionDays}
-                  onChange={(e) => {
-                    const val = parseInt(e.target.value, 10);
-                    setSnapshotRetentionDays(val);
-                    getVsCodeApi()?.postMessage({
-                      type: 'set-config',
-                      payload: { snapshotRetentionDays: val }
-                    });
-                  }}
-                  className="flex-1 h-1.5 bg-white/10 rounded-full appearance-none [&::-webkit-slider-thumb]:appearance-none [&::-webkit-slider-thumb]:w-3 [&::-webkit-slider-thumb]:h-3 [&::-webkit-slider-thumb]:rounded-full [&::-webkit-slider-thumb]:bg-[#8bd7ff] cursor-pointer"
-                />
-                <span className="text-[12px] font-mono text-[#8bd7ff] min-w-[1.5rem] text-right">
-                  {snapshotRetentionDays}
-                </span>
-              </div>
-            </div>
-
-            <div className="mt-4 flex flex-wrap gap-2">
-              {messages.length > 0 && (
-                <button
-                  type="button"
-                  onClick={handleStartFresh}
-                  disabled={isStreaming}
-                  className="ghost-btn !rounded-xl !px-3 !py-2"
-                >
-                  New task
-                </button>
-              )}
-              <button
-                type="button"
-                onClick={() => {
-                  setShowSessionPanel(false)
-                  setShowLogoutConfirm(true)
-                }}
-                className="ghost-btn !rounded-xl !px-3 !py-2"
-              >
-                Settings
-              </button>
-            </div>
-          </div>
+          <SessionPanel
+            panelRef={sessionPanelRef}
+            config={config}
+            userEmail={user?.email}
+            sessionState={sessionState}
+            isStreaming={isStreaming}
+            hasMessages={messages.length > 0}
+            snapshotRetentionDays={snapshotRetentionDays}
+            onSnapshotRetentionChange={(days) => {
+              setSnapshotRetentionDays(days)
+              getVsCodeApi()?.postMessage({
+                type: 'set-config',
+                payload: { snapshotRetentionDays: days },
+              })
+            }}
+            onNewTask={handleStartFresh}
+            onReconfigure={() => {
+              setShowSessionPanel(false)
+              openProviderSettings()
+            }}
+            onSignOut={() => {
+              setShowSessionPanel(false)
+              setShowLogoutConfirm(true)
+            }}
+          />
         )}
 
         <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
@@ -556,7 +504,7 @@ const ChatPanel: React.FC = () => {
                         key={prompt.label}
                         type="button"
                         onClick={() => setQueuedPrompt(prompt.prompt)}
-                        className="rounded-full bg-white/[0.04] px-3 py-1.5 text-[13px] text-[#dbe5f8] transition hover:bg-white/[0.08]"
+                        className="rounded-lg border border-white/10 bg-white/[0.04] px-3 py-2 text-[13px] text-[#e6ecfa] transition hover:bg-white/[0.06]"
                       >
                         {prompt.label}
                       </button>
@@ -604,11 +552,11 @@ const ChatPanel: React.FC = () => {
 
       <ConfirmDialog
         open={showLogoutConfirm}
-        title="Reconfigure Provider?"
-        description="This will return you to the settings screen. You will need to re-enter your configuration if you proceed."
-        confirmLabel="Continue"
+        title="Sign out?"
+        description="This will end your Vertex Swarm session on this machine. You can sign in again at any time."
+        confirmLabel="Sign out"
         onCancel={() => setShowLogoutConfirm(false)}
-        onConfirm={handleConfirmConfigReset}
+        onConfirm={handleConfirmLogout}
       />
     </>
   )

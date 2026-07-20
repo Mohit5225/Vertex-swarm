@@ -3,13 +3,24 @@ import { getVsCodeApi } from '../lib/vscode'
 import { useConfigStore } from '../store/configStore'
 
 const SettingsPanel: React.FC = () => {
-  const [llmBaseUrl, setLlmBaseUrl] = useState('https://api.deepseek.com/v1')
-  const [llmModel, setLlmModel] = useState('deepseek-chat')
+  const { error, logout, config, hasConfig, isEditingProvider, closeProviderSettings } =
+    useConfigStore()
+  const [llmBaseUrl, setLlmBaseUrl] = useState(
+    config?.llmBaseUrl || 'https://api.deepseek.com/v1',
+  )
+  const [llmModel, setLlmModel] = useState(config?.llmModel || 'deepseek-chat')
   const [llmKey, setLlmKey] = useState('')
   const [exaKey, setExaKey] = useState('')
   const [isSubmitting, setIsSubmitting] = useState(false)
-  
-  const { error, logout } = useConfigStore()
+
+  React.useEffect(() => {
+    if (config?.llmBaseUrl) {
+      setLlmBaseUrl(config.llmBaseUrl)
+    }
+    if (config?.llmModel) {
+      setLlmModel(config.llmModel)
+    }
+  }, [config?.llmBaseUrl, config?.llmModel])
 
   React.useEffect(() => {
     if (error) {
@@ -25,9 +36,9 @@ const SettingsPanel: React.FC = () => {
       payload: {
         llmBaseUrl,
         llmModel,
-        llmKey,
-        exaKey
-      }
+        ...(llmKey.trim() ? { llmKey } : {}),
+        ...(exaKey.trim() ? { exaKey } : {}),
+      },
     })
     // Will wait for backend initialization message from extension
   }
@@ -37,10 +48,12 @@ const SettingsPanel: React.FC = () => {
       <div className="w-full max-w-md">
         <p className="surface-label">Vertex Swarm</p>
         <h1 className="mt-3 max-w-[18rem] text-[1.7rem] font-semibold leading-tight text-white">
-          Configure Provider
+          {isEditingProvider ? 'Reconfigure Provider' : 'Configure Provider'}
         </h1>
         <p className="mt-3 text-sm leading-7 text-[#92a0bb]">
-          Provide your local or cloud LLM endpoint and keys to start the agent. Keys are stored securely in your OS keychain.
+          {isEditingProvider
+            ? 'Update your LLM endpoint or keys. Leave key fields blank to keep the stored values.'
+            : 'Provide your local or cloud LLM endpoint and keys to start the agent. Keys are stored securely in your OS keychain.'}
         </p>
 
         {error && (
@@ -79,7 +92,7 @@ const SettingsPanel: React.FC = () => {
               value={llmKey} 
               onChange={e => setLlmKey(e.target.value)} 
               className="px-3 py-2 bg-[#1e1e1e] border border-[#3c3c3c] rounded text-white focus:outline-none focus:border-[#007acc]"
-              placeholder="sk-..."
+              placeholder={isEditingProvider ? 'Leave blank to keep current key' : 'sk-...'}
             />
           </div>
 
@@ -95,19 +108,38 @@ const SettingsPanel: React.FC = () => {
 
           <button
             type="submit"
-            disabled={isSubmitting || !llmBaseUrl || !llmModel || !llmKey}
+            disabled={
+              isSubmitting ||
+              !llmBaseUrl ||
+              !llmModel ||
+              (!hasConfig && !llmKey)
+            }
             className="mt-2 primary-btn w-full justify-center disabled:opacity-50"
           >
-            {isSubmitting ? 'Starting...' : 'Start Agent'}
+            {isSubmitting
+              ? 'Saving...'
+              : isEditingProvider
+                ? 'Save changes'
+                : 'Start Agent'}
           </button>
 
-          <button
-            type="button"
-            onClick={logout}
-            className="ghost-btn w-full justify-center mt-1"
-          >
-            Sign out
-          </button>
+          {isEditingProvider ? (
+            <button
+              type="button"
+              onClick={closeProviderSettings}
+              className="ghost-btn mt-1 w-full justify-center"
+            >
+              Back to chat
+            </button>
+          ) : (
+            <button
+              type="button"
+              onClick={logout}
+              className="ghost-btn mt-1 w-full justify-center"
+            >
+              Sign out
+            </button>
+          )}
         </form>
       </div>
     </div>

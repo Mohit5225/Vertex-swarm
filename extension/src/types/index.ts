@@ -97,7 +97,16 @@ export type ExtensionToWebviewMessage =
   | { type: 'auth-required' }
   | { type: 'config-missing'; payload?: { reason?: string } }
   | { type: 'config-ready'; payload: { llmBaseUrl?: string; llmModel?: string } }
-  | { type: 'plan-ready'; payload: Record<string, never> };
+  | { type: 'plan-ready'; payload: Record<string, never> }
+  | {
+      type: 'terminal-output'
+      payload: {
+        jobId: string
+        content: string
+        totalChars?: number
+        status?: string
+      }
+    };
 
 // Messages FROM Webview TO Extension Host
 export type WebviewToExtensionMessage =
@@ -111,6 +120,7 @@ export type WebviewToExtensionMessage =
   | { type: 'cancel-stream'; payload: StreamCancelPayload }
   | { type: 'tool_call'; payload: ToolCallPayload }
   | { type: 'show-terminal'; payload: { terminalName: string } }
+  | { type: 'get-terminal-output'; payload: { jobId: string } }
   | { type: 'reset-chat' }
   | { type: 'logout' }
   | { type: 'log'; payload: string }

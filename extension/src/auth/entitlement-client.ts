@@ -1,6 +1,7 @@
 import * as vscode from 'vscode';
 import * as http from 'http';
 import * as crypto from 'crypto';
+import { getHostedAuthUrl } from './hosted-auth-url';
 
 export interface EntitlementResult {
   valid: boolean;
@@ -15,6 +16,8 @@ export interface EntitlementResult {
 
 export class EntitlementClient {
   private static readonly AUTH_TIMEOUT_MS = 5 * 60 * 1000;
+  private static readonly FETCH_TIMEOUT_MS = 60_000;
+  private static readonly FETCH_RETRIES = 3;
   private readonly authApiUrl: string;
   private localServer: http.Server | null = null;
   private allocatedPort: number | null = null;
@@ -29,7 +32,7 @@ export class EntitlementClient {
     private readonly secretStorage: vscode.SecretStorage,
     private readonly logMessage?: (message: string) => void
   ) {
-    const configuredUrl = process.env.VERTEX_HOSTED_AUTH_URL || 'http://localhost:8080';
+    const configuredUrl = getHostedAuthUrl();
     let parsedUrl: URL;
     try {
       parsedUrl = new URL(configuredUrl);
@@ -42,6 +45,7 @@ export class EntitlementClient {
       throw new Error('Hosted auth must use HTTPS outside localhost development');
     }
     this.authApiUrl = parsedUrl.toString().replace(/\/$/, '');
+    this.log(`Using hosted auth URL: ${this.authApiUrl}`);
   }
 
   private log(message: string): void {
@@ -338,19 +342,76 @@ export class EntitlementClient {
     codeVerifier: string,
     redirectUri: string,
   ): Promise<{ accessToken: string; refreshToken: string }> {
-    const response = await fetch(this.authEndpoint('/oauth/token'), {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ code, code_verifier: codeVerifier, redirect_uri: redirectUri }),
-    });
-    if (!response.ok) {
-      throw new Error(`Authorization-code exchange failed: status ${response.status}`);
+    const url = this.authEndpoint('/oauth/token');
+    const body = JSON.stringify({ code, code_verifier: codeVerifier, redirect_uri: redirectUri });
+    let lastError: unknown;
+
+    for (let attempt = 1; attempt <= EntitlementClient.FETCH_RETRIES; attempt++) {
+      try {
+        this.log(`Exchanging authorization code (attempt ${attempt}/${EntitlementClient.FETCH_RETRIES}) via ${url}`);
+        const response = await fetch(url, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body,
+          signal: AbortSignal.timeout(EntitlementClient.FETCH_TIMEOUT_MS),
+        });
+        if (!response.ok) {
+          const detail = await response.text().catch(() => '');
+          throw new Error(
+            `Authorization-code exchange failed: status ${response.status}${detail ? ` (${detail.slice(0, 200)})` : ''}`
+          );
+        }
+        const data = await response.json() as { access_token?: unknown; refresh_token?: unknown };
+        if (typeof data.access_token !== 'string' || typeof data.refresh_token !== 'string') {
+          throw new Error('Authorization-code exchange returned an invalid token response');
+        }
+        return { accessToken: data.access_token, refreshToken: data.refresh_token };
+      } catch (err) {
+        lastError = err;
+        const detail = this.formatFetchError(err, url);
+        this.warn(detail);
+        if (attempt < EntitlementClient.FETCH_RETRIES && this.isRetryableFetchError(err)) {
+          await new Promise((resolve) => setTimeout(resolve, 1500 * attempt));
+          continue;
+        }
+        throw new Error(detail);
+      }
     }
-    const data = await response.json() as { access_token?: unknown; refresh_token?: unknown };
-    if (typeof data.access_token !== 'string' || typeof data.refresh_token !== 'string') {
-      throw new Error('Authorization-code exchange returned an invalid token response');
+
+    throw new Error(this.formatFetchError(lastError, url));
+  }
+
+  private isRetryableFetchError(err: unknown): boolean {
+    if (!(err instanceof Error)) {
+      return false;
     }
-    return { accessToken: data.access_token, refreshToken: data.refresh_token };
+    const message = err.message.toLowerCase();
+    const cause = (err as Error & { cause?: { code?: string; message?: string } }).cause;
+    const causeCode = cause?.code?.toLowerCase() ?? '';
+    const causeMessage = (cause?.message ?? '').toLowerCase();
+    return (
+      message.includes('fetch failed') ||
+      message.includes('timeout') ||
+      message.includes('aborted') ||
+      causeCode.includes('econn') ||
+      causeCode.includes('etimedout') ||
+      causeCode.includes('enotfound') ||
+      causeMessage.includes('timeout')
+    );
+  }
+
+  private formatFetchError(err: unknown, url: string): string {
+    if (!(err instanceof Error)) {
+      return `Auth request to ${url} failed: ${String(err)}`;
+    }
+    const cause = (err as Error & { cause?: { code?: string; message?: string } }).cause;
+    const causePart = cause
+      ? ` (${cause.code || 'error'}: ${cause.message || 'unknown'})`
+      : '';
+    if (err.message === 'fetch failed' || err.name === 'TimeoutError' || err.message.includes('aborted')) {
+      return `Could not reach auth service at ${url}${causePart}. If the service was sleeping, wait a few seconds and try again.`;
+    }
+    return `${err.message}${causePart}`;
   }
 
   private clearPendingAuthorization(): void {

@@ -389,6 +389,24 @@ export class VertexSwarmChatRuntime {
         break;
       }
 
+      case 'get-terminal-output': {
+        const jobId = (message.payload as { jobId: string }).jobId;
+        if (!jobId) {
+          break;
+        }
+        const result = await this.terminalService.readJobOutput(jobId);
+        this.post({
+          type: 'terminal-output',
+          payload: {
+            jobId,
+            content: result.content,
+            totalChars: result.total_chars_buffered,
+            status: result.status,
+          },
+        });
+        break;
+      }
+
       case 'undo-snapshot': {
         const payload = message.payload as any;
         this.log(`undo requested for snapshot ${payload?.snapshotId}`);
@@ -504,15 +522,16 @@ export class VertexSwarmChatRuntime {
       case 'save-config': {
         const payload = message.payload as { llmBaseUrl?: string, llmModel?: string, llmKey?: string, exaKey?: string };
         await this.configManager.updateConfig(payload);
+        const fullConfig = await this.configManager.getConfig();
 
         // If backend is running, update it live
         if (this.processManager?.rpcClient) {
           this.log('sending config/update_keys to running backend');
           await this.processManager.rpcClient.sendNotification('config/update_keys', {
-            llm_base_url: payload.llmBaseUrl,
-            llm_model: payload.llmModel,
-            llm_key: payload.llmKey?.trim(),
-            exa_key: payload.exaKey?.trim()
+            llm_base_url: payload.llmBaseUrl ?? fullConfig.llmBaseUrl,
+            llm_model: payload.llmModel ?? fullConfig.llmModel,
+            llm_key: payload.llmKey?.trim() || fullConfig.llmKey,
+            exa_key: payload.exaKey?.trim() || fullConfig.exaKey,
           });
         }
 
@@ -629,8 +648,8 @@ export class VertexSwarmChatRuntime {
         const sessionToken = token;
         await this.processManager.start(this.context, this.outputChannel, config, sessionToken);
       } catch (err: any) {
-        this.log(`Failed to respawn backend: ${err.message}`);
         const message = String(err.message || '');
+        this.log(`Failed to respawn backend: code=${err.code} message=${message}`);
         // Only wipe the session on definitive token rejection. Transient failures
         // (JWKS cold-start, network, generic init) used to call logout() and look
         // like "signed in then immediately signed out" after a successful OAuth.
@@ -641,7 +660,12 @@ export class VertexSwarmChatRuntime {
           if (definitiveAuthFailure) {
             await this.entitlementClient.logout();
           }
-          this.post({ type: 'auth-required' });
+          this.post({
+            type: 'auth-required',
+            payload: {
+              reason: `Session rejected by backend (code ${err.code}): ${message}`,
+            },
+          });
         } else {
           this.post({
             type: 'error',

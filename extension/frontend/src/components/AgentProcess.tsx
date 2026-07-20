@@ -18,7 +18,6 @@ import {
   Wrench,
   X
 } from 'lucide-react'
-import { getVsCodeApi } from '../lib/vscode'
 import {
   FILE_MUTATION_ACTIONS,
   extractFileChangesFromData,
@@ -26,6 +25,7 @@ import {
 } from '../lib/messageDiffs'
 import { fileChangeDetail } from '../lib/fileChangeStats'
 import { ChangeStatBadges } from './ChangeStatBadges'
+import TerminalToolCard from './TerminalToolCard'
 
 interface Props {
   block: ProcessBlock
@@ -215,127 +215,6 @@ const renderChevron = (expanded: boolean) => (
   </span>
 )
 
-const extractTerminalOutput = (resultDebug: any): string => {
-  if (!resultDebug) return ''
-  if (typeof resultDebug === 'string') return resultDebug
-
-  const data = resultDebug.data
-  if (data) {
-    if (typeof data.output === 'string') return data.output
-    if (typeof data.output_tail === 'string') return data.output_tail
-    if (typeof data.stdout === 'string' || typeof data.stderr === 'string') {
-      return [data.stdout, data.stderr].filter(Boolean).join('\n')
-    }
-  }
-
-  if (typeof resultDebug.output === 'string') return resultDebug.output
-  if (typeof resultDebug.output_tail === 'string') return resultDebug.output_tail
-
-  try {
-    return JSON.stringify(resultDebug, null, 2)
-  } catch {
-    return String(resultDebug)
-  }
-}
-
-const TerminalCard: React.FC<{
-  node: ToolExecutionNode
-  expanded?: boolean
-}> = ({ node, expanded }) => {
-  const data = (node.resultDebug as any)?.data as
-    | { terminal_name?: string; command?: string; exit_code?: number | null; pid?: number; job_id?: string }
-    | undefined
-
-  const payload = (node.requestDebug as any)?.args?.payload || {}
-  const userVisible = payload.user_visible ?? (payload.hide !== undefined ? !payload.hide : false)
-  
-  const terminalName = data?.terminal_name ?? payload.terminal_context?.name ?? payload.terminal_name ?? 'Vertex Worker'
-  const command = data?.command ?? payload.command ?? ''
-  const exitCode = data?.exit_code
-  const durationMs =
-    node.completedAt && node.startedAt ? node.completedAt - node.startedAt : undefined
-
-  const outputText = extractTerminalOutput(node.resultDebug)
-
-  const handleShowTerminal = () => {
-    getVsCodeApi()?.postMessage({ type: 'show-terminal', payload: { terminalName } })
-  }
-
-  return (
-    <div className="mt-2 ml-0.5 overflow-hidden rounded-[18px] bg-[linear-gradient(180deg,rgba(18,25,39,0.95),rgba(12,18,29,0.98))] shadow-[0_14px_30px_rgba(0,0,0,0.22)] border border-white/[0.05]">
-      {/* Header */}
-      <div className="px-3 pt-3 pb-2">
-        <div className="mb-2 flex items-center justify-between text-[11px] font-medium text-[#7f91b4]">
-          <div className="flex items-center gap-2">
-            <Terminal className="h-3.5 w-3.5" />
-            <span>{userVisible ? terminalName : `Background Job ${data?.pid ? `(PID ${data.pid})` : ''}`}</span>
-          </div>
-          <div className="flex items-center gap-3">
-            {exitCode !== undefined && exitCode !== null && (
-              <span
-                className={`rounded-md px-1.5 py-0.5 font-mono text-[10px] font-medium ${exitCode === 0
-                    ? 'bg-[#0c2a23] text-[#2dd4bf] border border-[#2dd4bf]/20'
-                    : 'bg-[#3a1a1a] text-[#f43f5e] border border-[#f43f5e]/20'
-                  }`}
-              >
-                exit {exitCode}
-              </span>
-            )}
-            {durationMs !== undefined && (
-              <span>{(durationMs / 1000).toFixed(1)}s</span>
-            )}
-          </div>
-        </div>
-
-        {command && (
-          <div className="rounded-xl bg-white/[0.04] px-3 py-2">
-            <p className="font-mono text-[11px] leading-5 text-[#c6d2e7] break-all">{command}</p>
-          </div>
-        )}
-      </div>
-
-      {/* Expanded view for terminal output */}
-      {expanded ? (
-        <div className="border-t border-white/[0.05] bg-[#06090e]">
-          <div className="flex items-center justify-between px-3 py-2 bg-white/[0.02]">
-            <span className="text-[10px] font-medium text-[#6f81a1] uppercase tracking-wider">Command Output</span>
-            {userVisible && (
-              <button
-                type="button"
-                onClick={handleShowTerminal}
-                className="flex items-center gap-1.5 rounded text-[10px] font-medium text-[#7d8cf0] transition hover:text-[#9eb1ff]"
-              >
-                <Terminal className="h-3 w-3" />
-                Open Terminal Panel
-              </button>
-            )}
-          </div>
-          <div className="p-3 overflow-x-auto max-h-[300px] custom-scrollbar">
-            <pre className="font-mono text-[11px] leading-5 text-[#a1b0cb] whitespace-pre-wrap break-words">
-              {outputText || 'No output captured.'}
-            </pre>
-          </div>
-        </div>
-      ) : userVisible ? (
-        <div className="px-3 pb-3 flex justify-end">
-          <button
-            type="button"
-            onClick={handleShowTerminal}
-            className="flex items-center gap-1.5 rounded-lg bg-[#5e6ad2]/10 px-2.5 py-1.5 text-[11px] font-medium text-[#9eb1ff] border border-[#5e6ad2]/20 transition hover:bg-[#5e6ad2]/20 hover:text-white active:scale-[0.97]"
-          >
-            <Terminal className="h-3 w-3" />
-            Show Terminal
-          </button>
-        </div>
-      ) : (
-        <div className="px-3 pb-3 flex justify-end">
-          <span className="text-[10px] font-medium text-[#6f81a1]">Running in background</span>
-        </div>
-      )}
-    </div>
-  )
-}
-
 const FileEditRow: React.FC<{
   node: ToolExecutionNode
   expanded: boolean
@@ -478,7 +357,9 @@ const NodeAccordion: React.FC<{
 
       {/* Terminal ops: show terminal card (no raw output in chat) */}
       {node.toolName === 'terminal_ops' && expanded && (
-        <TerminalCard node={node} expanded={true} />
+        <div className="mt-2 ml-0.5">
+          <TerminalToolCard node={node} defaultExpanded isLive={node.state === 'running'} />
+        </div>
       )}
 
       {/* Snapshot quick peek: show inline diff instead of JSON if diff exists */}
@@ -764,5 +645,5 @@ const AgentTimeline: React.FC<Props> = ({ block, isStreamingMessage }) => {
   )
 }
 
-export { FileEditRow, TerminalCard }
+export { FileEditRow, TerminalToolCard as TerminalCard }
 export default AgentTimeline

@@ -7,6 +7,7 @@ import * as net from 'net';
 import * as fs from 'fs';
 import { RpcClient } from './rpc-client';
 import { validateProtocolVersion } from './utils/protocol-validator';
+import { getHostedAuthUrl } from './auth/hosted-auth-url';
 
 export class VertexProcessManager implements vscode.Disposable {
   private natsProcess: cp.ChildProcess | null = null;
@@ -139,8 +140,9 @@ export class VertexProcessManager implements vscode.Disposable {
       try {
         outputChannel.appendLine(`[ProcessManager] Sending initialize JSON-RPC handshake...`);
         const timeoutMs = 90_000;
-        const authBaseUrl = (process.env.VERTEX_HOSTED_AUTH_URL || 'http://localhost:8080').replace(/\/$/, '');
+        const authBaseUrl = getHostedAuthUrl();
         const authJwksUrl = `${authBaseUrl}/.well-known/jwks.json`;
+        outputChannel.appendLine(`[ProcessManager] Auth JWKS URL: ${authJwksUrl}`);
 
         const initResult = await Promise.race([
           this._rpcClient.sendRequest('initialize', {

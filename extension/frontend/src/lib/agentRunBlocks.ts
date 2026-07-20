@@ -154,6 +154,35 @@ const summarizeToolExecution = ({
   const startLine = numberValue(payload?.startLine, data?.startLine)
   const endLine = numberValue(payload?.endLine, data?.endLine)
   const paths = Array.isArray(payload?.paths) ? payload.paths as string[] : undefined
+  const terminalCommand = stringValue(
+    payload?.command,
+    data?.command,
+    args?.command
+  )
+  const terminalPurpose = stringValue(
+    asRecord(payload?.terminal_context)?.purpose,
+    payload?.purpose
+  )
+  const terminalName = stringValue(
+    data?.terminal_name,
+    asRecord(payload?.terminal_context)?.name,
+    payload?.terminal_name
+  )
+
+  const terminalLabel = () => {
+    if (terminalPurpose) {
+      return terminalPurpose
+    }
+    if (terminalCommand) {
+      return terminalCommand.length > 72
+        ? `${terminalCommand.slice(0, 71)}…`
+        : terminalCommand
+    }
+    if (terminalName) {
+      return terminalName
+    }
+    return undefined
+  }
 
   if (state === 'timeout') {
     if (action === 'search_text' && query) {
@@ -187,6 +216,16 @@ const summarizeToolExecution = ({
         return oldPath && newPath
           ? `Rename failed for ${oldPath}`
           : 'Rename failed'
+      case 'run_command': {
+        const label = terminalLabel()
+        return label ? `Command failed: ${label}` : 'Command failed'
+      }
+      case 'send_input':
+        return 'Failed to send terminal input'
+      case 'new_terminal':
+        return terminalName
+          ? `Failed to open terminal ${terminalName}`
+          : 'Failed to open terminal'
       default:
         return toolName ? `${toolName} failed` : 'Tool execution failed'
     }
@@ -275,6 +314,42 @@ const summarizeToolExecution = ({
         : state === 'running'
           ? 'Listing directory'
           : 'Listed directory'
+
+    case 'run_command': {
+      const label = terminalLabel()
+      if (label) {
+        return state === 'running' ? `Running ${label}` : `Ran ${label}`
+      }
+      return state === 'running' ? 'Running command' : 'Ran command'
+    }
+
+    case 'send_input':
+      return state === 'running' ? 'Sending terminal input' : 'Sent terminal input'
+
+    case 'new_terminal':
+      return terminalName
+        ? state === 'running'
+          ? `Opening terminal ${terminalName}`
+          : `Opened terminal ${terminalName}`
+        : state === 'running'
+          ? 'Opening terminal'
+          : 'Opened terminal'
+
+    case 'get_output':
+      return state === 'running' ? 'Reading terminal output' : 'Read terminal output'
+
+    case 'kill_process':
+    case 'kill_job':
+      return state === 'running' ? 'Stopping background job' : 'Stopped background job'
+
+    case 'kill_terminal':
+      return terminalName
+        ? state === 'running'
+          ? `Closing terminal ${terminalName}`
+          : `Closed terminal ${terminalName}`
+        : state === 'running'
+          ? 'Closing terminal'
+          : 'Closed terminal'
 
     default:
       if (toolName) {

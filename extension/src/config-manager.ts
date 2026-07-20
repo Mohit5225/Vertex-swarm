@@ -91,11 +91,11 @@ export class ConfigManager {
       await config.update('llmModel', updates.llmModel, vscode.ConfigurationTarget.Global);
     }
 
-    if (updates.llmKey !== undefined) {
+    if (updates.llmKey !== undefined && updates.llmKey.trim().length > 0) {
       await this.context.secrets.store('llm_key', updates.llmKey.trim());
     }
 
-    if (updates.exaKey !== undefined) {
+    if (updates.exaKey !== undefined && updates.exaKey.trim().length > 0) {
       await this.context.secrets.store('exa_key', updates.exaKey.trim());
     }
   }

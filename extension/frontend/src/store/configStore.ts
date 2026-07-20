@@ -18,6 +18,7 @@ interface ConfigState {
   hasConfig: boolean;
   config: VertexConfig | null;
   isAuthenticated: boolean;
+  isEditingProvider: boolean;
   user: User | null;
   loading: boolean;
   error: string | null;
@@ -26,6 +27,8 @@ interface ConfigState {
   logout: () => void;
   initializeExtensionBridge: () => void;
   resetConfig: () => void;
+  openProviderSettings: () => void;
+  closeProviderSettings: () => void;
 }
 
 let messageListenerRegistered = false;
@@ -122,6 +125,7 @@ const handleExtensionMessage = (event: MessageEvent) => {
         config: message.payload,
         hasConfig: true,
         isAuthenticated: true, // If config is ready, we are authenticated
+        isEditingProvider: false,
         loading: false,
         error: null,
       });
@@ -268,6 +272,7 @@ export const useConfigStore = create<ConfigState>((set) => ({
   hasConfig: false,
   config: null,
   isAuthenticated: false,
+  isEditingProvider: false,
   user: null,
   loading: true,
   error: null,
@@ -285,6 +290,7 @@ export const useConfigStore = create<ConfigState>((set) => ({
       user: null,
       hasConfig: false,
       config: null,
+      isEditingProvider: false,
       error: null,
       loading: false,
     });
@@ -311,8 +317,17 @@ export const useConfigStore = create<ConfigState>((set) => ({
     set({
       hasConfig: false,
       config: null,
+      isEditingProvider: false,
       error: null,
       loading: false,
     });
+  },
+
+  openProviderSettings: () => {
+    set({ isEditingProvider: true, error: null });
+  },
+
+  closeProviderSettings: () => {
+    set({ isEditingProvider: false, error: null });
   },
 }));

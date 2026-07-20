@@ -11,6 +11,9 @@ export default defineConfig(({ mode }) => {
 
   return {
     define: {
+      // Vite 8 does not reliably rewrite process.env.* in lib builds.
+      // Use an explicit global that we control in source.
+      __VERTEX_HOSTED_AUTH_URL__: JSON.stringify(hostedAuthUrl),
       'process.env.VERTEX_HOSTED_AUTH_URL': JSON.stringify(hostedAuthUrl),
     },
     build: {

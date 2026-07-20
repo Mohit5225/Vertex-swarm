@@ -127,7 +127,7 @@
     "dev:frontend": "npm --prefix frontend run dev",
     "build": "vite build",
     "test:extension": "node --test test/workspace-ops-contract.test.mjs",
-    "package": "vsce package"
+    "package": "vsce package --allow-missing-repository"
   },
   "dependencies": {
     "@types/diff": "^7.0.2",

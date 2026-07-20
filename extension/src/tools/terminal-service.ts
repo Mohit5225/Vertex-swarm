@@ -112,6 +112,45 @@ export class TerminalService {
     return activeContexts;
   }
 
+  async readJobOutput(jobId: string, offset = -8000, maxChars = 8000) {
+    const result = await this.outputStore.getOutput(jobId, offset, maxChars);
+    const job = this.outputStore.getJob(jobId);
+    return {
+      content: result.content,
+      total_chars_buffered: result.total_chars_buffered,
+      status: job?.job_status || 'unknown',
+    };
+  }
+
+  private async attachRunMetadata(
+    result: TerminalActionResponse,
+    jobId: string,
+    meta: {
+      command: string;
+      cwd?: string;
+      terminalName: string;
+      purpose?: string;
+      userVisible: boolean;
+    }
+  ): Promise<TerminalActionResponse> {
+    const snapshot = await this.outputStore.getOutput(jobId, -8000, 8000);
+    return {
+      ...result,
+      data: {
+        ...(result.data || {}),
+        job_id: jobId,
+        command: meta.command,
+        cwd: meta.cwd,
+        terminal_name: meta.terminalName,
+        purpose: meta.purpose,
+        user_visible: meta.userVisible,
+        ...(snapshot.content
+          ? { output: snapshot.content, output_tail: snapshot.content }
+          : {}),
+      },
+    };
+  }
+
   async execute(args: any, context: any): Promise<ToolResult> {
     const action = args.action || 'run_command';
     const payload = args.payload || {};
@@ -227,7 +266,14 @@ export class TerminalService {
          return {
            status: 'error',
            content: `Terminal '${terminalName}' is currently busy running another command. Please create a new terminal or use an idle one.`,
-           data: { job_id: jobId }
+           data: {
+             job_id: jobId,
+             command,
+             cwd,
+             terminal_name: terminalName,
+             purpose: payload.terminal_context?.purpose,
+             user_visible,
+           }
          };
        }
     }
@@ -250,12 +296,22 @@ export class TerminalService {
       chat_id: chatId
     });
 
+    const runMeta = {
+      command,
+      cwd,
+      terminalName,
+      purpose: payload.terminal_context?.purpose,
+      userVisible: user_visible,
+    };
+
     try {
       if (user_visible) {
         const terminal = await this.getOrCreateTerminal(terminalName);
-        return await this.runViaShellIntegration(terminal, command, cwd, jobId, intent);
+        const result = await this.runViaShellIntegration(terminal, command, cwd, jobId, intent);
+        return this.attachRunMetadata(result, jobId, runMeta);
       } else {
-        return await this.runViaFallback(command, cwd, jobId, intent);
+        const result = await this.runViaFallback(command, cwd, jobId, intent);
+        return this.attachRunMetadata(result, jobId, runMeta);
       }
     } finally {
       // If blocking/await_result, clean up terminal auto close
@@ -666,6 +722,8 @@ export class TerminalService {
           job_id: jobId,
           status: job?.job_status || 'unknown',
           total_chars_buffered: result.total_chars_buffered,
+          output: result.content,
+          output_tail: result.content,
           waiting_for_input: waitingForInput
        }
     };

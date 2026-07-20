@@ -8,16 +8,15 @@ import {
   formatDuration,
   formatExploreSummary,
   formatThoughtSummary,
-  getNodeDurationMs,
   getThoughtDurationMs,
   segmentIsAlwaysVisible,
   segmentIsLive,
   summarizeTurnRollup,
   turnHasLiveWork,
-  type TurnSegment,
 } from '../lib/agentTurnTimeline'
 import { type SessionEvent } from '../store/chatStore'
-import { FileEditRow, TerminalCard } from './AgentProcess'
+import { FileEditRow } from './AgentProcess'
+import TerminalToolCard from './TerminalToolCard'
 import ToolCallDebugPanel from './ToolCallDebugPanel'
 
 interface Props {
@@ -37,44 +36,6 @@ const renderAssistantText = (content: string) => (
     </ReactMarkdown>
   </div>
 )
-
-const asRecord = (value: unknown): Record<string, unknown> | undefined =>
-  value && typeof value === 'object' && !Array.isArray(value)
-    ? (value as Record<string, unknown>)
-    : undefined
-
-const truncateCommand = (command: string, maxLength = 72) => {
-  const trimmed = command.trim()
-  if (trimmed.length <= maxLength) {
-    return trimmed
-  }
-  return `${trimmed.slice(0, maxLength - 1)}…`
-}
-
-const formatTerminalSummary = (segment: Extract<TurnSegment, { kind: 'terminal' }>) => {
-  const { node } = segment
-  const data = asRecord(asRecord(node.resultDebug)?.data)
-  const payload = asRecord(asRecord(node.requestDebug)?.args)?.payload
-  const payloadRecord = asRecord(payload)
-  const command = truncateCommand(
-    (typeof data?.command === 'string' && data.command) ||
-      (typeof payloadRecord?.command === 'string' && payloadRecord.command) ||
-      node.summary
-  )
-
-  const exitCode = data?.exit_code
-  const durationMs = getNodeDurationMs(node)
-
-  if (node.state === 'running') {
-    return `Running \`${command}\``
-  }
-
-  const exitLabel =
-    exitCode !== undefined && exitCode !== null ? `exit ${exitCode}` : undefined
-  const durationLabel = durationMs ? formatDuration(durationMs) : undefined
-  const tail = [exitLabel, durationLabel].filter(Boolean).join(' · ')
-  return tail ? `Ran \`${command}\` · ${tail}` : `Ran \`${command}\``
-}
 
 const THOUGHT_PANEL_CLASS =
   'max-h-[min(42vh,14rem)] overflow-y-auto overscroll-contain rounded-md border border-white/[0.06] bg-black/20 px-3 py-2 text-[13px] leading-6 text-[#b4c4de] [scrollbar-width:thin] [scrollbar-color:rgba(143,163,196,0.45)_transparent]'
@@ -300,18 +261,13 @@ const AgentTurnView: React.FC<Props> = ({
         }
 
         if (segment.kind === 'terminal') {
-          const isExpanded = expanded[segment.id] ?? false
           return (
-            <div key={segment.id}>
-              <WorkReceipt
-                label={formatTerminalSummary(segment)}
-                isLive={segment.node.state === 'running'}
-                expanded={isExpanded}
-                onToggle={() => toggle(segment.id)}
-              >
-                <TerminalCard node={segment.node} expanded />
-              </WorkReceipt>
-            </div>
+            <TerminalToolCard
+              key={segment.id}
+              node={segment.node}
+              defaultExpanded
+              isLive={segment.node.state === 'running'}
+            />
           )
         }
 

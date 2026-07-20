@@ -25,23 +25,29 @@ const ConfirmDialog: React.FC<ConfirmDialogProps> = ({
 
   return (
     <div className="fixed inset-0 z-50 flex items-end justify-center bg-[#04060d]/70 px-4 pb-6 pt-10 backdrop-blur-sm sm:items-center">
-      <div className="w-full max-w-sm rounded-[22px] border border-white/8 bg-[#0d1424]/96 p-5 shadow-[0_24px_80px_rgba(0,0,0,0.45)]">
-        <p className="text-[11px] font-medium uppercase tracking-[0.18em] text-[#7d89a6]">
-          Session
-        </p>
-        <h2 className="text-lg font-semibold tracking-tight text-white">
-          {title}
-        </h2>
-        <p className="mt-2 text-sm leading-6 text-[#95a2bd]">{description}</p>
+      <div className="popover-panel w-full max-w-sm p-1.5">
+        <div className="px-3 py-2.5">
+          <p className="popover-eyebrow">Session</p>
+          <h2 className="popover-title">{title}</h2>
+          <p className="mt-1.5 text-[13px] leading-6 text-[#7f91b4]">
+            {description}
+          </p>
+        </div>
 
-        <div className="mt-6 flex items-center justify-end gap-3">
-          <button type="button" onClick={onCancel} className="ghost-btn">
+        <div className="popover-divider" />
+
+        <div className="flex items-center justify-end gap-2 px-1.5 py-1.5">
+          <button
+            type="button"
+            onClick={onCancel}
+            className="rounded-lg px-3 py-2 text-[15px] text-[#e6ecfa] transition hover:bg-white/[0.06]"
+          >
             {cancelLabel}
           </button>
           <button
             type="button"
             onClick={onConfirm}
-            className="primary-btn !bg-[#f27d75] !text-[#160b0b] hover:!shadow-[0_10px_30px_rgba(242,125,117,0.22)]"
+            className="rounded-lg bg-[#f27d75]/15 px-3 py-2 text-[15px] font-medium text-[#f0a8a2] transition hover:bg-[#f27d75]/25"
           >
             {confirmLabel}
           </button>
