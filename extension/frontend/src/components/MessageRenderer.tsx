@@ -67,7 +67,7 @@ const MessageRenderer: React.FC<Props> = ({ message }) => {
 
   const renderedStreamingAssistantContent = isStreamingMessage && message.content ? (
     <div
-      className="whitespace-pre-wrap break-words text-[15px] leading-7 text-[#edf3ff]"
+      className="whitespace-pre-wrap break-words text-[15px] leading-7 text-[var(--vs-text-primary)]"
       aria-live="polite"
     >
       <span>{message.content}</span>
@@ -82,7 +82,7 @@ const MessageRenderer: React.FC<Props> = ({ message }) => {
     return (
       <div className="flex py-2 animate-fade-up">
         <div className="w-full">
-          <div className="rounded-2xl bg-white/[0.03] px-3 py-2.5 text-[13px] leading-6 text-[#9fb0cd]">
+          <div className="rounded-2xl bg-white/[0.03] px-3 py-2.5 text-[13px] leading-6 text-[var(--vs-text-secondary)]">
             {message.content}
           </div>
         </div>
@@ -164,8 +164,8 @@ const MessageRenderer: React.FC<Props> = ({ message }) => {
           )}
 
           {!message.content && !isUser && (!message.events || message.events.length === 0) && (
-            <div className="flex items-center gap-2 text-sm leading-6 text-[#91a0bb]">
-              {isStreamingMessage && <span className="h-1.5 w-1.5 rounded-full bg-[#5e6ad2] animate-pulse" />}
+            <div className="flex items-center gap-2 text-sm leading-6 text-[var(--vs-text-tertiary)]">
+              {isStreamingMessage && <span className="h-1.5 w-1.5 rounded-full bg-[var(--vs-accent)] animate-pulse" />}
               <p>{pendingLabel}</p>
             </div>
           )}
@@ -186,14 +186,14 @@ const MessageRenderer: React.FC<Props> = ({ message }) => {
                   }
                 })
               }}
-              className="p-1.5 rounded-md text-[#91a0bb] hover:text-white hover:bg-white/[0.05] transition-colors"
+              className="p-1.5 rounded-md text-[var(--vs-text-tertiary)] hover:text-white hover:bg-white/[0.05] transition-colors"
               title="Edit Message (Removes subsequent agent responses)"
             >
               <Edit2 className="w-3.5 h-3.5" />
             </button>
             <button
               onClick={() => navigator.clipboard.writeText(message.content)}
-              className="p-1.5 rounded-md text-[#91a0bb] hover:text-white hover:bg-white/[0.05] transition-colors"
+              className="p-1.5 rounded-md text-[var(--vs-text-tertiary)] hover:text-white hover:bg-white/[0.05] transition-colors"
               title="Copy Message"
             >
               <Copy className="w-3.5 h-3.5" />

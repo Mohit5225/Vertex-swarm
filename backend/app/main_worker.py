@@ -20,6 +20,7 @@ class WorkerNode:
         self.nats: NATSClient | None = None
         self.orchestrator: LLMOrchestrator | None = None
         self.active_sessions: Dict[str, asyncio.Task] = {}
+        self.pending_user_turns: Dict[str, list[Dict[str, Any]]] = {}
 
     async def handle_initialize(self, msg_id: int, params: Dict[str, Any]):
         try:
@@ -39,11 +40,15 @@ class WorkerNode:
                 exa_key=params.get("exa_key", ""),
                 entitlement_token=params.get("entitlement_token", ""),
                 platform=params.get("platform", sys.platform),
-                llm_base_url=params.get("llm_base_url", "https://api.deepseek.com/v1"),
-                llm_model=params.get("llm_model", "deepseek-v4-pro"),
-                llm_fallback_model=params.get("llm_fallback_model", "deepseek-v4-pro"),
-                llm_reasoning_enabled=params.get("llm_reasoning_enabled", True),
-                llm_reasoning_effort=params.get("llm_reasoning_effort", "medium"),
+                # OpenRouter is the active path; DeepSeek retained for rollback.
+                llm_base_url=params.get("llm_base_url", "https://openrouter.ai/api/v1"),
+                llm_model=params.get("llm_model", "deepseek/deepseek-v4-flash"),
+                llm_fallback_model=params.get("llm_fallback_model", "deepseek/deepseek-v4-flash"),
+                # llm_base_url=params.get("llm_base_url", "https://api.deepseek.com/v1"),
+                # llm_model=params.get("llm_model", "deepseek-v4-pro"),
+                # llm_fallback_model=params.get("llm_fallback_model", "deepseek-v4-pro"),
+                llm_reasoning_enabled=params.get("llm_reasoning_enabled", False),
+                llm_reasoning_effort=params.get("llm_reasoning_effort", "low"),
                 auth_jwks_url=auth_jwks_url,
             )
             
@@ -120,7 +125,13 @@ class WorkerNode:
             return
             
         if chat_id in self.active_sessions:
-            logger.warning(f"Session {chat_id} is already running.")
+            queue = self.pending_user_turns.setdefault(chat_id, [])
+            queue.append(params)
+            logger.info(
+                "Session %s is already running; queued user turn (depth=%s)",
+                chat_id,
+                len(queue),
+            )
             return
 
         async def run_session():
@@ -132,12 +143,31 @@ class WorkerNode:
                 logger.exception(f"Session {chat_id} failed.")
             finally:
                 self.active_sessions.pop(chat_id, None)
+                await self._drain_pending_user_turn(chat_id)
 
         task = asyncio.create_task(run_session())
         self.active_sessions[chat_id] = task
 
+    async def _drain_pending_user_turn(self, chat_id: str) -> None:
+        queue = self.pending_user_turns.get(chat_id, [])
+        if not queue:
+            return
+
+        next_params = queue.pop(0)
+        if not queue:
+            self.pending_user_turns.pop(chat_id, None)
+
+        await self.handle_session_start(next_params)
+
     async def handle_session_cancel(self, params: Dict[str, Any]):
         chat_id = params.get("chat_id")
+        if not chat_id:
+            return
+
+        self.pending_user_turns.pop(chat_id, None)
+        if self.orchestrator:
+            self.orchestrator.clear_job_completions(chat_id)
+
         if chat_id in self.active_sessions:
             self.active_sessions[chat_id].cancel()
             logger.info(f"Cancelled session {chat_id}.")
@@ -195,16 +225,36 @@ class WorkerNode:
         
         chat_id = params.get("chat_id")
         job_id = params.get("job_id")
-        status = params.get("status")
         
         if not chat_id or not job_id:
             return
-            
-        system_message = f"[System Notification: Background task {job_id} completed with status: {status}. Use terminal_ops -> get_output to read the final result.]"
+
+        if chat_id in self.active_sessions:
+            self.orchestrator.enqueue_job_completion(chat_id, params)
+            logger.info(
+                "Queued job completion for active session chat_id=%s job_id=%s",
+                chat_id,
+                job_id,
+            )
+            return
+
+        exit_code = params.get("exit_code")
+        output_tail = params.get("output_tail", "")
+        command = params.get("command", "")
+        status_message = params.get("status_message") or params.get("status") or "completed"
+
+        system_message = (
+            f"[System Notification: Background terminal job finished]\n"
+            f"job_id: {job_id}\n"
+            f"command: {command}\n"
+            f"exit_code: {exit_code}\n"
+            f"status: {status_message}\n"
+            f"output_tail:\n{output_tail}\n"
+            f"Use terminal_ops -> get_output for full output if needed."
+        )
         
         logger.info(f"Received background event for job {job_id} in chat {chat_id}. Waking up LLM.")
         
-        # Forge a session/start parameter dict to wake up the LLM
         wakeup_params = params.copy()
         wakeup_params["message"] = system_message
         

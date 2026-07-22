@@ -5,7 +5,7 @@ import { FileSystemService } from './tools/file-system-service';
 import { ToolExecutor } from './tools/tool-executor';
 import { WorkspaceStore } from './workspace-store';
 import { DiskSnapshotManager } from './snapshot/snapshot-manager';
-import { TerminalService } from './tools/terminal-service';
+import { TerminalService, JobCompletionEvent } from './tools/terminal-service';
 import { createRequestContext } from './request-context';
 import { PlanDocumentProvider } from './plan-document-provider';
 import { LocalChatStore } from './local-chat-store';
@@ -53,6 +53,7 @@ export class VertexSwarmChatRuntime {
   private readonly snapshotManager: DiskSnapshotManager;
   private readonly toolExecutor: ToolExecutor;
   private readonly processedToolCallIds = new Set<string>();
+  private readonly inFlightToolCalls = new Map<string, ToolCallPayload>();
 
   private processManager: VertexProcessManager;
   private currentChatId: string | null = null;
@@ -74,12 +75,16 @@ export class VertexSwarmChatRuntime {
       options.context,
       (msg) => this.log(msg),
       (event) => this.post({ type: 'event', payload: event }),
-      (jobId, status, chatId) => {
+      (event: JobCompletionEvent) => {
         if (this.processManager.rpcClient) {
           this.processManager.rpcClient.sendNotification('background/event', {
-            job_id: jobId,
-            status: status,
-            chat_id: chatId
+            job_id: event.job_id,
+            chat_id: event.chat_id,
+            exit_code: event.exit_code,
+            output_tail: event.output_tail,
+            command: event.command,
+            status_message: event.status_message,
+            job_status: event.job_status,
           });
         }
       }
@@ -349,6 +354,8 @@ export class VertexSwarmChatRuntime {
         const payload = message.payload as StreamCancelPayload;
         this.log(`cancel stream requested session_id=${payload.sessionId}`);
         if (payload.sessionId) {
+          await this.terminalService.cancelJobsForChat(payload.sessionId);
+          this.cancelInFlightTools(payload.sessionId);
           if (this.processManager.rpcClient) {
             this.processManager.rpcClient.sendNotification('session/cancel', {
               chat_id: payload.sessionId
@@ -831,11 +838,17 @@ export class VertexSwarmChatRuntime {
     }
 
     this.processedToolCallIds.add(payload.tool_call_id);
+    this.inFlightToolCalls.set(payload.tool_call_id, payload);
 
     try {
       const startTime = Date.now();
       const result = await this.toolExecutor.handle(payload);
       const executionTime = Date.now() - startTime;
+
+      if (this.streamCancellationRequested) {
+        this.log(`skipping tool result for cancelled stream tool_call_id=${payload.tool_call_id}`);
+        return;
+      }
 
       if (this.processManager.rpcClient) {
         this.processManager.rpcClient.sendNotification('tool/result', {
@@ -859,6 +872,34 @@ export class VertexSwarmChatRuntime {
       this.processedToolCallIds.delete(payload.tool_call_id);
       const errorMessage = error instanceof Error ? error.message : String(error);
       this.post({ type: 'error', payload: `Tool execution failed: ${errorMessage}` });
+    } finally {
+      this.inFlightToolCalls.delete(payload.tool_call_id);
+    }
+  }
+
+  private cancelInFlightTools(chatId: string): void {
+    for (const [toolCallId, payload] of this.inFlightToolCalls.entries()) {
+      if (payload.chat_id !== chatId) {
+        continue;
+      }
+
+      if (this.processManager.rpcClient) {
+        this.processManager.rpcClient.sendNotification('tool/result', {
+          tool_name: payload.tool_name,
+          tool_call_id: payload.tool_call_id,
+          session_id: payload.session_id,
+          chat_id: payload.chat_id,
+          message_id: payload.message_id,
+          status: 'error',
+          content: 'Tool execution cancelled by user.',
+          data: {},
+          execution_time_ms: 0,
+          error_code: 'cancelled',
+        });
+      }
+
+      this.inFlightToolCalls.delete(toolCallId);
+      this.processedToolCallIds.delete(toolCallId);
     }
   }
 

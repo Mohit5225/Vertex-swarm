@@ -14,7 +14,7 @@ class ToolResultSchema(BaseModel):
     message_id: str = Field(..., min_length=1)
     request_id: str | None = None
     action: str | None = None
-    status: Literal["success", "error", "timeout"]
+    status: Literal["success", "error", "timeout", "verification_needed", "running", "cancelled"]
     content: str
     summary: str | None = None
     data: dict[str, object] | list[object] | str | int | float | bool | None = None

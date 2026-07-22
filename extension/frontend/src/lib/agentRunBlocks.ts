@@ -388,6 +388,12 @@ const nodeStateFromResult = (event: SessionEvent): ToolExecutionState => {
   if (status === 'timeout') {
     return 'timeout'
   }
+  if (status === 'verification_needed' || status === 'running') {
+    return 'running'
+  }
+  if (status === 'cancelled') {
+    return 'error'
+  }
   if (status === 'error' || event.type === 'error') {
     return 'error'
   }

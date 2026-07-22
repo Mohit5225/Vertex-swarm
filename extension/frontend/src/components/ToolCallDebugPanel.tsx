@@ -69,21 +69,21 @@ const ToolCallDebugPanel: React.FC<{ node: ToolExecutionNode }> = ({ node }) => 
   return (
     <div className="space-y-2">
       {meta ? (
-        <p className="text-[10px] font-medium uppercase tracking-wider text-[#6f81a1]">
+        <p className="text-[10px] font-medium uppercase tracking-wider text-[var(--vs-text-tertiary)]">
           {meta}
         </p>
       ) : null}
 
       <div>
-        <div className="mb-1 text-[10px] font-medium text-[#91a0bb]">Sent to extension</div>
-        <pre className={`${SCROLL_PANEL_CLASS} whitespace-pre-wrap break-words font-mono text-[11px] leading-5 text-[#c6d2e7]`}>
+        <div className="mb-1 text-[10px] font-medium text-[var(--vs-text-tertiary)]">Sent to extension</div>
+        <pre className={`${SCROLL_PANEL_CLASS} whitespace-pre-wrap break-words font-mono text-[11px] leading-5 text-[var(--vs-text-secondary)]`}>
           {formatRequest(node.requestDebug)}
         </pre>
       </div>
 
       <div>
-        <div className="mb-1 text-[10px] font-medium text-[#91a0bb]">Captured output</div>
-        <pre className={`${SCROLL_PANEL_CLASS} whitespace-pre-wrap break-words font-mono text-[11px] leading-5 text-[#c6d2e7]`}>
+        <div className="mb-1 text-[10px] font-medium text-[var(--vs-text-tertiary)]">Captured output</div>
+        <pre className={`${SCROLL_PANEL_CLASS} whitespace-pre-wrap break-words font-mono text-[11px] leading-5 text-[var(--vs-text-secondary)]`}>
           {node.state === 'running' && !node.resultDebug
             ? '(waiting for result…)'
             : formatResult(node.resultDebug)}

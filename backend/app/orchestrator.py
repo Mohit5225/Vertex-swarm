@@ -33,6 +33,16 @@ class LLMOrchestrator:
         self.file_store = FileStore(config.base_path)
         self.stdio = StdioTransport()
         self.active_tool_queues: dict[str, asyncio.Queue] = {}
+        self.job_completion_queues: dict[str, list[dict[str, Any]]] = {}
+
+    def enqueue_job_completion(self, chat_id: str, payload: dict[str, Any]) -> None:
+        self.job_completion_queues.setdefault(chat_id, []).append(payload)
+
+    def drain_job_completions(self, chat_id: str) -> list[dict[str, Any]]:
+        return self.job_completion_queues.pop(chat_id, [])
+
+    def clear_job_completions(self, chat_id: str) -> None:
+        self.job_completion_queues.pop(chat_id, None)
 
     async def _wait_for_tool_result(
         self,
@@ -100,6 +110,24 @@ def _preview(value: str, limit: int = 180) -> str:
     if len(normalized) <= limit:
         return normalized
     return f"{normalized[: limit - 3]}..."
+
+
+def _build_job_completion_message(payload: dict[str, Any]) -> dict[str, str]:
+    job_id = payload.get("job_id", "unknown")
+    exit_code = payload.get("exit_code")
+    output_tail = payload.get("output_tail") or ""
+    command = payload.get("command") or ""
+    status_message = payload.get("status_message") or payload.get("status") or "completed"
+    content = (
+        "[System Notification: Background terminal job finished]\n"
+        f"job_id: {job_id}\n"
+        f"command: {command}\n"
+        f"exit_code: {exit_code}\n"
+        f"status: {status_message}\n"
+        f"output_tail:\n{output_tail}\n"
+        "Use terminal_ops -> get_output for full output if needed."
+    )
+    return {"role": "system", "content": content}
 
 
 def _assistant_tool_call_message(
@@ -772,6 +800,9 @@ async def _run_agent_loop_impl(
 
         while True:
             llm_round += 1
+            for completion in orchestrator.drain_job_completions(chat_id):
+                llm_messages.append(_build_job_completion_message(completion))
+
             assistant_turn_content = ""
             assistant_reasoning_content = ""
             tool_call_requested = False
@@ -900,10 +931,34 @@ async def _run_agent_loop_impl(
                     break
 
             except Exception as stream_exc:
-                logger.error("LLM stream error for chat %s:\n%s", chat_id, stream_exc, exc_info=True)
+                error_details = str(stream_exc)
+                if isinstance(stream_exc, APIError):
+                    logger.error(
+                        "LLM stream API error for chat %s: message=%s type=%s code=%s body=%s",
+                        chat_id,
+                        stream_exc.message,
+                        stream_exc.type,
+                        stream_exc.code,
+                        json.dumps(stream_exc.body) if stream_exc.body else None,
+                        exc_info=True,
+                    )
+                    error_details = stream_exc.message or error_details
+                else:
+                    logger.error("LLM stream error for chat %s:\n%s", chat_id, stream_exc, exc_info=True)
+                if not orchestrator.config.llm_key.strip():
+                    error_details = "LLM API key is missing. Open Settings and configure your provider key."
                 run_failed = True
                 stream_aborted = True
-                await emit_trace_and_push(_build_event("error", content="The LLM connection was unexpectedly dropped. Please try again.", metadata={"phase": "stream_error"}, session_id=synthetic_session_id, chat_id=str(chat_id), message_id=request_message_id))
+                await emit_trace_and_push(
+                    _build_event(
+                        "error",
+                        content=f"LLM stream failed: {error_details}",
+                        metadata={"phase": "stream_error"},
+                        session_id=synthetic_session_id,
+                        chat_id=str(chat_id),
+                        message_id=request_message_id,
+                    )
+                )
 
             if stream_aborted:
                 break
@@ -1040,6 +1095,13 @@ async def _run_agent_loop_impl(
                 profiler.log_turn(llm_round, "assistant_answer", assistant_turn_content)
                 profiler.log_turn(llm_round, "assistant_reasoning", assistant_reasoning_content)
                 await emit_trace_and_push(build_status_event("Final answer ready.", "completed"))
+
+            pending_completions = orchestrator.drain_job_completions(chat_id)
+            if pending_completions:
+                for completion in pending_completions:
+                    llm_messages.append(_build_job_completion_message(completion))
+                continue
+
             break
     except asyncio.CancelledError:
         run_failed = True

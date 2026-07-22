@@ -100,24 +100,24 @@
         },
         "vertexSwarm.llmBaseUrl": {
           "type": "string",
-          "default": "https://api.deepseek.com/v1",
-          "description": "Base URL for the LLM API"
+          "default": "https://openrouter.ai/api/v1",
+          "description": "Base URL for the LLM API (OpenRouter active; was https://api.deepseek.com/v1)"
         },
         "vertexSwarm.llmModel": {
           "type": "string",
-          "default": "deepseek-v4-pro",
-          "description": "Model identifier to use for inference"
+          "default": "deepseek/deepseek-v4-flash",
+          "description": "Model identifier to use for inference (OpenRouter; was deepseek-v4-pro)"
         },
         "vertexSwarm.llmReasoningEnabled": {
           "type": "boolean",
-          "default": true,
-          "description": "Enable DeepSeek thinking mode (reasoning_content) for better tool-use accuracy"
+          "default": false,
+          "description": "Enable reasoning/thinking mode for models that support it"
         },
         "vertexSwarm.llmReasoningEffort": {
           "type": "string",
-          "default": "medium",
+          "default": "low",
           "enum": ["low", "medium", "high", "max", "xhigh"],
-          "description": "Reasoning depth for DeepSeek thinking mode."
+          "description": "Reasoning depth when reasoning mode is enabled"
         }
       }
     }

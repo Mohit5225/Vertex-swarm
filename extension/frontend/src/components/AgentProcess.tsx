@@ -196,19 +196,19 @@ const FILE_OPS = FILE_MUTATION_ACTIONS
 const stateIndicator = (state: ToolExecutionNode['state']) => {
   switch (state) {
     case 'running':
-      return <Loader2 className="h-3.5 w-3.5 animate-spin text-[#5e6ad2]" />
+      return <Loader2 className="h-3.5 w-3.5 animate-spin text-[var(--vs-accent)]" />
     case 'error':
-      return <X className="h-3.5 w-3.5 text-[#f43f5e]" />
+      return <X className="h-3.5 w-3.5 text-[var(--vs-danger)]" />
     case 'timeout':
       return <Clock3 className="h-3.5 w-3.5 text-[#f1cb78]" />
     default:
-      return <Check className="h-3.5 w-3.5 text-[#2dd4bf]" />
+      return <Check className="h-3.5 w-3.5 text-[var(--vs-success)]" />
   }
 }
 
 const renderChevron = (expanded: boolean) => (
   <span
-    className={`inline-flex h-5 w-5 items-center justify-center rounded-full text-[#6f81a1] transition ${expanded ? 'rotate-180' : ''
+    className={`inline-flex h-5 w-5 items-center justify-center rounded-full text-[var(--vs-text-tertiary)] transition ${expanded ? 'rotate-180' : ''
       }`}
   >
     <ChevronDown className="h-3.5 w-3.5" />
@@ -236,19 +236,19 @@ const FileEditRow: React.FC<{
         onClick={onToggle}
         className="flex w-full items-center gap-2 rounded-xl px-2.5 py-1.5 text-left transition hover:bg-white/[0.04] group"
       >
-        <span className="flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-[#101726] text-[#d6e3fb] shadow-[0_0_0_3px_rgba(10,14,22,0.94)]">
+        <span className="flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-[var(--vs-surface)] text-[var(--vs-text-primary)] shadow-[0_0_0_3px_rgba(10,14,22,0.94)]">
           <Icon className="h-3 w-3" />
         </span>
-        <span className="flex-1 min-w-0 text-[13px] font-medium text-[#c6d2e7] truncate">
+        <span className="flex-1 min-w-0 text-[13px] font-medium text-[var(--vs-text-secondary)] truncate">
           {node.summary}
         </span>
         {hasChangeDetail && (
-          <span className="shrink-0 text-[11px] font-medium text-[#9eb1ff]">{changeDetail}</span>
+          <span className="shrink-0 text-[11px] font-medium text-[var(--vs-accent-bright)]">{changeDetail}</span>
         )}
         {hasDiffStats && (
           <span className="flex items-center gap-1.5 shrink-0">
-            <span className="font-mono text-[11px] text-[#2dd4bf]">+{additions}</span>
-            <span className="font-mono text-[11px] text-[#f43f5e]">-{deletions}</span>
+            <span className="font-mono text-[11px] text-[var(--vs-success)]">+{additions}</span>
+            <span className="font-mono text-[11px] text-[var(--vs-danger)]">-{deletions}</span>
           </span>
         )}
         <span className="shrink-0 flex items-center gap-1.5">
@@ -264,27 +264,27 @@ const FileEditRow: React.FC<{
             <div className="px-3 py-2.5 space-y-2">
               {diffs.map((diff, idx) => (
                 <div key={idx}>
-                  <div className="mb-1 flex items-center gap-2 text-[10px] font-medium text-[#91a0bb] truncate">
+                  <div className="mb-1 flex items-center gap-2 text-[10px] font-medium text-[var(--vs-text-tertiary)] truncate">
                     <span className="truncate" title={diff.path}>{diff.path}</span>
                     {fileChangeDetail(diff) ? (
-                      <span className="shrink-0 text-[#9eb1ff]">{fileChangeDetail(diff)}</span>
+                      <span className="shrink-0 text-[var(--vs-accent-bright)]">{fileChangeDetail(diff)}</span>
                     ) : null}
                     <ChangeStatBadges change={diff} />
                   </div>
                   {diff.isBinary ? (
-                    <p className="text-[11px] text-[#6f81a1]">Binary file — use Review to open.</p>
+                    <p className="text-[11px] text-[var(--vs-text-tertiary)]">Binary file — use Review to open.</p>
                   ) : diff.diffText ? (
                     <pre className="overflow-x-auto whitespace-pre-wrap break-words text-[11px] leading-5 font-mono max-h-[200px] custom-scrollbar">
                       {diff.diffText.split('\n').map((line, i) => {
-                        let color = 'text-[#c6d2e7]'
-                        if (line.startsWith('+')) color = 'text-[#2dd4bf]'
-                        else if (line.startsWith('-')) color = 'text-[#f43f5e]'
-                        else if (line.startsWith('@')) color = 'text-[#5e6ad2]'
+                        let color = 'text-[var(--vs-text-secondary)]'
+                        if (line.startsWith('+')) color = 'text-[var(--vs-success)]'
+                        else if (line.startsWith('-')) color = 'text-[var(--vs-danger)]'
+                        else if (line.startsWith('@')) color = 'text-[var(--vs-accent)]'
                         return <div key={i} className={color}>{line}</div>
                       })}
                     </pre>
                   ) : (
-                    <p className="text-[11px] text-[#6f81a1]">No line diff available.</p>
+                    <p className="text-[11px] text-[var(--vs-text-tertiary)]">No line diff available.</p>
                   )}
                 </div>
               ))}
@@ -294,22 +294,22 @@ const FileEditRow: React.FC<{
             <div className="px-3 py-2.5 space-y-2">
               {!!node.requestDebug && (
                 <div className="rounded-xl bg-white/[0.035] px-3 py-2.5">
-                  <div className="mb-1.5 text-[10px] font-medium text-[#91a0bb] uppercase tracking-wider">Input</div>
-                  <pre className="overflow-x-auto whitespace-pre-wrap break-words text-[11px] leading-5 text-[#c6d2e7]">
+                  <div className="mb-1.5 text-[10px] font-medium text-[var(--vs-text-tertiary)] uppercase tracking-wider">Input</div>
+                  <pre className="overflow-x-auto whitespace-pre-wrap break-words text-[11px] leading-5 text-[var(--vs-text-secondary)]">
                     {formatDebugPayload(node.requestDebug)}
                   </pre>
                 </div>
               )}
               {!!node.resultDebug && (
                 <div className="rounded-xl bg-white/[0.035] px-3 py-2.5">
-                  <div className="mb-1.5 text-[10px] font-medium text-[#91a0bb] uppercase tracking-wider">Output</div>
-                  <pre className="overflow-x-auto whitespace-pre-wrap break-words text-[11px] leading-5 text-[#c6d2e7]">
+                  <div className="mb-1.5 text-[10px] font-medium text-[var(--vs-text-tertiary)] uppercase tracking-wider">Output</div>
+                  <pre className="overflow-x-auto whitespace-pre-wrap break-words text-[11px] leading-5 text-[var(--vs-text-secondary)]">
                     {formatDebugPayload(node.resultDebug)}
                   </pre>
                 </div>
               )}
               {!node.requestDebug && !node.resultDebug && (
-                <p className="text-[11px] text-[#6f81a1] py-1">No details captured.</p>
+                <p className="text-[11px] text-[var(--vs-text-tertiary)] py-1">No details captured.</p>
               )}
             </div>
           )}
@@ -334,7 +334,7 @@ const NodeAccordion: React.FC<{
   return (
     <div className="relative pl-8">
       <div className="absolute left-[0.55rem] top-[0.35rem] h-full w-px bg-gradient-to-b from-white/[0.12] via-white/[0.06] to-transparent" />
-      <div className="absolute left-0 top-0.5 z-10 flex h-5 w-5 items-center justify-center rounded-full bg-[#101726] text-[#d6e3fb] shadow-[0_0_0_4px_rgba(10,14,22,0.94)]">
+      <div className="absolute left-0 top-0.5 z-10 flex h-5 w-5 items-center justify-center rounded-full bg-[var(--vs-surface)] text-[var(--vs-text-primary)] shadow-[0_0_0_4px_rgba(10,14,22,0.94)]">
         <Icon className="h-3 w-3" />
       </div>
 
@@ -344,7 +344,7 @@ const NodeAccordion: React.FC<{
         className="flex w-full items-start justify-between gap-3 rounded-xl px-1 py-1 text-left transition hover:bg-white/[0.03]"
       >
         <div className="min-w-0 flex-1 pt-0.5">
-          <p className="text-[13px] font-medium leading-6 text-[#e8eefb]">
+          <p className="text-[13px] font-medium leading-6 text-[var(--vs-text-primary)]">
             {node.summary}
           </p>
         </div>
@@ -365,22 +365,22 @@ const NodeAccordion: React.FC<{
       {/* Snapshot quick peek: show inline diff instead of JSON if diff exists */}
       {node.toolName !== 'terminal_ops' && expanded && extractFileChangesFromData((node.resultDebug as any)?.data).length > 0 ? (
         <div className="mt-2 ml-0.5 rounded-[18px] bg-[linear-gradient(180deg,rgba(18,25,39,0.95),rgba(12,18,29,0.98))] px-3 py-3 shadow-[0_14px_30px_rgba(0,0,0,0.22)]">
-          <div className="mb-2 flex items-center gap-2 text-[11px] font-medium text-[#7f91b4]">
+          <div className="mb-2 flex items-center gap-2 text-[11px] font-medium text-[var(--vs-text-secondary)]">
             <FileSearch className="h-3.5 w-3.5" />
             <span>Quick Peek (Diff)</span>
           </div>
           <div className="space-y-2">
             {extractFileChangesFromData((node.resultDebug as any)?.data).map((diff, idx) => (
               <div key={idx} className="rounded-2xl bg-white/[0.035] px-3 py-2.5">
-                <div className="mb-1.5 text-[11px] font-medium text-[#91a0bb] truncate">
+                <div className="mb-1.5 text-[11px] font-medium text-[var(--vs-text-tertiary)] truncate">
                   {diff.file}
                 </div>
                 <pre className="overflow-x-auto whitespace-pre-wrap break-words text-[11px] leading-5 font-mono">
                   {diff.diffText.split('\n').map((line, i) => {
-                    let color = 'text-[#c6d2e7]'
-                    if (line.startsWith('+')) color = 'text-[#2dd4bf]'
-                    else if (line.startsWith('-')) color = 'text-[#f43f5e]'
-                    else if (line.startsWith('@')) color = 'text-[#5e6ad2]'
+                    let color = 'text-[var(--vs-text-secondary)]'
+                    if (line.startsWith('+')) color = 'text-[var(--vs-success)]'
+                    else if (line.startsWith('-')) color = 'text-[var(--vs-danger)]'
+                    else if (line.startsWith('@')) color = 'text-[var(--vs-accent)]'
                     return <div key={i} className={color}>{line}</div>
                   })}
                 </pre>
@@ -393,26 +393,26 @@ const NodeAccordion: React.FC<{
       {/* All other tools: show debug view on expand */}
       {node.toolName !== 'terminal_ops' && expanded && extractFileChangesFromData((node.resultDebug as any)?.data).length === 0 ? (
         <div className="mt-2 ml-0.5 rounded-[18px] bg-[linear-gradient(180deg,rgba(18,25,39,0.95),rgba(12,18,29,0.98))] px-3 py-3 shadow-[0_14px_30px_rgba(0,0,0,0.22)]">
-          <div className="mb-2 flex items-center gap-2 text-[11px] font-medium text-[#7f91b4]">
+          <div className="mb-2 flex items-center gap-2 text-[11px] font-medium text-[var(--vs-text-secondary)]">
             <FileSearch className="h-3.5 w-3.5" />
             <span>Debug view</span>
           </div>
 
           <div className="space-y-2">
             <div className="rounded-2xl bg-white/[0.035] px-3 py-2.5">
-              <div className="mb-1.5 text-[11px] font-medium text-[#91a0bb]">
+              <div className="mb-1.5 text-[11px] font-medium text-[var(--vs-text-tertiary)]">
                 {requestLabel}
               </div>
-              <pre className="overflow-x-auto whitespace-pre-wrap break-words text-[11px] leading-5 text-[#c6d2e7]">
+              <pre className="overflow-x-auto whitespace-pre-wrap break-words text-[11px] leading-5 text-[var(--vs-text-secondary)]">
                 {requestPayload}
               </pre>
             </div>
 
             <div className="rounded-2xl bg-white/[0.035] px-3 py-2.5">
-              <div className="mb-1.5 text-[11px] font-medium text-[#91a0bb]">
+              <div className="mb-1.5 text-[11px] font-medium text-[var(--vs-text-tertiary)]">
                 {resultLabel}
               </div>
-              <pre className="overflow-x-auto whitespace-pre-wrap break-words text-[11px] leading-5 text-[#c6d2e7]">
+              <pre className="overflow-x-auto whitespace-pre-wrap break-words text-[11px] leading-5 text-[var(--vs-text-secondary)]">
                 {resultPayload}
               </pre>
             </div>
@@ -438,7 +438,7 @@ const GroupAccordion: React.FC<{
   return (
     <div className="relative pl-8">
       <div className="absolute left-[0.55rem] top-[0.35rem] h-full w-px bg-gradient-to-b from-white/[0.12] via-white/[0.06] to-transparent" />
-      <div className="absolute left-0 top-0.5 z-10 flex h-5 w-5 items-center justify-center rounded-full bg-[#101726] text-[#d6e3fb] shadow-[0_0_0_4px_rgba(10,14,22,0.94)]">
+      <div className="absolute left-0 top-0.5 z-10 flex h-5 w-5 items-center justify-center rounded-full bg-[var(--vs-surface)] text-[var(--vs-text-primary)] shadow-[0_0_0_4px_rgba(10,14,22,0.94)]">
         <Icon className="h-3 w-3" />
       </div>
 
@@ -448,12 +448,12 @@ const GroupAccordion: React.FC<{
         className="flex w-full items-start justify-between gap-3 rounded-xl px-1 py-1 text-left transition hover:bg-white/[0.03]"
       >
         <div className="min-w-0 flex-1 pt-0.5">
-          <p className="text-[13px] font-medium leading-6 text-[#e8eefb]">
+          <p className="text-[13px] font-medium leading-6 text-[var(--vs-text-primary)]">
             {item.summary}
           </p>
         </div>
         <div className="mt-0.5 flex shrink-0 items-center gap-1.5">
-          <span className="text-[11px] text-[#7f91b4]">{item.nodes.length}</span>
+          <span className="text-[11px] text-[var(--vs-text-secondary)]">{item.nodes.length}</span>
           {renderChevron(expanded)}
         </div>
       </button>
@@ -569,11 +569,11 @@ const AgentTimeline: React.FC<Props> = ({ block, isStreamingMessage }) => {
             onClick={() => setProcessExpanded(!processExpanded)}
             className="flex w-full items-center justify-between gap-3 rounded-lg px-2 py-1.5 text-left transition hover:bg-white/[0.03]"
           >
-            <div className="flex items-center gap-2 text-[12px] font-medium text-[#7384a3]">
+            <div className="flex items-center gap-2 text-[12px] font-medium text-[var(--vs-text-tertiary)]">
               {isRunning ? (
-                <Loader2 className="h-3.5 w-3.5 animate-spin text-[#5e6ad2]" />
+                <Loader2 className="h-3.5 w-3.5 animate-spin text-[var(--vs-accent)]" />
               ) : (
-                <Check className="h-3.5 w-3.5 text-[#2dd4bf]" />
+                <Check className="h-3.5 w-3.5 text-[var(--vs-success)]" />
               )}
               <span>{isRunning ? 'Working...' : 'Finished working'}</span>
             </div>
@@ -585,7 +585,7 @@ const AgentTimeline: React.FC<Props> = ({ block, isStreamingMessage }) => {
           {processExpanded && (
             <div
               ref={scrollRef}
-              className="mt-2 space-y-1 rounded-xl bg-[#0c0e15] border border-white/[0.04] px-2 py-3 max-h-[300px] overflow-y-auto custom-scrollbar shadow-inner"
+              className="mt-2 space-y-1 rounded-xl bg-[var(--vs-ink)] border border-white/[0.04] px-2 py-3 max-h-[300px] overflow-y-auto custom-scrollbar shadow-inner"
             >
               {accordionItems.map((item) => {
                 if (item.kind === 'thinking') {
@@ -593,8 +593,8 @@ const AgentTimeline: React.FC<Props> = ({ block, isStreamingMessage }) => {
                     <div key={item.id} className="relative py-2">
                       <div className="absolute left-[9px] top-3 bottom-2 w-px bg-[#313641]" />
                       <div className="relative pl-8">
-                        <div className="absolute left-[6px] top-[9px] z-10 h-[6px] w-[6px] rounded-full bg-[#5e6ad2]/50 ring-[3px] ring-[#0c0e15]" />
-                        <div className="whitespace-pre-wrap text-[13px] leading-6 text-[#b4c4de]">
+                        <div className="absolute left-[6px] top-[9px] z-10 h-[6px] w-[6px] rounded-full bg-[var(--vs-accent)]/60 ring-[3px] ring-[var(--vs-ink)]" />
+                        <div className="whitespace-pre-wrap text-[13px] leading-6 text-[var(--vs-text-secondary)]">
                           {item.text}
                         </div>
                       </div>

@@ -1,15 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react'
 import { useChatStore } from '../store/chatStore'
 import { getVsCodeApi } from '../lib/vscode'
-import {
-  ArrowUp,
-  ListChecks,
-  Paperclip,
-  Plus,
-  Sparkles,
-  Square,
-  Zap,
-} from 'lucide-react'
+import { ArrowUp, Plus, Sparkles, Square } from 'lucide-react'
 
 interface Props {
   disabled?: boolean
@@ -219,12 +211,9 @@ const InputArea: React.FC<Props> = ({
 
   return (
     <div
-      className={`composer-shell transition-all duration-200 ${isFocused ? 'ring-1 ring-[#8bd7ff]/20' : ''
-        }`}
+      className={`composer-shell ${isFocused ? 'composer-shell--focused' : ''}`}
     >
-      <div className="flex items-center px-4 pt-3 pb-0 text-[10px] font-semibold uppercase tracking-[0.18em]" />
-
-      <div className="px-4 pt-1">
+      <div className="px-4 pt-3">
         <textarea
           ref={textareaRef}
           value={message}
@@ -234,12 +223,12 @@ const InputArea: React.FC<Props> = ({
           onBlur={() => setIsFocused(false)}
           placeholder="Describe the task, files, constraints, and desired outcome."
           disabled={disabled}
-          className="min-h-[72px] w-full resize-none bg-transparent text-[15px] leading-7 text-[#f4f7ff] placeholder:text-[#6e7f9d] focus:outline-none disabled:cursor-not-allowed disabled:opacity-60 max-[360px]:min-h-[60px]"
+          className="min-h-[72px] w-full resize-none bg-transparent text-[15px] leading-7 text-[var(--vs-text-primary)] placeholder:text-[var(--vs-text-tertiary)] focus:outline-none disabled:cursor-not-allowed disabled:opacity-60 max-[360px]:min-h-[60px]"
           rows={1}
         />
       </div>
 
-      <div className="flex items-center justify-between gap-3 border-t border-white/6 px-4 pb-4 pt-3">
+      <div className="flex items-center justify-between gap-3 border-t border-[var(--vs-border-soft)] px-4 pb-4 pt-3">
         <div className="flex min-w-0 items-center gap-2">
           <div className="relative" ref={quickActionsRef}>
             <button
@@ -247,8 +236,8 @@ const InputArea: React.FC<Props> = ({
               onClick={() => setShowQuickActions((value) => !value)}
               disabled={disabled}
               className={`inline-flex h-8 w-8 items-center justify-center rounded-md border transition ${disabled
-                  ? 'cursor-not-allowed border-transparent bg-transparent text-[#454e5e]'
-                  : 'border-white/10 bg-white/[0.04] text-[#a4b4cb] hover:bg-white/[0.08] hover:text-white'
+                  ? 'cursor-not-allowed border-transparent bg-transparent text-[var(--vs-text-tertiary)]'
+                  : 'border-[var(--vs-border)] bg-white/[0.03] text-[var(--vs-text-secondary)] hover:bg-[var(--vs-accent-muted)] hover:text-[var(--vs-text-primary)]'
                 }`}
               title="Quick actions"
             >
@@ -260,58 +249,26 @@ const InputArea: React.FC<Props> = ({
                 <button
                   type="button"
                   disabled={disabled}
-                  className="popover-row disabled:cursor-not-allowed disabled:opacity-50"
-                >
-                  <Paperclip className="h-4 w-4 text-[#a4b4cb]" />
-                  <span>Add photos & files</span>
-                </button>
-
-                <button
-                  type="button"
-                  disabled={disabled}
                   onClick={() => onToggleIdeContext(!ideContextEnabled)}
                   className="popover-row justify-between disabled:cursor-not-allowed disabled:opacity-50"
                 >
                   <div className="flex items-center gap-3">
-                    <Sparkles className="h-4 w-4 text-[#b57cff]" />
+                    <Sparkles className="h-4 w-4 text-[var(--vs-accent)]" />
                     <span>Include IDE context</span>
                   </div>
                   <span
-                    className={`relative inline-flex h-6 w-11 items-center rounded-full transition ${ideContextEnabled ? 'bg-[#4bb5df]' : 'bg-white/15'
-                      }`}
+                    className={`toggle-track ${ideContextEnabled ? 'toggle-track--on' : ''}`}
                   >
                     <span
-                      className={`inline-block h-5 w-5 transform rounded-full bg-[#eef4ff] transition ${ideContextEnabled ? 'translate-x-5' : 'translate-x-1'
-                        }`}
+                      className={`toggle-thumb ${ideContextEnabled ? 'toggle-thumb--on' : 'toggle-thumb--off'}`}
                     />
                   </span>
-                </button>
-
-                <button
-                  type="button"
-                  disabled
-                  className="popover-row text-[#7f91b4]"
-                >
-                  <ListChecks className="h-4 w-4" />
-                  <span>Plan mode</span>
-                </button>
-
-                <button
-                  type="button"
-                  disabled
-                  className="popover-row justify-between text-[#7f91b4]"
-                >
-                  <div className="flex items-center gap-3">
-                    <Zap className="h-4 w-4" />
-                    <span>Speed</span>
-                  </div>
-                  <span className="text-lg leading-none">{'>'}</span>
                 </button>
               </div>
             )}
           </div>
 
-          <div className="min-w-0 text-[11px] text-[#7f91b4]">
+          <div className="min-w-0 text-[11px] text-[var(--vs-text-tertiary)]">
             <span>{disabled ? 'Streaming response' : 'Enter to send'}</span>
             <span className="mx-2 hidden text-white/15 min-[390px]:inline">
               |
@@ -329,11 +286,11 @@ const InputArea: React.FC<Props> = ({
             onMouseEnter={() => setIsHoveringStop(true)}
             onMouseLeave={() => setIsHoveringStop(false)}
             disabled={isSendDisabled}
-            className={`inline-flex shrink-0 items-center justify-center gap-2 rounded-lg px-3 py-1.5 text-sm font-medium transition ${isRunning
-                ? 'bg-[#2a1b24] text-[#f43f5e] border border-[#f43f5e]/20 hover:bg-[#381e28]'
+            className={`${isRunning
+                ? 'send-btn send-btn--stop'
                 : !trimmedMessage
-                  ? 'cursor-not-allowed bg-white/[0.03] text-[#5e697e]'
-                  : 'bg-[linear-gradient(180deg,#5e6ad2,#4b59c4)] text-white shadow-[0_2px_10px_rgba(75,89,196,0.2),inset_0_1px_0_rgba(255,255,255,0.15)] hover:bg-[linear-gradient(180deg,#6c79e8,#5a68d8)]'
+                  ? 'send-btn send-btn--disabled'
+                  : 'send-btn'
               }`}
             title={isRunning ? 'Stop the running operation' : 'Send message'}
           >

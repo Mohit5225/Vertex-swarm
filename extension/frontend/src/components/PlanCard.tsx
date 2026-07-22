@@ -1,29 +1,56 @@
 import React from 'react'
 import { FileText, Play } from 'lucide-react'
 import { getVsCodeApi } from '../lib/vscode'
+import { useChatStore } from '../store/chatStore'
 
 interface Props {
   status: 'generating' | 'ready' | 'executed'
 }
 
 const PlanCard: React.FC<Props> = ({ status }) => {
-  const isReady = status === 'ready';
-  const isPast = status === 'executed';
+  const isReady = status === 'ready'
+  const isPast = status === 'executed'
+  const {
+    isStreaming,
+    currentIdeContextEnabled,
+    addMessage,
+    beginAssistantMessage,
+    setStreaming,
+    setError,
+    setPlanReadyForMessageId,
+  } = useChatStore()
+
   const handleProceed = () => {
-    // Send a message to the extension to proceed
+    if (isStreaming) {
+      return
+    }
+
+    const tempId = `msg-${Date.now()}`
+    addMessage({
+      id: tempId,
+      type: 'user',
+      content: 'Proceed with the plan.',
+      timestamp: Date.now(),
+    })
+    beginAssistantMessage()
+    setError(null)
+    setStreaming(true)
+    setPlanReadyForMessageId(null)
+
     getVsCodeApi()?.postMessage({
       type: 'start-stream',
       payload: {
         message: 'Proceed with the plan.',
-        ideContextEnabled: true,
+        ideContextEnabled: currentIdeContextEnabled,
+        tempId,
       },
     })
   }
 
   return (
-    <div className="my-4 overflow-hidden rounded-xl border border-white/10 bg-[#1a1f2e] shadow-lg">
-      <div className="flex items-center gap-3 border-b border-white/10 bg-white/[0.02] px-4 py-3">
-        <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-blue-500/20 text-blue-400">
+    <div className="my-4 overflow-hidden rounded-xl border border-[var(--vs-border)] bg-[var(--vs-surface)] shadow-lg">
+      <div className="flex items-center gap-3 border-b border-[var(--vs-border-soft)] bg-white/[0.02] px-4 py-3">
+        <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-[var(--vs-accent-muted)] text-[var(--vs-accent)]">
           <FileText size={16} />
         </div>
         <div className="flex-1">
@@ -33,7 +60,7 @@ const PlanCard: React.FC<Props> = ({ status }) => {
           </p>
         </div>
         {!isReady && !isPast && (
-          <div className="h-4 w-4 animate-spin rounded-full border-2 border-blue-500 border-t-transparent" />
+          <div className="h-4 w-4 animate-spin rounded-full border-2 border-[var(--vs-accent)] border-t-transparent" />
         )}
       </div>
 
@@ -57,7 +84,8 @@ const PlanCard: React.FC<Props> = ({ status }) => {
             </button>
             <button
               onClick={handleProceed}
-              className="group flex items-center gap-2 rounded-lg bg-blue-600 px-4 py-2 text-sm font-medium text-white transition-all hover:bg-blue-500 active:scale-[0.98]"
+              disabled={isStreaming}
+              className="group primary-btn flex items-center gap-2 active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-50"
             >
               <Play size={14} className="transition-transform group-hover:scale-110" />
               Proceed

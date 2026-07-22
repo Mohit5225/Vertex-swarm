@@ -120,7 +120,7 @@ const TerminalToolCard: React.FC<Props> = ({
           <ChevronRight className="h-3.5 w-3.5" />
         </span>
 
-        <Terminal className="h-3.5 w-3.5 shrink-0 text-[#8b97b3]" />
+        <Terminal className="h-3.5 w-3.5 shrink-0 text-[var(--vs-text-tertiary)]" />
 
         <span className="terminal-tool-title-wrap min-w-0 flex-1">
           {payload.purpose ? (
@@ -145,7 +145,7 @@ const TerminalToolCard: React.FC<Props> = ({
 
         <span className="terminal-tool-meta">
           {isRunning ? (
-            <Loader2 className="h-3 w-3 animate-spin text-[#5e6ad2]" />
+            <Loader2 className="h-3 w-3 animate-spin text-[var(--vs-accent)]" />
           ) : null}
           {resolvedExitCode !== null ? (
             <span

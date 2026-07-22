@@ -38,7 +38,7 @@ const renderAssistantText = (content: string) => (
 )
 
 const THOUGHT_PANEL_CLASS =
-  'max-h-[min(42vh,14rem)] overflow-y-auto overscroll-contain rounded-md border border-white/[0.06] bg-black/20 px-3 py-2 text-[13px] leading-6 text-[#b4c4de] [scrollbar-width:thin] [scrollbar-color:rgba(143,163,196,0.45)_transparent]'
+  'max-h-[min(42vh,14rem)] overflow-y-auto overscroll-contain rounded-md border border-white/[0.06] bg-black/20 px-3 py-2 text-[13px] leading-6 text-[var(--vs-text-secondary)] [scrollbar-width:thin] [scrollbar-color:rgba(143,163,196,0.45)_transparent]'
 
 const WorkReceipt: React.FC<{
   label: string
@@ -54,11 +54,11 @@ const WorkReceipt: React.FC<{
       className="flex w-full items-center gap-2 rounded-md px-1 py-1 text-left transition hover:bg-white/[0.03]"
     >
       {isLive ? (
-        <Loader2 className="h-3 w-3 shrink-0 animate-spin text-[#5e6ad2]" />
+        <Loader2 className="h-3 w-3 shrink-0 animate-spin text-[var(--vs-accent)]" />
       ) : null}
-      <span className="text-[12px] font-medium text-[#7384a3]">{label}</span>
+      <span className="text-[12px] font-medium text-[var(--vs-text-tertiary)]">{label}</span>
       {children ? (
-        <span className="ml-auto inline-flex h-4 w-4 items-center justify-center text-[#6f81a1]">
+        <span className="ml-auto inline-flex h-4 w-4 items-center justify-center text-[var(--vs-text-tertiary)]">
           <ChevronDown className={`h-3.5 w-3.5 transition ${expanded ? 'rotate-180' : ''}`} />
         </span>
       ) : null}
@@ -134,21 +134,21 @@ const AgentTurnView: React.FC<Props> = ({
           className="flex w-full items-center gap-2 rounded-md px-1 py-1 text-left transition hover:bg-white/[0.03]"
         >
           {isWorking ? (
-            <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin text-[#5e6ad2]" />
+            <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin text-[var(--vs-accent)]" />
           ) : null}
-          <span className="text-[12px] font-medium text-[#7384a3]">{turnLabel}</span>
+          <span className="text-[12px] font-medium text-[var(--vs-text-tertiary)]">{turnLabel}</span>
           {rollup ? (
-            <span className="text-[11px] font-medium text-[#6f81a1]">{rollup}</span>
+            <span className="text-[11px] font-medium text-[var(--vs-text-tertiary)]">{rollup}</span>
           ) : null}
           <ChevronDown
-            className={`ml-auto h-3.5 w-3.5 shrink-0 text-[#6f81a1] transition ${traceExpanded ? 'rotate-180' : ''}`}
+            className={`ml-auto h-3.5 w-3.5 shrink-0 text-[var(--vs-text-tertiary)] transition ${traceExpanded ? 'rotate-180' : ''}`}
           />
         </button>
       ) : null}
 
       {isLive && !hasToolWork && !hasVisibleNarrative ? (
-        <div className="flex items-center gap-2 px-1 py-1 text-[12px] text-[#7384a3]">
-          <Loader2 className="h-3 w-3 shrink-0 animate-spin text-[#5e6ad2]" />
+        <div className="flex items-center gap-2 px-1 py-1 text-[12px] text-[var(--vs-text-tertiary)]">
+          <Loader2 className="h-3 w-3 shrink-0 animate-spin text-[var(--vs-accent)]" />
           <span>Working…</span>
         </div>
       ) : null}
@@ -163,8 +163,8 @@ const AgentTurnView: React.FC<Props> = ({
             <div
               key={segment.id}
               className={`break-words text-[15px] leading-7 ${segment.tone === 'code'
-                ? 'font-medium text-[#d9e6fb]'
-                : 'text-[#edf3ff]'
+                ? 'font-medium text-[var(--vs-text-primary)]'
+                : 'text-[var(--vs-text-primary)]'
                 }`}
             >
               {renderAssistantText(segment.text)}
@@ -243,7 +243,7 @@ const AgentTurnView: React.FC<Props> = ({
 
         if (segment.kind === 'context') {
           return (
-            <p key={segment.id} className="px-1 text-[12px] leading-5 text-[#7384a3]">
+            <p key={segment.id} className="px-1 text-[12px] leading-5 text-[var(--vs-text-tertiary)]">
               {segment.label}
             </p>
           )
@@ -294,7 +294,7 @@ const AgentTurnView: React.FC<Props> = ({
                 ? 'bg-[#f27d75]/10 text-[#ffbeb8]'
                 : segment.tone === 'warning'
                   ? 'bg-[#f1cb78]/10 text-[#f3d69a]'
-                  : 'bg-white/[0.03] text-[#9fb0cd]'
+                  : 'bg-white/[0.03] text-[var(--vs-text-secondary)]'
                 }`}
             >
               {segment.text}

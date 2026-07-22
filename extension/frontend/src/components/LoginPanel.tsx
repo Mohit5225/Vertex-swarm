@@ -20,16 +20,16 @@ const LoginPanel: React.FC = () => {
     <div className="flex h-full items-center justify-center px-4 py-6 md:px-5">
       <div className="w-full max-w-md">
         <p className="surface-label">Vertex Swarm</p>
-        <h1 className="mt-3 max-w-[18rem] text-[1.7rem] font-semibold leading-tight text-white">
+        <h1 className="mt-3 max-w-[18rem] text-[1.7rem] font-semibold leading-tight text-[var(--vs-text-primary)]">
           Sign in to open the agent.
         </h1>
-        <p className="mt-3 max-w-[24rem] text-sm leading-7 text-[#92a0bb]">
+        <p className="mt-3 max-w-[24rem] text-sm leading-7 text-[var(--vs-text-secondary)]">
           The session is stored locally in the extension. Vertex Swarm refreshes
           the backend JWT automatically while the Neon session is still valid.
         </p>
 
         {error && (
-          <div className="mt-5 border-l-2 border-[#f27d75] pl-3 text-sm leading-6 text-[#ffbeb8]">
+          <div className="mt-5 error-banner">
             {error}
           </div>
         )}
@@ -52,7 +52,7 @@ const LoginPanel: React.FC = () => {
           </button>
         </div>
 
-        <p className="mt-4 text-[12px] leading-6 text-[#7383a1]">
+        <p className="mt-4 text-[12px] leading-6 text-[var(--vs-text-tertiary)]">
           Stored locally / Browser account chooser / automatic JWT refresh
         </p>
       </div>

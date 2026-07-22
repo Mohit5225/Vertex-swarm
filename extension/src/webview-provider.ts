@@ -132,7 +132,7 @@ export class VertexSwarmSidebarProvider implements vscode.WebviewViewProvider {
       padding: 0 !important;
       border: 0;
       overflow: hidden;
-      background: transparent;
+      background: #030303;
     }
 
     body {
@@ -146,7 +146,7 @@ export class VertexSwarmSidebarProvider implements vscode.WebviewViewProvider {
   <link rel="stylesheet" href="${styleUri}" />
   <title>Vertex Swarm</title>
 </head>
-<body style="margin:0;padding:0;overflow:hidden;background:transparent;">
+<body style="margin:0;padding:0;overflow:hidden;background:#030303;">
   <script nonce="${nonce}">
     window.addEventListener('error', (event) => {
       try {

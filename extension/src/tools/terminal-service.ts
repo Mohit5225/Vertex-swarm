@@ -10,10 +10,21 @@ export interface TerminalContextState {
   lifecycleAction: string;
 }
 
+export interface JobCompletionEvent {
+  job_id: string;
+  chat_id: string;
+  exit_code: number | null;
+  job_status: JobStatus;
+  output_tail: string;
+  command: string;
+  status_message: string;
+}
+
 export interface TerminalActionResponse<T = Record<string, unknown>> {
-  status: 'success' | 'error' | 'timeout';
+  status: 'success' | 'error' | 'timeout' | 'verification_needed' | 'running' | 'cancelled';
   content: string;
   data?: T;
+  error_code?: string;
 }
 
 export interface TerminalActionPayload {
@@ -42,6 +53,10 @@ export interface TerminalActionPayload {
 }
 
 export class TerminalService {
+  private static readonly AWAIT_RESULT_WAIT_MS = 5000;
+  private static readonly OUTPUT_TAIL_MAX = 200;
+  private static readonly LONG_INTENT_VERIFY_MS = 2000;
+
   private readonly terminals = new Map<string, vscode.Terminal>();
   private readonly terminalContexts = new Map<string, TerminalContextState>();
   private readonly backgroundProcesses = new Map<number, cp.ChildProcess>();
@@ -49,12 +64,13 @@ export class TerminalService {
   
   // ANSI escape code regex
   private readonly ansiRegex = /\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~]|\][^\x07\x1B\r\n]*(?:[\x07\x1B\\]|$))/gm;
+  private readonly completionNotified = new Set<string>();
 
   constructor(
     private readonly context: vscode.ExtensionContext,
     private readonly log: (message: string) => void,
     private readonly postEvent: (event: SessionEvent) => void,
-    private readonly onBackgroundEvent?: (jobId: string, status: string, chatId: string) => void
+    private readonly onBackgroundEvent?: (event: JobCompletionEvent) => void
   ) {
     this.outputStore = new TerminalOutputStore(this.context);
     this.outputStore.initialize();
@@ -119,7 +135,102 @@ export class TerminalService {
       content: result.content,
       total_chars_buffered: result.total_chars_buffered,
       status: job?.job_status || 'unknown',
+      exit_code: job?.exit_code ?? null,
     };
+  }
+
+  async cancelJobsForChat(chatId: string): Promise<void> {
+    const runningJobs = this.outputStore
+      .getJobsForChat(chatId)
+      .filter((job) => job.job_status === 'running');
+
+    for (const job of runningJobs) {
+      this.killJobInternal(job);
+    }
+  }
+
+  private async getOutputTail(jobId: string): Promise<string> {
+    return this.outputStore.getOutputTail(jobId, TerminalService.OUTPUT_TAIL_MAX);
+  }
+
+  private async notifyJobCompletion(
+    jobId: string,
+    exitCode: number | null,
+    statusMessage: string,
+    jobStatus: JobStatus = 'completed',
+  ): Promise<void> {
+    if (this.completionNotified.has(jobId)) {
+      return;
+    }
+    this.completionNotified.add(jobId);
+
+    this.outputStore.completeJob(jobId, exitCode, jobStatus);
+    const job = this.outputStore.getJob(jobId);
+    if (!job?.chat_id || !this.onBackgroundEvent) {
+      return;
+    }
+
+    const outputTail = await this.getOutputTail(jobId);
+    this.onBackgroundEvent({
+      job_id: jobId,
+      chat_id: job.chat_id,
+      exit_code: exitCode,
+      job_status: jobStatus,
+      output_tail: outputTail,
+      command: job.command,
+      status_message: statusMessage,
+    });
+  }
+
+  private buildRunningResponse(
+    jobId: string,
+    command: string,
+    extra: Record<string, unknown> = {},
+  ): TerminalActionResponse {
+    return {
+      status: 'running',
+      content: `Command started and is still running: ${command}. Wait for system notification or poll get_output before claiming success.`,
+      data: {
+        job_id: jobId,
+        termination_reason: 'background',
+        ...extra,
+      },
+    };
+  }
+
+  private async buildFinishedAwaitResultResponse(
+    jobId: string,
+    command: string,
+    exitCode: number,
+  ): Promise<TerminalActionResponse> {
+    const outputTail = await this.getOutputTail(jobId);
+    if (exitCode === 0) {
+      return {
+        status: 'success',
+        content: outputTail || `Command completed successfully: ${command}`,
+        data: {
+          job_id: jobId,
+          exit_code: exitCode,
+          output_tail: outputTail,
+          termination_reason: 'exit',
+        },
+      };
+    }
+
+    return {
+      status: 'error',
+      content: outputTail || `Command failed (exit ${exitCode}): ${command}`,
+      data: {
+        job_id: jobId,
+        exit_code: exitCode,
+        output_tail: outputTail,
+        termination_reason: 'exit',
+      },
+    };
+  }
+
+  private isLongRunningIntent(intent: JobIntent): boolean {
+    return intent === 'verify_start' || intent === 'observe' || intent === 'background';
   }
 
   private async attachRunMetadata(
@@ -163,7 +274,7 @@ export class TerminalService {
     try {
       let result: any;
       if (action === 'run_command') {
-        result = await this.runCommand(payload, context);
+        result = await this.runCommand(payload, context, args.request_id);
       } else {
         switch (action) {
           case 'send_input':
@@ -218,6 +329,7 @@ export class TerminalService {
         status: result.status,
         content: result.content,
         data: result.data,
+        error_code: result.error_code,
         execution_time_ms: Date.now() - startTime,
       };
     } catch (error) {
@@ -234,7 +346,11 @@ export class TerminalService {
     }
   }
 
-  private async runCommand(payload: TerminalActionPayload, context: TerminalActionPayload): Promise<TerminalActionResponse> {
+  private async runCommand(
+    payload: TerminalActionPayload,
+    context: TerminalActionPayload,
+    requestId?: string,
+  ): Promise<TerminalActionResponse> {
     const command = payload.command as string;
     const cwd = payload.cwd;
     // Map deprecated 'mode' to new 'intent' and 'user_visible'
@@ -293,7 +409,8 @@ export class TerminalService {
       pid: null,
       terminal_name: terminalName,
       estimated_duration_seconds: estimated_duration,
-      chat_id: chatId
+      chat_id: chatId,
+      request_id: requestId,
     });
 
     const runMeta = {
@@ -443,7 +560,7 @@ export class TerminalService {
           const d = vscode.window.onDidEndTerminalShellExecution(event => {
             if (event.execution === execution) {
                d.dispose();
-               this.outputStore.updateJobStatus(jobId, 'completed');
+               const exitCode = event.exitCode ?? null;
                const ctx = this.terminalContexts.get(terminal.name);
                if (ctx) {
                  ctx.isBusy = false;
@@ -455,11 +572,11 @@ export class TerminalService {
                    }, 1000);
                  }
                }
-               
-               const job = this.outputStore.getJob(jobId);
-               if (job?.chat_id && this.onBackgroundEvent) {
-                 this.onBackgroundEvent(jobId, `completed with exit code ${event.exitCode}`, job.chat_id);
-               }
+               void this.notifyJobCompletion(
+                 jobId,
+                 exitCode,
+                 `completed with exit code ${exitCode}`,
+               );
                
                resolve(event.exitCode);
             }
@@ -467,31 +584,37 @@ export class TerminalService {
        });
     }
 
-    if (intent === 'verify_start' || intent === 'observe' || intent === 'background') {
-       // Wait 2s to check for immediate crash
-       const windowPromise = new Promise<number | undefined>(resolve => setTimeout(() => resolve(undefined), 2000));
+    if (execution) {
+      const ctx = this.terminalContexts.get(terminal.name);
+      if (ctx) {
+        ctx.isBusy = true;
+      }
+    }
+
+    if (this.isLongRunningIntent(intent)) {
+       const windowPromise = new Promise<number | undefined>(resolve =>
+         setTimeout(() => resolve(undefined), TerminalService.LONG_INTENT_VERIFY_MS));
        const earlyExit = await Promise.race([exitCodePromise, windowPromise]);
        
        if (earlyExit !== undefined && earlyExit !== 0) {
-         this.outputStore.updateJobStatus(jobId, 'completed');
          return {
            status: 'error',
            content: `Command failed immediately (exit ${earlyExit}): ${command}`,
            data: { job_id: jobId, exit_code: earlyExit, termination_reason: 'exit' }
          };
        }
-       return {
-         status: 'success',
-         content: `Command started and passed verify window: ${command}`,
-         data: { job_id: jobId, exit_code: 0, termination_reason: 'background' }
-       };
+       if (earlyExit === 0) {
+         return await this.buildFinishedAwaitResultResponse(jobId, command, 0);
+       }
+       return this.buildRunningResponse(jobId, command);
     }
 
-    // Default await_result behaviour (no blocking wait anymore, handled by get_output polling)
+    // await_result via visible shell: dispatch only — outcome unknown until get_output.
     return {
-       status: 'success',
-       content: `Command dispatched to terminal: ${command}`,
-       data: { job_id: jobId, exit_code: 0, termination_reason: 'dispatched' }
+       status: 'verification_needed',
+       content: `Command dispatched. Verification required — call get_output with job_id "${jobId}" before claiming success or failure.`,
+       error_code: 'verification_needed',
+       data: { job_id: jobId, termination_reason: 'dispatched' }
     };
   }
 
@@ -530,30 +653,29 @@ export class TerminalService {
       this.outputStore.appendOutput(jobId, stripped);
     });
     
-    let earlyExitCode: number | undefined;
     const exitPromise = new Promise<number>((resolve) => {
        proc.on('close', (code) => {
-         earlyExitCode = code ?? undefined;
-         this.outputStore.updateJobStatus(jobId, 'completed');
-         const job = this.outputStore.getJob(jobId);
-         if (job?.chat_id && this.onBackgroundEvent) {
-           this.onBackgroundEvent(jobId, `completed with exit code ${code ?? 0}`, job.chat_id);
-         }
+         void this.notifyJobCompletion(
+           jobId,
+           code ?? null,
+           `completed with exit code ${code ?? 0}`,
+         );
          resolve(code ?? 0);
        });
        proc.on('error', (err) => {
-         earlyExitCode = -1;
-         this.outputStore.updateJobStatus(jobId, 'completed');
-         const job = this.outputStore.getJob(jobId);
-         if (job?.chat_id && this.onBackgroundEvent) {
-           this.onBackgroundEvent(jobId, `failed with error ${err.message}`, job.chat_id);
-         }
+         void this.notifyJobCompletion(
+           jobId,
+           -1,
+           `failed with error ${err.message}`,
+           'completed',
+         );
          resolve(-1);
        });
     });
 
-    if (intent === 'verify_start' || intent === 'observe' || intent === 'background') {
-       const windowPromise = new Promise<number | undefined>(resolve => setTimeout(() => resolve(undefined), 2000));
+    if (this.isLongRunningIntent(intent)) {
+       const windowPromise = new Promise<number | undefined>(resolve =>
+         setTimeout(() => resolve(undefined), TerminalService.LONG_INTENT_VERIFY_MS));
        const earlyExit = await Promise.race([exitPromise, windowPromise]);
        
        if (earlyExit !== undefined && earlyExit !== 0) {
@@ -563,17 +685,25 @@ export class TerminalService {
            data: { job_id: jobId, exit_code: earlyExit, pid: proc.pid, termination_reason: 'exit' }
          };
        }
-       return {
-         status: 'success',
-         content: `Background process started with PID ${proc.pid}`,
-         data: { job_id: jobId, exit_code: 0, pid: proc.pid, termination_reason: 'background' }
-       };
+       if (earlyExit === 0) {
+         return await this.buildFinishedAwaitResultResponse(jobId, command, 0);
+       }
+       return this.buildRunningResponse(jobId, command, { pid: proc.pid });
+    }
+
+    const waitPromise = new Promise<number | undefined>((resolve) =>
+      setTimeout(() => resolve(undefined), TerminalService.AWAIT_RESULT_WAIT_MS));
+    const finishedExit = await Promise.race([exitPromise, waitPromise]);
+
+    if (finishedExit !== undefined) {
+      return await this.buildFinishedAwaitResultResponse(jobId, command, finishedExit);
     }
 
     return {
-       status: 'success',
-       content: `Background process dispatched with PID ${proc.pid}`,
-       data: { job_id: jobId, exit_code: 0, pid: proc.pid, termination_reason: 'dispatched' }
+       status: 'verification_needed',
+       content: `Command dispatched. Verification required — call get_output with job_id "${jobId}" before claiming success or failure.`,
+       error_code: 'verification_needed',
+       data: { job_id: jobId, pid: proc.pid, termination_reason: 'dispatched' }
     };
   }
 
@@ -611,15 +741,13 @@ export class TerminalService {
          this.backgroundProcesses.delete(job.pid);
        }
      } else if (job.terminal_name) {
-       // Wait, killing user visible job? Usually means sending Ctrl+C or disposing terminal.
-       // For now, dispose terminal to kill processes inside.
        const t = this.terminals.get(job.terminal_name);
        if (t) {
          t.dispose();
          this.terminals.delete(job.terminal_name);
        }
      }
-     this.outputStore.updateJobStatus(job.job_id, 'killed');
+     this.outputStore.completeJob(job.job_id, null, 'killed');
   }
 
   // --- Action Implementations ---
@@ -692,20 +820,34 @@ export class TerminalService {
   }
 
   private async getOutput(payload: TerminalActionPayload): Promise<TerminalActionResponse> {
-    const jobId = (payload.job_id || payload.tool_call_id || payload.execution_id) as string;
-    if (!jobId) {
+    const lookupId = (payload.job_id || payload.tool_call_id || payload.execution_id) as string;
+    if (!lookupId) {
       return { status: 'error', content: 'job_id is required' };
     }
-    
+
+    const job = this.outputStore.findJob(lookupId);
+    if (!job) {
+      const activeJobs = this.outputStore.getAllJobs();
+      const hint = activeJobs.length > 0
+        ? 'Call list_jobs or get_state to see active jobs and their job_id values.'
+        : 'No jobs are registered — run_command may not have started, or the extension restarted.';
+      return {
+        status: 'error',
+        content: (
+          `Job ${lookupId} not found. For get_output, use job_id from the prior run_command result `
+          + `(data.job_id) — not request_id. ${hint}`
+        ),
+      };
+    }
+
+    const jobId = job.job_id;
     const offset = payload.offset || 0;
     const maxChars = payload.max_chars || 2000;
-    
+
     const result = await this.outputStore.getOutput(jobId, offset, maxChars);
-    const job = this.outputStore.getJob(jobId);
     
     let waitingForInput = false;
-    if (job && job.job_status === 'running') {
-       // Interactive heuristic: silence > 2s + ends with common prompt char
+    if (job.job_status === 'running') {
        const silence = Date.now() - job.last_output_at;
        if (silence > 2000) {
           const trimmed = result.content.trimEnd();
@@ -714,18 +856,43 @@ export class TerminalService {
           }
        }
     }
-    
-    return { 
-       status: 'success', 
-       content: result.content,
-       data: {
-          job_id: jobId,
-          status: job?.job_status || 'unknown',
-          total_chars_buffered: result.total_chars_buffered,
-          output: result.content,
-          output_tail: result.content,
-          waiting_for_input: waitingForInput
-       }
+
+    const baseData: Record<string, unknown> = {
+      job_id: jobId,
+      job_status: job.job_status,
+      exit_code: job.exit_code,
+      total_chars_buffered: result.total_chars_buffered,
+      output: result.content,
+      output_tail: result.content,
+      waiting_for_input: waitingForInput,
+    };
+    if (lookupId !== jobId && job.request_id === lookupId) {
+      baseData.resolved_via_request_id = lookupId;
+    }
+
+    if (job.job_status === 'killed') {
+      return {
+        status: 'cancelled',
+        content: result.content || `Job ${jobId} was cancelled.`,
+        error_code: 'cancelled',
+        data: baseData,
+      };
+    }
+
+    if (job.job_status === 'running') {
+      return {
+        status: 'running',
+        content: result.content || 'Job is still running.',
+        data: baseData,
+      };
+    }
+
+    const exitCode = job.exit_code ?? 0;
+    const toolStatus = exitCode === 0 ? 'success' : 'error';
+    return {
+      status: toolStatus,
+      content: result.content,
+      data: baseData,
     };
   }
   

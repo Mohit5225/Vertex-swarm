@@ -29,11 +29,11 @@ const VertexLogo: React.FC<VertexLogoProps> = ({
             x2="22"
             y2="22"
           >
-            <stop offset="0%" stopColor="#8a8268" stopOpacity="0.55" />
-            <stop offset="38%" stopColor="#c9bf9f" />
-            <stop offset="50%" stopColor="#fff9e8" />
-            <stop offset="62%" stopColor="#c9bf9f" />
-            <stop offset="100%" stopColor="#8a8268" stopOpacity="0.55" />
+            <stop offset="0%" stopColor="#8a7340" stopOpacity="0.55" />
+            <stop offset="38%" stopColor="#c9a962" />
+            <stop offset="50%" stopColor="#f0e0b8" />
+            <stop offset="62%" stopColor="#c9a962" />
+            <stop offset="100%" stopColor="#8a7340" stopOpacity="0.55" />
             <animate
               attributeName="x1"
               values="-8;28;-8"
@@ -63,7 +63,7 @@ const VertexLogo: React.FC<VertexLogoProps> = ({
       ) : null}
       <polygon
         points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"
-        stroke={animated ? `url(#${gradientId})` : '#d8cdb0'}
+        stroke={animated ? `url(#${gradientId})` : '#c9a962'}
         strokeWidth="1.5"
         strokeLinecap="round"
         strokeLinejoin="round"

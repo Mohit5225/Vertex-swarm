@@ -5,17 +5,24 @@
 @layer base {
   :root {
     color-scheme: dark;
-    --vs-shell-top: #171e2e;
-    --vs-shell-bottom: #0a0e16;
-    --vs-surface: rgba(15, 20, 33, 0.92);
-    --vs-surface-strong: rgba(8, 12, 20, 0.96);
-    --vs-surface-soft: rgba(255, 255, 255, 0.035);
-    --vs-border: rgba(255, 255, 255, 0.075);
-    --vs-border-soft: rgba(255, 255, 255, 0.04);
-    --vs-text-primary: #f4f7ff;
-    --vs-text-secondary: #99a8c5;
-    --vs-text-tertiary: #71819f;
-    --vs-accent: #8bd7ff;
+    --vs-void: #030303;
+    --vs-ink: #080808;
+    --vs-surface: #0c0c0c;
+    --vs-raised: #111111;
+    --vs-edge-light: rgba(212, 175, 96, 0.11);
+    --vs-border: rgba(212, 175, 96, 0.14);
+    --vs-border-soft: rgba(255, 255, 255, 0.05);
+    --vs-text-primary: #f5f0e6;
+    --vs-text-secondary: #a39e94;
+    --vs-text-tertiary: #6b6760;
+    --vs-accent: #c9a962;
+    --vs-accent-bright: #e8d5a3;
+    --vs-accent-muted: rgba(201, 169, 98, 0.1);
+    --vs-accent-glow: rgba(201, 169, 98, 0.3);
+    --vs-danger: #c4786a;
+    --vs-danger-muted: rgba(196, 120, 106, 0.14);
+    --vs-success: #7dba9a;
+    --vs-warning: #d4b87a;
   }
 
   * {
@@ -25,8 +32,9 @@
   html,
   body,
   #root {
-    @apply m-0 h-full w-full p-0 text-vs-fg;
-    background: #090a0f;
+    @apply m-0 h-full w-full p-0;
+    color: var(--vs-text-primary);
+    background: var(--vs-void);
   }
 
   body {
@@ -48,39 +56,57 @@
 
   ::-webkit-scrollbar-thumb {
     @apply rounded-full;
-    background: rgba(141, 163, 203, 0.35);
+    background: rgba(201, 184, 150, 0.28);
   }
 
   ::-webkit-scrollbar-thumb:hover {
-    background: rgba(141, 163, 203, 0.55);
+    background: rgba(201, 184, 150, 0.42);
   }
 }
 
 @layer components {
   .app-shell {
-    @apply relative h-full w-full overflow-hidden text-vs-fg;
-    background: radial-gradient(circle at top, rgba(94, 106, 210, 0.05), transparent 60%), #090a0f;
+    @apply relative h-full w-full overflow-hidden;
+    color: var(--vs-text-primary);
+    background:
+      radial-gradient(ellipse 100% 45% at 50% -15%, rgba(201, 169, 98, 0.08), transparent 55%),
+      var(--vs-void);
   }
 
   .panel-surface {
     @apply rounded-[22px] border backdrop-blur-xl;
-    border-color: rgba(255, 255, 255, 0.06);
-    background: rgba(12, 19, 35, 0.78);
+    border-color: var(--vs-border);
+    background: color-mix(in srgb, var(--vs-raised) 88%, transparent);
     box-shadow:
-      0 18px 56px rgba(0, 0, 0, 0.32),
-      inset 0 1px 0 rgba(255, 255, 255, 0.04);
+      0 18px 56px rgba(0, 0, 0, 0.4),
+      inset 0 1px 0 var(--vs-edge-light);
   }
 
   .composer-shell {
-    @apply rounded-[16px] border;
-    border-color: rgba(255, 255, 255, 0.06);
-    background: rgba(18, 20, 28, 0.85);
+    @apply rounded-[16px] border transition-all duration-200;
+    border-color: var(--vs-border);
+    background: color-mix(in srgb, var(--vs-surface) 92%, transparent);
     backdrop-filter: blur(12px);
-    box-shadow: 0 -10px 40px rgba(0, 0, 0, 0.3);
+    box-shadow:
+      0 -8px 32px rgba(0, 0, 0, 0.28),
+      inset 0 1px 0 var(--vs-edge-light);
+  }
+
+  .composer-shell--focused {
+    border-color: var(--vs-accent-glow);
+    box-shadow:
+      0 -8px 32px rgba(0, 0, 0, 0.28),
+      0 0 0 1px var(--vs-accent-glow),
+      inset 0 1px 0 var(--vs-edge-light);
   }
 
   .popover-panel {
-    @apply overflow-hidden rounded-xl border border-white/10 bg-[#12141c]/95 shadow-[0_12px_40px_rgba(0,0,0,0.4)] backdrop-blur-md;
+    @apply overflow-hidden rounded-xl border backdrop-blur-md;
+    border-color: var(--vs-border);
+    background: color-mix(in srgb, var(--vs-raised) 95%, transparent);
+    box-shadow:
+      0 20px 50px rgba(0, 0, 0, 0.45),
+      inset 0 1px 0 var(--vs-edge-light);
   }
 
   .popover-panel-padded {
@@ -92,23 +118,26 @@
   }
 
   .popover-eyebrow {
-    @apply text-[10px] font-semibold uppercase tracking-[0.18em] text-[#6e7f9d];
+    @apply text-[10px] font-semibold uppercase tracking-[0.16em];
+    color: var(--vs-text-tertiary);
   }
 
   .popover-title {
-    @apply text-[15px] font-medium text-[#e6ecfa];
+    @apply text-[15px] font-medium;
+    color: var(--vs-text-primary);
   }
 
   .popover-divider {
-    @apply border-t border-white/[0.06];
+    border-top: 1px solid var(--vs-border-soft);
   }
 
   .popover-row {
-    @apply flex w-full items-center gap-3 rounded-lg px-3 py-2.5 text-left text-[15px] text-[#e6ecfa] transition;
+    @apply flex w-full items-center gap-3 rounded-lg px-3 py-2.5 text-left text-[15px] transition;
+    color: var(--vs-text-primary);
   }
 
   .popover-row:hover:not(:disabled) {
-    @apply bg-white/[0.06];
+    background: var(--vs-accent-muted);
   }
 
   .popover-row:disabled {
@@ -116,7 +145,10 @@
   }
 
   .popover-row-icon {
-    @apply flex h-8 w-8 shrink-0 items-center justify-center rounded-md border border-white/10 bg-white/[0.04] text-[#a4b4cb];
+    @apply flex h-8 w-8 shrink-0 items-center justify-center rounded-md border;
+    border-color: var(--vs-border);
+    background: rgba(255, 255, 255, 0.03);
+    color: var(--vs-text-secondary);
   }
 
   .popover-row-copy {
@@ -124,11 +156,13 @@
   }
 
   .popover-row-title {
-    @apply block text-[15px] text-[#e6ecfa];
+    @apply block text-[15px];
+    color: var(--vs-text-primary);
   }
 
   .popover-row-subtitle {
-    @apply mt-0.5 block text-[12px] leading-5 text-[#7f91b4];
+    @apply mt-0.5 block text-[12px] leading-5;
+    color: var(--vs-text-secondary);
   }
 
   .popover-section {
@@ -136,7 +170,8 @@
   }
 
   .popover-section-label {
-    @apply text-[12px] text-[#7f91b4];
+    @apply text-[12px];
+    color: var(--vs-text-secondary);
   }
 
   .popover-list {
@@ -148,11 +183,12 @@
   }
 
   .popover-list-item:hover:not(:disabled) {
-    @apply bg-white/[0.06];
+    background: var(--vs-accent-muted);
   }
 
   .popover-list-item--active {
-    @apply bg-white/[0.06];
+    background: var(--vs-accent-muted);
+    box-shadow: inset 2px 0 0 var(--vs-accent);
   }
 
   .popover-list-item:disabled {
@@ -169,57 +205,141 @@
 
   .user-bubble {
     @apply rounded-[14px] px-4 py-3;
-    background: linear-gradient(180deg, #161923, #12141c);
-    border: 1px solid rgba(255, 255, 255, 0.06);
-    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+    background: linear-gradient(180deg, var(--vs-raised), var(--vs-surface));
+    border: 1px solid var(--vs-border-soft);
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.2);
   }
 
   .surface-label {
-    @apply text-[11px] font-medium uppercase tracking-[0.22em] text-[#8da3cb];
+    @apply text-[11px] font-medium uppercase tracking-[0.18em];
+    color: var(--vs-text-tertiary);
   }
 
   .status-chip {
-    @apply inline-flex items-center rounded-full px-3 py-1 text-[11px] font-medium text-[#dce6fb];
-    background: rgba(255, 255, 255, 0.05);
+    @apply inline-flex items-center rounded-full px-3 py-1 text-[11px] font-medium;
+    color: var(--vs-text-secondary);
+    background: rgba(255, 255, 255, 0.04);
   }
 
   .ghost-btn {
-    @apply inline-flex items-center justify-center rounded-xl px-4 py-2 text-sm font-medium text-[#dbe5f8] transition;
-    background: rgba(255, 255, 255, 0.05);
+    @apply inline-flex items-center justify-center rounded-xl px-4 py-2 text-sm font-medium transition;
+    color: var(--vs-text-primary);
+    background: rgba(255, 255, 255, 0.04);
+    border: 1px solid var(--vs-border-soft);
   }
 
   .ghost-btn:hover {
-    background: rgba(255, 255, 255, 0.09);
+    background: var(--vs-accent-muted);
+    border-color: var(--vs-border);
   }
 
   .icon-btn {
-    @apply inline-flex h-8 w-8 items-center justify-center rounded-lg bg-transparent text-[#dbe5f8] transition disabled:cursor-not-allowed disabled:opacity-40;
+    @apply inline-flex h-8 w-8 items-center justify-center rounded-lg bg-transparent transition disabled:cursor-not-allowed disabled:opacity-40;
+    color: var(--vs-text-secondary);
   }
 
   .icon-btn:hover {
-    @apply bg-white/[0.08];
+    background: var(--vs-accent-muted);
+    color: var(--vs-text-primary);
   }
 
   .primary-btn {
     @apply inline-flex items-center justify-center rounded-lg px-3 py-1.5 text-sm font-medium transition;
-    background: linear-gradient(180deg, #5e6ad2, #4b59c4);
-    color: #ffffff;
-    box-shadow: 0 2px 10px rgba(75, 89, 196, 0.2), inset 0 1px 0 rgba(255, 255, 255, 0.15);
+    background: linear-gradient(180deg, #e8d5a3, #a88432);
+    color: #0a0908;
+    box-shadow:
+      0 2px 12px rgba(0, 0, 0, 0.45),
+      0 0 20px rgba(201, 169, 98, 0.12),
+      inset 0 1px 0 rgba(255, 255, 255, 0.28);
   }
 
   .primary-btn:hover {
-    background: linear-gradient(180deg, #6c79e8, #5a68d8);
-    box-shadow: 0 4px 14px rgba(75, 89, 196, 0.3), inset 0 1px 0 rgba(255, 255, 255, 0.2);
+    background: linear-gradient(180deg, #f0e0b8, #c9a962);
+    box-shadow:
+      0 4px 16px rgba(0, 0, 0, 0.5),
+      0 0 24px rgba(201, 169, 98, 0.18),
+      inset 0 1px 0 rgba(255, 255, 255, 0.32);
   }
 
-  .empty-orb {
-    @apply flex h-28 w-28 items-center justify-center rounded-[32px] border border-[#f1efda]/20;
-    background:
-      radial-gradient(circle at top, rgba(243, 240, 221, 0.22), transparent 55%),
-      linear-gradient(180deg, rgba(14, 20, 38, 0.98), rgba(8, 12, 20, 0.98));
+  .send-btn {
+    @apply inline-flex shrink-0 items-center justify-center gap-2 rounded-lg px-3 py-1.5 text-sm font-medium transition;
+    background: linear-gradient(180deg, #e8d5a3, #a88432);
+    color: #0a0908;
     box-shadow:
-      0 22px 60px rgba(0, 0, 0, 0.35),
-      inset 0 1px 0 rgba(255, 255, 255, 0.06);
+      0 2px 12px rgba(0, 0, 0, 0.45),
+      0 0 20px rgba(201, 169, 98, 0.12),
+      inset 0 1px 0 rgba(255, 255, 255, 0.28);
+  }
+
+  .send-btn:hover {
+    background: linear-gradient(180deg, #f0e0b8, #c9a962);
+  }
+
+  .send-btn--disabled {
+    @apply cursor-not-allowed;
+    background: rgba(255, 255, 255, 0.03);
+    color: var(--vs-text-tertiary);
+    box-shadow: none;
+  }
+
+  .send-btn--stop {
+    color: var(--vs-danger);
+    background: var(--vs-danger-muted);
+    border: 1px solid rgba(196, 120, 106, 0.22);
+    box-shadow: none;
+  }
+
+  .send-btn--stop:hover {
+    background: rgba(196, 120, 106, 0.22);
+  }
+
+  .starter-chip {
+    @apply rounded-lg border px-3 py-2 text-[13px] transition;
+    border-color: var(--vs-border);
+    background: rgba(255, 255, 255, 0.03);
+    color: var(--vs-text-primary);
+  }
+
+  .starter-chip:hover {
+    background: var(--vs-accent-muted);
+    border-color: var(--vs-accent-glow);
+  }
+
+  .form-input {
+    @apply rounded-lg px-3 py-2 text-[15px] focus:outline-none transition;
+    color: var(--vs-text-primary);
+    background: var(--vs-ink);
+    border: 1px solid var(--vs-border);
+  }
+
+  .form-input:focus {
+    border-color: var(--vs-accent-glow);
+    box-shadow: 0 0 0 1px var(--vs-accent-glow);
+  }
+
+  .form-label {
+    @apply text-sm;
+    color: var(--vs-text-secondary);
+  }
+
+  .danger-text {
+    color: var(--vs-danger);
+  }
+
+  .danger-btn {
+    @apply rounded-lg px-3 py-2 text-[15px] font-medium transition;
+    color: var(--vs-danger);
+    background: var(--vs-danger-muted);
+  }
+
+  .danger-btn:hover {
+    background: rgba(196, 120, 106, 0.22);
+  }
+
+  .error-banner {
+    @apply border-l-2 pl-3 text-sm leading-6;
+    border-color: var(--vs-danger);
+    color: #ddb8b0;
   }
 
   .trace-item {
@@ -229,17 +349,19 @@
 
   .trace-panel {
     @apply ml-4 border-l pl-4;
-    border-left-color: rgba(255, 255, 255, 0.08);
+    border-left-color: var(--vs-border);
   }
 
   .message-streaming {
-    @apply w-full min-w-0 whitespace-pre-wrap text-sm leading-7 text-[#e8eefb];
+    @apply w-full min-w-0 whitespace-pre-wrap text-sm leading-7;
+    color: var(--vs-text-primary);
     overflow-wrap: anywhere;
     word-break: normal;
   }
 
   .message-markdown {
-    @apply w-full min-w-0 max-w-none text-sm leading-7 text-[#e8eefb];
+    @apply w-full min-w-0 max-w-none text-sm leading-7;
+    color: var(--vs-text-primary);
     overflow-wrap: anywhere;
     word-break: normal;
   }
@@ -267,11 +389,14 @@
 
   .message-markdown th,
   .message-markdown td {
-    @apply border px-3 py-2 border-white/10;
+    border: 1px solid var(--vs-border);
+    @apply px-3 py-2;
   }
 
   .message-markdown th {
-    @apply bg-white/[0.04] font-semibold text-[#f4f7ff];
+    @apply font-semibold;
+    background: rgba(255, 255, 255, 0.03);
+    color: var(--vs-text-primary);
   }
 
   .message-markdown tr {
@@ -294,7 +419,8 @@
   .message-markdown h4,
   .message-markdown h5,
   .message-markdown h6 {
-    @apply font-semibold mt-6 mb-3 text-white;
+    @apply font-semibold mt-6 mb-3;
+    color: var(--vs-text-primary);
     line-height: 1.25;
   }
 
@@ -304,11 +430,13 @@
   .message-markdown h4 { @apply text-base; }
 
   .message-markdown strong {
-    @apply font-semibold text-white;
+    @apply font-semibold;
+    color: var(--vs-text-primary);
   }
 
   .message-markdown hr {
-    @apply my-5 border-white/10;
+    @apply my-5;
+    border-color: var(--vs-border-soft);
   }
 
   .message-markdown ul {
@@ -324,14 +452,15 @@
   }
 
   .message-markdown code {
-    @apply rounded-md px-1.5 py-0.5 text-[0.92em] text-[#f4f7ff];
+    @apply rounded-md px-1.5 py-0.5 text-[0.92em];
+    color: var(--vs-accent-bright);
     background: rgba(255, 255, 255, 0.05);
   }
 
   .message-markdown pre {
     @apply overflow-x-auto rounded-[16px] p-3;
-    background: rgba(255, 255, 255, 0.035);
-    border: 1px solid rgba(255, 255, 255, 0.03);
+    background: rgba(255, 255, 255, 0.03);
+    border: 1px solid var(--vs-border-soft);
   }
 
   .message-markdown pre code {
@@ -339,25 +468,28 @@
   }
 
   .message-markdown blockquote {
-    @apply border-l border-white/10 pl-4 text-[#b4c0d8];
+    @apply border-l pl-4;
+    border-color: var(--vs-border);
+    color: var(--vs-text-secondary);
   }
 
   .message-markdown a {
-    @apply text-[#8bd7ff] underline transition;
+    @apply underline transition;
+    color: var(--vs-accent);
     text-decoration-color: transparent;
   }
 
   .message-markdown a:hover {
-    @apply decoration-[#8bd7ff];
+    text-decoration-color: var(--vs-accent);
   }
 
   .chat-divider {
-    border-color: rgba(255, 255, 255, 0.06);
+    border-color: var(--vs-border-soft);
   }
 
   .loading-screen {
     @apply flex h-full w-full items-center justify-center;
-    background: #090a0f;
+    background: var(--vs-void);
   }
 
   .loading-logo {
@@ -365,47 +497,93 @@
     overflow: visible;
   }
 
+  .provider-card {
+    @apply mx-1.5 mt-1.5 rounded-lg px-3 py-2.5;
+    background: rgba(255, 255, 255, 0.02);
+    border: 1px solid var(--vs-border);
+  }
+
+  .provider-card-host {
+    @apply truncate text-[14px] font-medium;
+    color: var(--vs-text-primary);
+  }
+
+  .provider-card-model {
+    @apply mt-0.5 truncate text-[12px];
+    color: var(--vs-text-secondary);
+  }
+
+  .retention-chips {
+    @apply mt-2 flex flex-wrap gap-1.5;
+  }
+
+  .retention-chip {
+    @apply min-w-[2.25rem] rounded-md px-2 py-1.5 text-center text-[12px] font-medium transition;
+    color: var(--vs-text-secondary);
+    background: rgba(255, 255, 255, 0.03);
+    border: 1px solid var(--vs-border-soft);
+  }
+
+  .retention-chip:hover {
+    background: var(--vs-accent-muted);
+    border-color: var(--vs-border);
+    color: var(--vs-text-primary);
+  }
+
+  .retention-chip--active {
+    color: #0a0908;
+    background: linear-gradient(180deg, #e8d5a3, #a88432);
+    border-color: transparent;
+    box-shadow:
+      0 0 12px rgba(201, 169, 98, 0.2),
+      inset 0 1px 0 rgba(255, 255, 255, 0.25);
+  }
+
+  .confirm-overlay {
+    @apply fixed inset-0 z-50 flex items-center justify-center px-4 backdrop-blur-sm;
+    background: rgba(0, 0, 0, 0.88);
+  }
+
+  .confirm-dialog {
+    @apply w-full max-w-sm overflow-hidden rounded-xl border;
+    border-color: var(--vs-border);
+    background: var(--vs-raised);
+    box-shadow:
+      0 24px 60px rgba(0, 0, 0, 0.5),
+      inset 0 1px 0 var(--vs-edge-light);
+  }
+
   .session-panel {
     @apply popover-panel popover-panel-padded absolute right-2 top-2 z-20 w-[min(18rem,calc(100vw-1rem))];
   }
 
-  .session-status {
-    @apply inline-flex items-center gap-1.5 rounded-md px-2 py-0.5 text-[11px] font-medium text-[#7f91b4];
-    background: rgba(255, 255, 255, 0.04);
+  .toggle-track {
+    @apply relative inline-flex h-6 w-11 items-center rounded-full transition;
+    background: rgba(255, 255, 255, 0.12);
   }
 
-  .session-status--running {
-    @apply text-[#f8dfae];
-    background: rgba(245, 201, 117, 0.1);
+  .toggle-track--on {
+    background: var(--vs-accent);
   }
 
-  .session-status--ready {
-    @apply text-[#b8f0cb];
-    background: rgba(125, 222, 160, 0.1);
+  .toggle-thumb {
+    @apply inline-block h-5 w-5 transform rounded-full transition;
+    background: var(--vs-text-primary);
   }
 
-  .session-status-dot {
-    @apply h-1.5 w-1.5 rounded-full bg-[#f5c975];
-    animation: sessionPulse 1.4s ease-in-out infinite;
+  .toggle-thumb--on {
+    transform: translateX(1.25rem);
   }
 
-  .session-retention-slider {
-    @apply mt-2 h-1 w-full cursor-pointer appearance-none rounded-full bg-white/10;
-  }
-
-  .session-retention-slider::-webkit-slider-thumb {
-    @apply h-3 w-3 appearance-none rounded-full bg-[#4bb5df];
-  }
-
-  .session-retention-scale {
-    @apply mt-1.5 flex justify-between text-[10px] text-[#6e7f9d];
+  .toggle-thumb--off {
+    transform: translateX(0.25rem);
   }
 
   .terminal-tool-card {
     @apply my-1 overflow-hidden rounded-xl border;
-    border-color: rgba(255, 255, 255, 0.08);
-    background: rgba(10, 12, 18, 0.92);
-    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.02);
+    border-color: var(--vs-border);
+    background: color-mix(in srgb, var(--vs-ink) 95%, transparent);
+    box-shadow: inset 0 1px 0 var(--vs-edge-light);
   }
 
   .terminal-tool-header {
@@ -413,11 +591,12 @@
   }
 
   .terminal-tool-header:hover {
-    background: rgba(255, 255, 255, 0.025);
+    background: var(--vs-accent-muted);
   }
 
   .terminal-tool-chevron {
-    @apply inline-flex h-4 w-4 shrink-0 items-center justify-center text-[#6f81a1] transition-transform;
+    @apply inline-flex h-4 w-4 shrink-0 items-center justify-center transition-transform;
+    color: var(--vs-text-tertiary);
   }
 
   .terminal-tool-chevron--open {
@@ -429,11 +608,13 @@
   }
 
   .terminal-tool-purpose {
-    @apply truncate text-[10px] font-medium uppercase tracking-[0.14em] text-[#8da3cb];
+    @apply truncate text-[10px] font-medium uppercase tracking-[0.14em];
+    color: var(--vs-text-tertiary);
   }
 
   .terminal-tool-title {
-    @apply truncate text-[13px] font-medium text-[#e8eefb];
+    @apply truncate text-[13px] font-medium;
+    color: var(--vs-text-primary);
   }
 
   .terminal-tool-mode {
@@ -441,21 +622,23 @@
   }
 
   .terminal-tool-mode--visible {
-    color: #9eb1ff;
-    background: rgba(94, 106, 210, 0.12);
+    color: var(--vs-accent-bright);
+    background: var(--vs-accent-muted);
   }
 
   .terminal-tool-mode--background {
-    color: #8aa0bf;
+    color: var(--vs-text-secondary);
     background: rgba(255, 255, 255, 0.05);
   }
 
   .terminal-tool-tags {
-    @apply hidden shrink-0 text-[11px] text-[#6f81a1] sm:inline;
+    @apply hidden shrink-0 text-[11px] sm:inline;
+    color: var(--vs-text-tertiary);
   }
 
   .terminal-tool-meta {
-    @apply ml-auto flex shrink-0 items-center gap-2 text-[11px] text-[#6f81a1];
+    @apply ml-auto flex shrink-0 items-center gap-2 text-[11px];
+    color: var(--vs-text-tertiary);
   }
 
   .terminal-tool-exit {
@@ -463,13 +646,13 @@
   }
 
   .terminal-tool-exit--ok {
-    color: #2dd4bf;
-    background: rgba(45, 212, 191, 0.08);
+    color: var(--vs-success);
+    background: rgba(109, 184, 154, 0.1);
   }
 
   .terminal-tool-exit--error {
-    color: #f43f5e;
-    background: rgba(244, 63, 94, 0.08);
+    color: var(--vs-danger);
+    background: var(--vs-danger-muted);
   }
 
   .terminal-tool-duration {
@@ -478,12 +661,13 @@
 
   .terminal-tool-preview {
     @apply border-t px-3 py-2;
-    border-top-color: rgba(255, 255, 255, 0.04);
+    border-top-color: var(--vs-border-soft);
     background: rgba(255, 255, 255, 0.015);
   }
 
   .terminal-tool-preview pre {
-    @apply m-0 overflow-hidden font-mono text-[10px] leading-5 text-[#6f81a1];
+    @apply m-0 overflow-hidden font-mono text-[10px] leading-5;
+    color: var(--vs-text-tertiary);
     display: -webkit-box;
     -webkit-line-clamp: 3;
     -webkit-box-orient: vertical;
@@ -492,44 +676,49 @@
 
   .terminal-tool-body {
     @apply border-t;
-    border-top-color: rgba(255, 255, 255, 0.06);
-    background: #06080d;
+    border-top-color: var(--vs-border);
+    background: var(--vs-void);
   }
 
   .terminal-tool-subheader {
-    @apply flex items-center justify-between border-b px-3 py-1.5 text-[10px] font-medium uppercase tracking-wider text-[#6f81a1];
-    border-bottom-color: rgba(255, 255, 255, 0.04);
+    @apply flex items-center justify-between border-b px-3 py-1.5 text-[10px] font-medium uppercase tracking-wider;
+    border-bottom-color: var(--vs-border-soft);
     background: rgba(255, 255, 255, 0.015);
+    color: var(--vs-text-tertiary);
   }
 
   .terminal-tool-command-row {
     @apply border-b px-3 py-2;
-    border-bottom-color: rgba(255, 255, 255, 0.04);
+    border-bottom-color: var(--vs-border-soft);
     background: rgba(255, 255, 255, 0.02);
   }
 
   .terminal-tool-command-row code {
-    @apply block overflow-x-auto font-mono text-[11px] leading-5 text-[#c6d2e7] whitespace-pre-wrap break-all;
+    @apply block overflow-x-auto font-mono text-[11px] leading-5 whitespace-pre-wrap break-all;
+    color: var(--vs-text-secondary);
   }
 
   .terminal-tool-output {
-    @apply m-0 max-h-[min(42vh,18rem)] overflow-auto px-3 py-2.5 font-mono text-[11px] leading-5 text-[#a8b6d1] whitespace-pre-wrap break-words;
+    @apply m-0 max-h-[min(42vh,18rem)] overflow-auto px-3 py-2.5 font-mono text-[11px] leading-5 whitespace-pre-wrap break-words;
+    color: var(--vs-text-secondary);
     scrollbar-width: thin;
-    scrollbar-color: rgba(143, 163, 196, 0.35) transparent;
+    scrollbar-color: rgba(201, 184, 150, 0.28) transparent;
   }
 
   .terminal-tool-footer {
     @apply flex justify-end border-t px-3 py-2;
-    border-top-color: rgba(255, 255, 255, 0.04);
+    border-top-color: var(--vs-border-soft);
     background: rgba(255, 255, 255, 0.015);
   }
 
   .terminal-tool-open {
-    @apply inline-flex items-center gap-1.5 rounded-md px-2 py-1 text-[10px] font-medium text-[#9eb1ff] transition;
+    @apply inline-flex items-center gap-1.5 rounded-md px-2 py-1 text-[10px] font-medium transition;
+    color: var(--vs-accent);
   }
 
   .terminal-tool-open:hover {
-    @apply bg-white/[0.05] text-white;
+    background: var(--vs-accent-muted);
+    color: var(--vs-accent-bright);
   }
 }
 

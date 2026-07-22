@@ -6,6 +6,7 @@ interface ConfirmDialogProps {
   description: string
   confirmLabel: string
   cancelLabel?: string
+  userEmail?: string
   onConfirm: () => void
   onCancel: () => void
 }
@@ -16,6 +17,7 @@ const ConfirmDialog: React.FC<ConfirmDialogProps> = ({
   description,
   confirmLabel,
   cancelLabel = 'Cancel',
+  userEmail,
   onConfirm,
   onCancel,
 }) => {
@@ -24,31 +26,43 @@ const ConfirmDialog: React.FC<ConfirmDialogProps> = ({
   }
 
   return (
-    <div className="fixed inset-0 z-50 flex items-end justify-center bg-[#04060d]/70 px-4 pb-6 pt-10 backdrop-blur-sm sm:items-center">
-      <div className="popover-panel w-full max-w-sm p-1.5">
-        <div className="px-3 py-2.5">
-          <p className="popover-eyebrow">Session</p>
-          <h2 className="popover-title">{title}</h2>
-          <p className="mt-1.5 text-[13px] leading-6 text-[#7f91b4]">
+    <div
+      className="confirm-overlay"
+      role="presentation"
+      onClick={onCancel}
+    >
+      <div
+        className="confirm-dialog"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="confirm-dialog-title"
+        onClick={(event) => event.stopPropagation()}
+      >
+        <div className="px-4 py-4">
+          <h2 id="confirm-dialog-title" className="popover-title">
+            {title}
+          </h2>
+          {userEmail ? (
+            <p className="mt-2 truncate text-[14px] text-[var(--vs-text-primary)]">
+              {userEmail}
+            </p>
+          ) : null}
+          <p className="mt-2 text-[13px] leading-6 text-[var(--vs-text-secondary)]">
             {description}
           </p>
         </div>
 
         <div className="popover-divider" />
 
-        <div className="flex items-center justify-end gap-2 px-1.5 py-1.5">
+        <div className="flex items-center justify-end gap-2 px-2 py-2">
           <button
             type="button"
             onClick={onCancel}
-            className="rounded-lg px-3 py-2 text-[15px] text-[#e6ecfa] transition hover:bg-white/[0.06]"
+            className="rounded-lg px-3 py-2 text-[15px] text-[var(--vs-text-primary)] transition hover:bg-[var(--vs-accent-muted)]"
           >
             {cancelLabel}
           </button>
-          <button
-            type="button"
-            onClick={onConfirm}
-            className="rounded-lg bg-[#f27d75]/15 px-3 py-2 text-[15px] font-medium text-[#f0a8a2] transition hover:bg-[#f27d75]/25"
-          >
+          <button type="button" onClick={onConfirm} className="danger-btn">
             {confirmLabel}
           </button>
         </div>

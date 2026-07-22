@@ -13,6 +13,9 @@ export interface JobRecord {
   user_visible: boolean;
   job_status: JobStatus;
   started_at: number;
+  finished_at: number | null;
+  exit_code: number | null;
+  output_path: string;
   total_chars_buffered: number;
   last_output_at: number;
   last_polled_at: number;
@@ -21,6 +24,7 @@ export interface JobRecord {
   terminal_name?: string;
   estimated_duration_seconds?: number;
   chat_id?: string;
+  request_id?: string;
 }
 
 export class TerminalOutputStore {
@@ -60,11 +64,14 @@ export class TerminalOutputStore {
     return path.join(this.storageDir, `${safeJobId}.txt`);
   }
 
-  registerJob(record: Omit<JobRecord, 'job_status' | 'started_at' | 'total_chars_buffered' | 'last_output_at' | 'last_polled_at' | 'pinned'>): JobRecord {
+  registerJob(record: Omit<JobRecord, 'job_status' | 'started_at' | 'finished_at' | 'exit_code' | 'output_path' | 'total_chars_buffered' | 'last_output_at' | 'last_polled_at' | 'pinned'>): JobRecord {
     const fullRecord: JobRecord = {
       ...record,
       job_status: 'running',
       started_at: Date.now(),
+      finished_at: null,
+      exit_code: null,
+      output_path: this.getFilePath(record.job_id),
       total_chars_buffered: 0,
       last_output_at: Date.now(),
       last_polled_at: Date.now(),
@@ -78,6 +85,27 @@ export class TerminalOutputStore {
     return this.jobs.get(jobId);
   }
 
+  findJob(identifier: string): JobRecord | undefined {
+    const direct = this.jobs.get(identifier);
+    if (direct) {
+      return direct;
+    }
+
+    const matches = this.getAllJobs().filter((job) => job.request_id === identifier);
+    if (matches.length === 0) {
+      return undefined;
+    }
+
+    return matches.sort((a, b) => {
+      const aRunning = a.job_status === 'running' ? 1 : 0;
+      const bRunning = b.job_status === 'running' ? 1 : 0;
+      if (aRunning !== bRunning) {
+        return bRunning - aRunning;
+      }
+      return b.started_at - a.started_at;
+    })[0];
+  }
+
   getAllJobs(): JobRecord[] {
     return Array.from(this.jobs.values());
   }
@@ -87,6 +115,25 @@ export class TerminalOutputStore {
     if (job) {
       job.job_status = status;
     }
+  }
+
+  completeJob(jobId: string, exitCode: number | null, status: JobStatus = 'completed'): void {
+    const job = this.jobs.get(jobId);
+    if (!job) {
+      return;
+    }
+    job.job_status = status;
+    job.exit_code = exitCode;
+    job.finished_at = Date.now();
+  }
+
+  getJobsForChat(chatId: string): JobRecord[] {
+    return this.getAllJobs().filter((job) => job.chat_id === chatId);
+  }
+
+  async getOutputTail(jobId: string, maxChars: number = 200): Promise<string> {
+    const result = await this.getOutput(jobId, -maxChars, maxChars);
+    return result.content;
   }
 
   async appendOutput(jobId: string, data: string): Promise<void> {

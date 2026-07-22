@@ -49,11 +49,13 @@ export class ConfigManager {
   public async getConfig(): Promise<VertexConfig> {
     const config = vscode.workspace.getConfiguration('vertexSwarm');
     
-    // Default to DeepSeek if not provided
-    const llmBaseUrl = config.get<string>('llmBaseUrl') || 'https://api.deepseek.com/v1';
-    const llmModel = config.get<string>('llmModel') || 'deepseek-v4-pro';
-    const llmReasoningEnabled = config.get<boolean>('llmReasoningEnabled', true);
-    const llmReasoningEffort = config.get<string>('llmReasoningEffort') || 'medium';
+    // OpenRouter is the active path; DeepSeek retained for rollback.
+    // const llmBaseUrl = config.get<string>('llmBaseUrl') || 'https://api.deepseek.com/v1';
+    // const llmModel = config.get<string>('llmModel') || 'deepseek-v4-pro';
+    const llmBaseUrl = config.get<string>('llmBaseUrl') || 'https://openrouter.ai/api/v1';
+    const llmModel = config.get<string>('llmModel') || 'deepseek/deepseek-v4-flash';
+    const llmReasoningEnabled = config.get<boolean>('llmReasoningEnabled', false);
+    const llmReasoningEffort = config.get<string>('llmReasoningEffort') || 'low';
     
     // Read secrets directly — no retry here; callers that need startup resilience
     // should go through hasValidConfig() first, which uses waitForSecret().

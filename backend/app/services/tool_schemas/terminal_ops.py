@@ -29,7 +29,7 @@ TERMINAL_OPS_TOOL_SPEC: dict[str, Any] = {
                 },
                 "request_id": {
                     "type": "string",
-                    "description": "Stable idempotency key for retries of the same tool call.",
+                    "description": "Stable idempotency key for retries of the same tool call. NOT a job lookup key — do not pass this as payload.job_id in get_output.",
                 },
                 "mode": {
                     "type": "string",
@@ -42,7 +42,7 @@ TERMINAL_OPS_TOOL_SPEC: dict[str, Any] = {
                     "properties": {
                         "job_id": {
                             "type": "string",
-                            "description": "The job ID. Required for get_output, kill_job, send_input, cleanup_output.",
+                            "description": "Required for get_output, kill_job, send_input, cleanup_output. Copy from run_command result data.job_id — NOT the same as request_id.",
                         },
                         "tool_call_id": {
                             "type": "string",
@@ -59,7 +59,7 @@ TERMINAL_OPS_TOOL_SPEC: dict[str, Any] = {
                         "intent": {
                             "type": "string",
                             "enum": ["await_result", "verify_start", "observe"],
-                            "description": "The execution intent. 'await_result': short commands you want to block for (LLM must poll get_output). 'verify_start': long-running background servers that must start successfully. 'observe': raw background fire-and-forget."
+                            "description": "REQUIRED on every run_command. Read all three options before choosing — do NOT default to await_result because it is first. 'await_result': ONLY for very fast checks (ls, git status, --version) — may return verification_needed until you confirm via get_output; NEVER for servers, installs, builds, or tests. 'verify_start': REQUIRED for long-running dev servers (npm run dev, python run.py, uvicorn, etc.) — waits 2s for immediate crash, returns running if still alive. 'observe': REQUIRED for finite long work (npm install, pip install, npm run build, pytest) — end your turn; wait for system notification."
                         },
                         "user_visible": {
                             "type": "boolean",
@@ -71,7 +71,7 @@ TERMINAL_OPS_TOOL_SPEC: dict[str, Any] = {
                         },
                         "estimated_duration_seconds": {
                             "type": "integer",
-                            "description": "Estimated time this command will take. Helps orchestrator decide polling frequency."
+                            "description": "Estimated time this command will take in seconds. REQUIRED for observe and verify_start intents. Optional for await_result."
                         },
                         "terminal_context": {
                             "type": "object",

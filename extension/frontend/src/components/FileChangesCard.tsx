@@ -73,10 +73,10 @@ export const FileChangesCard: React.FC<FileChangesCardProps> = ({
   }
 
   return (
-    <div className="mt-2 ml-0.5 overflow-hidden rounded-[18px] bg-[#171b23] border border-white/[0.08] shadow-[0_8px_24px_rgba(0,0,0,0.28)]">
-      <div className="flex items-center justify-between px-3 py-3 border-b border-white/[0.06] bg-white/[0.015]">
+    <div className="mt-2 ml-0.5 overflow-hidden rounded-[18px] bg-[var(--vs-surface)] border border-[var(--vs-border)] shadow-[0_8px_24px_rgba(0,0,0,0.45)]">
+      <div className="flex items-center justify-between px-3 py-3 border-b border-[var(--vs-border-soft)] bg-white/[0.015]">
         <div className="flex items-center gap-2">
-          <span className="flex h-6 w-6 items-center justify-center rounded-md bg-[#5e6ad2]/14 text-[#8b9cff]">
+          <span className="flex h-6 w-6 items-center justify-center rounded-md bg-[var(--vs-accent-muted)] text-[var(--vs-accent)]">
             <Files className="h-3.5 w-3.5" />
           </span>
           <span className="text-[12px] font-medium text-[#dce4f5]">
@@ -102,7 +102,7 @@ export const FileChangesCard: React.FC<FileChangesCardProps> = ({
           {!isHistorical && snapshotId && sessionId && hasUndoableChanges && (
             <button
               onClick={handleUndo}
-              className="flex items-center gap-1.5 rounded-md px-2 py-1 text-[11px] font-medium text-[#b8c5de] hover:bg-white/[0.08] hover:text-[#e8eefb] transition-colors"
+              className="flex items-center gap-1.5 rounded-md px-2 py-1 text-[11px] font-medium text-[#b8c5de] hover:bg-white/[0.08] hover:text-[var(--vs-text-primary)] transition-colors"
             >
               <Undo2 className="h-3 w-3 text-[#8b9ab8]" /> Undo
             </button>
@@ -129,7 +129,7 @@ export const FileChangesCard: React.FC<FileChangesCardProps> = ({
               title={change.path}
             >
               <FileExtensionIcon path={change.path} />
-              <span className="text-[11px] text-[#9fb0cd] font-mono truncate">
+              <span className="text-[11px] text-[var(--vs-text-secondary)] font-mono truncate">
                 {change.path}
               </span>
             </span>

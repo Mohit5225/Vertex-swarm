@@ -55,7 +55,7 @@ export interface ToolResult {
   message_id: string;
   request_id?: string;
   action?: string;
-  status: 'success' | 'error' | 'timeout';
+  status: 'success' | 'error' | 'timeout' | 'verification_needed' | 'running' | 'cancelled';
   content: string;
   summary?: string;
   data?: unknown;

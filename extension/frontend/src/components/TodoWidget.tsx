@@ -41,10 +41,10 @@ const TodoWidget: React.FC<Props> = ({ items, isStreaming, onClose }) => {
       >
         <div className="min-w-0">
           <div className="flex items-center gap-2">
-            <span className="text-[12px] font-medium text-[#c6d2e7]">
+            <span className="text-[12px] font-medium text-[var(--vs-text-secondary)]">
               Execution progress
             </span>
-            <span className="rounded-full bg-white/[0.06] px-2 py-0.5 text-[10px] font-medium uppercase tracking-[0.16em] text-[#7f91b4]">
+            <span className="rounded-full bg-white/[0.06] px-2 py-0.5 text-[10px] font-medium uppercase tracking-[0.16em] text-[var(--vs-text-secondary)]">
               {summary.completed}/{summary.total}
             </span>
           </div>
@@ -60,7 +60,7 @@ const TodoWidget: React.FC<Props> = ({ items, isStreaming, onClose }) => {
         </div>
         <div className="flex items-center">
           <span
-            className={`inline-flex h-5 w-5 shrink-0 items-center justify-center rounded-full text-[#6f81a1] transition ${
+            className={`inline-flex h-5 w-5 shrink-0 items-center justify-center rounded-full text-[var(--vs-text-tertiary)] transition ${
               isExpanded ? 'rotate-180' : ''
             }`}
           >
@@ -73,7 +73,7 @@ const TodoWidget: React.FC<Props> = ({ items, isStreaming, onClose }) => {
                 e.stopPropagation()
                 onClose()
               }}
-              className="ml-2 inline-flex h-5 w-5 items-center justify-center rounded text-[#6f81a1] hover:bg-white/10 hover:text-white"
+              className="ml-2 inline-flex h-5 w-5 items-center justify-center rounded text-[var(--vs-text-tertiary)] hover:bg-white/10 hover:text-white"
               title="Dismiss"
             >
               <X className="h-3.5 w-3.5" />
@@ -91,7 +91,7 @@ const TodoWidget: React.FC<Props> = ({ items, isStreaming, onClose }) => {
               <div
                 key={item.id}
                 className={`flex items-start gap-3 rounded-lg px-3 py-2.5 transition-colors ${
-                  item.status === 'in_progress' ? 'bg-blue-500/10' : 'hover:bg-white/[0.02]'
+                  item.status === 'in_progress' ? 'bg-[var(--vs-accent-muted)]' : 'hover:bg-white/[0.02]'
                 }`}
               >
                 <div className="mt-0.5 shrink-0">
@@ -100,19 +100,19 @@ const TodoWidget: React.FC<Props> = ({ items, isStreaming, onClose }) => {
                   ) : item.status === 'in_progress' ? (
                     <Clock
                       size={16}
-                      className={isStreaming ? 'animate-pulse text-blue-400' : 'text-blue-300'}
+                      className={isStreaming ? 'animate-pulse text-[var(--vs-accent-bright)]' : 'text-[var(--vs-accent)]'}
                     />
                   ) : (
-                    <Circle size={16} className="text-[#5e6ad2]" />
+                    <Circle size={16} className="text-[var(--vs-accent)]" />
                   )}
                 </div>
                 <span
                   className={`text-[13px] leading-5 ${
                     item.status === 'done'
-                      ? 'text-[#9fb0cd] line-through'
+                      ? 'text-[var(--vs-text-secondary)] line-through'
                       : item.status === 'in_progress'
-                      ? 'font-medium text-blue-100'
-                      : 'text-[#9fb0cd]'
+                      ? 'font-medium text-[var(--vs-accent-bright)]'
+                      : 'text-[var(--vs-text-secondary)]'
                   }`}
                 >
                   {label}

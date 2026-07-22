@@ -112,19 +112,19 @@ const LiveFileEditBar: React.FC<{ messages: ChatMessage[]; isStreaming: boolean 
   }
 
   return (
-    <div className="flex flex-col border-t border-white/[0.05] bg-[#0a0d14]/80">
+    <div className="flex flex-col border-t border-[var(--vs-border-soft)] bg-[var(--vs-ink)]/80">
       <div
         className="flex items-center justify-between px-4 py-2 cursor-pointer hover:bg-white/[0.02] transition-colors"
         onClick={() => setIsExpanded(!isExpanded)}
       >
         <div className="flex items-center gap-2">
-          <span className="text-[12px] font-medium text-[#c6d2e7]">
+          <span className="text-[12px] font-medium text-[var(--vs-text-secondary)]">
             {summarizeFileChanges(mergedChanges)}
           </span>
           {(totalAdds > 0 || totalDels > 0) && (
             <div className="flex items-center gap-1.5 font-mono text-[11px]">
-              <span className="text-[#2dd4bf]">+{totalAdds}</span>
-              <span className="text-[#f43f5e]">-{totalDels}</span>
+              <span className="text-[var(--vs-success)]">+{totalAdds}</span>
+              <span className="text-[var(--vs-danger)]">-{totalDels}</span>
             </div>
           )}
         </div>
@@ -132,7 +132,7 @@ const LiveFileEditBar: React.FC<{ messages: ChatMessage[]; isStreaming: boolean 
           {topSnapshotId && hasUndoableChanges && (
             <button
               onClick={handleUndoAll}
-              className="flex items-center gap-1 rounded-md px-2 py-0.5 text-[11px] font-medium text-[#c6d2e7] hover:bg-white/[0.1] transition-colors"
+              className="flex items-center gap-1 rounded-md px-2 py-0.5 text-[11px] font-medium text-[var(--vs-text-secondary)] hover:bg-[var(--vs-accent-muted)] transition-colors"
               title="Undo all file edits in this turn"
             >
               <Undo2 className="h-3 w-3" />
@@ -140,7 +140,7 @@ const LiveFileEditBar: React.FC<{ messages: ChatMessage[]; isStreaming: boolean 
             </button>
           )}
           <span
-            className={`inline-flex h-5 w-5 items-center justify-center rounded-full text-[#6f81a1] transition ${isExpanded ? 'rotate-180' : ''
+            className={`inline-flex h-5 w-5 items-center justify-center rounded-full text-[var(--vs-text-tertiary)] transition ${isExpanded ? 'rotate-180' : ''
               }`}
           >
             <ChevronDown className="h-3.5 w-3.5" />
@@ -156,7 +156,7 @@ const LiveFileEditBar: React.FC<{ messages: ChatMessage[]; isStreaming: boolean 
               className="flex items-center justify-between px-3 py-1.5 rounded-md hover:bg-white/[0.03] transition-colors group"
             >
               <span
-                className="text-[11px] text-[#91a0bb] font-mono truncate max-w-[200px] group-hover:text-[#c6d2e7] transition-colors cursor-pointer"
+                className="text-[11px] text-[var(--vs-text-tertiary)] font-mono truncate max-w-[200px] group-hover:text-[var(--vs-text-primary)] transition-colors cursor-pointer"
                 onClick={(e) => handleReviewFile(e, change)}
                 title={change.path}
               >
@@ -164,13 +164,13 @@ const LiveFileEditBar: React.FC<{ messages: ChatMessage[]; isStreaming: boolean 
               </span>
               <div className="flex items-center gap-2 opacity-70 group-hover:opacity-100 transition-opacity">
                 {fileChangeDetail(change) ? (
-                  <span className="text-[10px] font-medium text-[#9eb1ff]">{fileChangeDetail(change)}</span>
+                  <span className="text-[10px] font-medium text-[var(--vs-accent)]">{fileChangeDetail(change)}</span>
                 ) : null}
                 <ChangeStatBadges change={change} />
                 {topSnapshotId && canUndoChange(change) && (
                   <button
                     onClick={(e) => handleUndoFile(e, change)}
-                    className="flex items-center gap-0.5 text-[10px] font-medium text-[#c6d2e7] hover:text-white transition-colors ml-0.5"
+                    className="flex items-center gap-0.5 text-[10px] font-medium text-[var(--vs-text-secondary)] hover:text-[var(--vs-text-primary)] transition-colors ml-0.5"
                     title={`Undo changes to ${change.path}`}
                   >
                     <Undo2 className="h-2.5 w-2.5" />
@@ -180,7 +180,7 @@ const LiveFileEditBar: React.FC<{ messages: ChatMessage[]; isStreaming: boolean 
                 {canReviewChange(change) && (
                   <button
                     onClick={(e) => handleReviewFile(e, change)}
-                    className="text-[10px] font-medium text-[#5e6ad2] hover:text-[#9eb1ff] transition-colors ml-0.5"
+                    className="text-[10px] font-medium text-[var(--vs-accent)] hover:text-[var(--vs-accent-bright)] transition-colors ml-0.5"
                   >
                     Review
                   </button>
@@ -234,12 +234,6 @@ const ChatPanel: React.FC = () => {
 
     stickToBottomRef.current = isNearBottom(container)
   }
-
-  const sessionState = isStreaming
-    ? 'running'
-    : messages.length > 0
-      ? 'ready'
-      : 'idle'
 
   const showTodoBar = useMemo(() => {
     if (!currentTodo?.items.length) {
@@ -417,13 +411,13 @@ const ChatPanel: React.FC = () => {
           >
             <div className="popover-header">
               <p className="popover-eyebrow">History</p>
-              <span className="text-[12px] text-[#7f91b4]">{chats.length}</span>
+              <span className="status-chip">{chats.length}</span>
             </div>
 
             <div className="popover-divider" />
 
             {chats.length === 0 ? (
-              <p className="popover-section text-[15px] leading-6 text-[#7f91b4]">
+              <p className="popover-section text-[15px] leading-6 text-[var(--vs-text-secondary)]">
                 No saved chats yet.
               </p>
             ) : (
@@ -440,10 +434,10 @@ const ChatPanel: React.FC = () => {
                       disabled={isStreaming}
                       className={`popover-list-item ${isActiveChat ? 'popover-list-item--active' : ''}`}
                     >
-                      <div className="truncate text-[15px] text-[#e6ecfa]">
+                      <div className="truncate text-[15px] text-[var(--vs-text-primary)]">
                         {chatTitle}
                       </div>
-                      <div className="mt-0.5 text-[12px] leading-5 text-[#7f91b4]">
+                      <div className="mt-0.5 text-[12px] leading-5 text-[var(--vs-text-secondary)]">
                         {formatRelativeTime(chat.updatedAt)}
                       </div>
                     </button>
@@ -458,8 +452,6 @@ const ChatPanel: React.FC = () => {
           <SessionPanel
             panelRef={sessionPanelRef}
             config={config}
-            userEmail={user?.email}
-            sessionState={sessionState}
             isStreaming={isStreaming}
             hasMessages={messages.length > 0}
             snapshotRetentionDays={snapshotRetentionDays}
@@ -491,10 +483,8 @@ const ChatPanel: React.FC = () => {
             >
               {messages.length === 0 ? (
                 <div className="mx-auto flex h-full w-full max-w-[42rem] flex-col justify-end px-3 pb-8 pt-8">
-                  <p className="text-[11px] font-medium uppercase tracking-[0.2em] text-[#7082a4]">
-                    Suggested starts
-                  </p>
-                  <p className="mt-2 max-w-[30rem] text-sm leading-7 text-[#8f9cb7]">
+                  <p className="surface-label">Suggested starts</p>
+                  <p className="mt-2 max-w-[30rem] text-sm leading-7 text-[var(--vs-text-secondary)]">
                     Start with a task, bug, review request, or file path and
                     the sidebar will stay clean while the agent works through it.
                   </p>
@@ -504,7 +494,7 @@ const ChatPanel: React.FC = () => {
                         key={prompt.label}
                         type="button"
                         onClick={() => setQueuedPrompt(prompt.prompt)}
-                        className="rounded-lg border border-white/10 bg-white/[0.04] px-3 py-2 text-[13px] text-[#e6ecfa] transition hover:bg-white/[0.06]"
+                        className="starter-chip"
                       >
                         {prompt.label}
                       </button>
@@ -518,7 +508,7 @@ const ChatPanel: React.FC = () => {
                   ))}
 
                   {error && (
-                    <div className="border-l-2 border-[#f27d75] pl-3 text-sm leading-6 text-[#ffbeb8]">
+                    <div className="error-banner">
                       {error}
                     </div>
                   )}
@@ -536,7 +526,7 @@ const ChatPanel: React.FC = () => {
           )}
           <LiveFileEditBar messages={messages} isStreaming={isStreaming} />
 
-          <div className="border-t chat-divider bg-[linear-gradient(180deg,rgba(255,255,255,0.02),transparent)] px-3 pb-3 pt-2 sm:px-4">
+          <div className="border-t chat-divider px-3 pb-3 pt-2 sm:px-4">
             <InputArea
               disabled={isStreaming}
               queuedPrompt={queuedPrompt}
@@ -555,6 +545,7 @@ const ChatPanel: React.FC = () => {
         title="Sign out?"
         description="This will end your Vertex Swarm session on this machine. You can sign in again at any time."
         confirmLabel="Sign out"
+        userEmail={user?.email}
         onCancel={() => setShowLogoutConfirm(false)}
         onConfirm={handleConfirmLogout}
       />
