@@ -246,6 +246,12 @@ const handleExtensionMessage = (event: MessageEvent) => {
         .setPlanReadyForMessageId(useChatStore.getState().activeMessageId);
       break;
 
+    case "deep-plan-ready":
+      useChatStore
+        .getState()
+        .setDeepPlanReadyForMessageId(useChatStore.getState().activeMessageId);
+      break;
+
     case "error":
       clearRestoreTimers();
       if (

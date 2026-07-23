@@ -6,7 +6,9 @@
 export interface SessionEvent {
   id: string;
   type: 'thinking' | 'code' | 'output' | 'error' | 'status' | 'tool_call' | 'tool_result'
-      | 'plan_permission_request' | 'plan_chunk' | 'plan_ready' | 'todo_init' | 'todo_update';
+      | 'plan_permission_request' | 'plan_chunk' | 'plan_ready' | 'todo_init' | 'todo_update' | 'todo_clear'
+      | 'hil_question' | 'hil_resolved'
+      | 'deep_plan_started' | 'deep_plan_stage_status' | 'deep_plan_ready' | 'deep_plan_permission_request';
   content: string;
   timestamp: number;
   metadata?: Record<string, unknown>;
@@ -98,6 +100,7 @@ export type ExtensionToWebviewMessage =
   | { type: 'config-missing'; payload?: { reason?: string } }
   | { type: 'config-ready'; payload: { llmBaseUrl?: string; llmModel?: string } }
   | { type: 'plan-ready'; payload: Record<string, never> }
+  | { type: 'deep-plan-ready'; payload: Record<string, never> }
   | {
       type: 'terminal-output'
       payload: {
@@ -130,6 +133,8 @@ export type WebviewToExtensionMessage =
   | { type: 'get-config' }
   | { type: 'set-config'; payload: { snapshotRetentionDays: number } }
   | { type: 'open-plan' }
+  | { type: 'planning-approve'; payload: { pipeline_id: string } }
+  | { type: 'planning-reject'; payload: { pipeline_id: string; rejection_feedback?: string } }
   | { type: 'truncate-messages'; payload: { chatId: string; messageId: string; messageText: string } }
   | { type: 'save-config'; payload: { llmBaseUrl?: string, llmModel?: string, llmKey?: string, exaKey?: string } };
 

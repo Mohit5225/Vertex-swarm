@@ -39,6 +39,20 @@ export class VertexSwarmChatRuntime {
   private static readonly MAX_PROCESSED_TOOL_CALL_IDS = 10_000;
   private static readonly TOKEN_REFRESH_BUFFER_MS = 5 * 60 * 1000;
 
+  /** Strip `/deep-plan` prefix; opens gate A on the backend session. */
+  private static parseDeepPlanCommand(message: string): { message: string; deepPlanRequested: boolean } {
+    const trimmed = message.trimStart();
+    const lower = trimmed.toLowerCase();
+    if (!lower.startsWith('/deep-plan')) {
+      return { message, deepPlanRequested: false };
+    }
+    const rest = trimmed.slice('/deep-plan'.length).trimStart();
+    return {
+      message: rest.length > 0 ? rest : 'Run deep planning for this task.',
+      deepPlanRequested: true,
+    };
+  }
+
   private readonly chatStore = new LocalChatStore();
   private readonly entitlementClient: EntitlementClient;
   private readonly configManager: ConfigManager;
@@ -194,6 +208,57 @@ export class VertexSwarmChatRuntime {
         break;
       }
 
+      case 'hil-respond': {
+        const payload = message.payload as { hil_session_id?: string; answers?: unknown[] };
+        if (!payload?.hil_session_id || !Array.isArray(payload.answers)) {
+          this.log('hil-respond rejected: missing hil_session_id or answers');
+          break;
+        }
+        if (!this.processManager.rpcClient) {
+          this.log('hil-respond failed: backend RPC client unavailable');
+          break;
+        }
+        // Answers go to session/hil_respond — not a new chat message.
+        this.processManager.rpcClient.sendNotification('session/hil_respond', {
+          hil_session_id: payload.hil_session_id,
+          answers: payload.answers,
+        });
+        break;
+      }
+
+      case 'planning-approve': {
+        const payload = message.payload as { pipeline_id?: string };
+        if (!payload?.pipeline_id) {
+          this.log('planning-approve rejected: missing pipeline_id');
+          break;
+        }
+        if (!this.processManager.rpcClient) {
+          this.log('planning-approve failed: backend RPC client unavailable');
+          break;
+        }
+        this.processManager.rpcClient.sendNotification('session/planning_approve', {
+          pipeline_id: payload.pipeline_id,
+        });
+        break;
+      }
+
+      case 'planning-reject': {
+        const payload = message.payload as { pipeline_id?: string; rejection_feedback?: string };
+        if (!payload?.pipeline_id) {
+          this.log('planning-reject rejected: missing pipeline_id');
+          break;
+        }
+        if (!this.processManager.rpcClient) {
+          this.log('planning-reject failed: backend RPC client unavailable');
+          break;
+        }
+        this.processManager.rpcClient.sendNotification('session/planning_reject', {
+          pipeline_id: payload.pipeline_id,
+          rejection_feedback: payload.rejection_feedback ?? '',
+        });
+        break;
+      }
+
       case 'load-chat-list': {
         this.log('webview requested chat list');
         await this.sendChatList();
@@ -230,6 +295,8 @@ export class VertexSwarmChatRuntime {
           }
 
           const ideContextEnabled = Boolean(payload.ideContextEnabled);
+          const { message: streamMessage, deepPlanRequested } =
+            VertexSwarmChatRuntime.parseDeepPlanCommand(payload.message);
           const chatId = this.currentChatId ?? await this.createChat(ideContextEnabled);
 
           if (this.streamCancellationRequested) {
@@ -296,10 +363,11 @@ export class VertexSwarmChatRuntime {
 
           this.processManager.rpcClient.sendNotification('session/start', {
             chat_id: chatId,
-            message: payload.message,
+            message: streamMessage,
             ide_context_enabled: ideContextEnabled,
             workspace_skeleton: workspaceSkeleton,
-            request_context: requestContext
+            request_context: requestContext,
+            deep_plan_requested: deepPlanRequested,
           });
 
           // Forward the real DB message_id so the webview can patch the temp local id
@@ -700,6 +768,10 @@ export class VertexSwarmChatRuntime {
             this.post({ type: 'plan-ready', payload: {} });
             return;
           }
+          if (params.event.type === 'deep_plan_ready') {
+            this.post({ type: 'deep-plan-ready', payload: {} });
+            return;
+          }
           if (params.event.type === 'done') {
             this.post({ type: 'stream-complete' });
             return;
@@ -709,6 +781,9 @@ export class VertexSwarmChatRuntime {
 
         // Always execute tools, even for subagents running in the background
         if (params.event.type === 'tool_call') {
+          if (params.event.metadata?.extension_execute === false) {
+            return;
+          }
           if (!isCurrentChat) {
             this.log(`subagent tool_call intercepted: ${params.event.metadata?.tool_name || params.event.metadata?.toolName || 'unknown'}`);
           }

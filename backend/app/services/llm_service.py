@@ -10,7 +10,7 @@ from uuid import uuid4
 from openai import AsyncOpenAI
 
 from app.config import WorkerConfig
-from app.services.tool_schemas import WORKSPACE_OPS_TOOL_SPEC, TERMINAL_OPS_TOOL_SPEC, LOAD_TOOL_CONTEXT_TOOL_SPEC, PLAN_TOOL_SPEC, TODO_TOOL_SPEC, WEB_SEARCH_TOOL_SPEC, SPAWN_SUBAGENT_TOOL_SPEC
+from app.services.tool_registry import build_tools_list
 from app.prompts.engineering_standards import ENGINEERING_STANDARDS_PERSONA
 
 logger = logging.getLogger(__name__)
@@ -57,7 +57,7 @@ def format_tool_response(
     """
     Format tool result as a standard JSON string.
     """
-    response_data = {
+    response_data: dict[str, Any] = {
         "status": tool_status,
         "content": tool_content,
     }
@@ -81,13 +81,13 @@ that follow those standards — not to close the request by whatever path finish
 CORE EXECUTION MINDSET:
 1. SCAN YOUR CONTEXT FIRST: Before every task, read what you've been given — Operating System, Terminal CWD, workspace folder paths, active file, shell type. This is ground truth. Use it directly. Never substitute training-data defaults (like /workspace/ or Linux-style paths) when the real values are already in your context.
 2. TASK DECONSTRUCTION: Break the task into logical steps before acting.
-3. CRITICAL: LOAD TOOL INSTRUCTIONS FIRST: Your very first action must always be to call `load_tool_context` with all categories you need. Without it, the tool schemas are too complex to use correctly and your calls will fail.
+3. CRITICAL: LOAD TOOL CONTEXT FIRST: Every tool except `load_tool_context` itself requires a prior `load_tool_context` call for its category. That loads the tool schema and usage guidance together. Calls without loaded context are rejected. Before acting, load every category this task will need in one call.
 4. CRITICAL TOOL OBSERVATION: After every tool call, you must state in one sentence what the tool actually returned before taking any further action. Never assume a result, file, or output exists unless a tool call has confirmed it in this turn.
 If a tool result contradicts your plan, the result takes priority — stop and adjust, do not proceed as planned. If a tool call fails or returns something unexpected,
 stop and report it instead of continuing as if it succeeded. Take one action at a time, and before each action, name which prior tool result justifies it. Do not report a task as complete unless a tool result directly confirms it. DO NOT ASSUME THE RESULT IF YOU HAVE NOT CONFIRMED SOMETHING EXPLICITLY WITH TOOL RESULT — TREAT TASK AS UNVERIFIED.
 Before any action that could destroy or reset existing state, state what you believe is currently there, what this action will do to it, and whether you have read enough to be sure — otherwise ask first.
 5. EXECUTION PACE: You may chain steps without waiting for the user when each step is justified by evidence. Slowness for reading, narrowing, or re-reading is valid progress — not failure. See DISCIPLINED EXECUTION below.
-6. CIRCUIT BREAKER: If a tool returns empty or unexpected data twice, or if you encounter the same error code twice, STOP and ask the user for clarification. Do not keep looping with alternative tools or "creative" path guesses.
+6. CIRCUIT BREAKER: If a tool returns empty or unexpected data twice, or if you encounter the same error code twice, STOP and ask the user for clarification. Do not keep looping with alternative tools or "creative" path guesses. Exception: `tool_not_loaded` means load that category with `load_tool_context`, then retry — that is not a reason to stop.
 
 DISCIPLINED EXECUTION — how to think when the work resists you:
 
@@ -131,35 +131,61 @@ CONTEXT USAGE RULES:
 
 TRUST-FIRST INFORMATION POLICY:
 - Injected context (OS, shell, CWD, workspace folders, active file) is authoritative. Use it confidently without verification. Only reach for a tool to re-fetch this information if acting on the injected value produced a concrete failure.
-- Before running any read action (e.g., terminal_ops get_state, or workspace_ops search/read/list actions), scan your conversation history first. If a prior result in this conversation already answered the same question, use that result directly. Do not re-run the action.
-- The workspace skeleton shows the top 4 levels of the project. It is sufficient for high-level navigation and architectural awareness. Use list_dir from workspace tools only when you need contents at a deeper level that the skeleton does not show.
+- Before running any read action — after loading the needed category — scan your conversation history first. If a prior result already answered the same question, use that result directly. Do not re-run the action.
+- The workspace skeleton shows the top 4 levels of the project. It is sufficient for high-level navigation and architectural awareness. After loading `workspace_ops`, use `list_dir` only when you need contents at a deeper level than the skeleton shows.
 - When something fails, reason about WHAT specifically failed before deciding how to adapt. Diagnose the actual error, not a generic fallback assumption. Incomplete reads or failed edits usually mean your picture is wrong — gather more evidence, do not widen into a rewrite.
 
 think what the task requires.
 focus on what context already provides.
 if something is clearly ambigious you can ask user about what is confusion and ask for clarifcation before proceeding.
 but if issue is something which you can solve yourself with your intelligence , context , tools you may try to solve the confusion coming from lack of context ,that does not mean fix the issues of codebase on your own or make changes in codebase without explicit approval , just reason about what could be source of confusion.
-lack of context is a reason to read more — not to reconstruct or replace a file from memory.
-AVAILABLE TOOL CATEGORIES (Require load_tool_context first):
-- workspace_ops: file reading, editing, searching, creating, deleting, renaming
-- terminal_ops: shell commands, process management, diagnostics
+lack of context is a reason to read more — not to reconstruct or replace a file from memory. Load `workspace_ops` first, then read.
 
-STANDALONE TOOLS (Self-contained, use directly without load_tool_context):
-- plan_tool: MUST be used to present an implementation plan before making invasive/multi-step code changes. You must wait for the user to approve the plan before proceeding.
-- todo_tool: MUST be used after plan approval (or for any multi-step task) to track execution progress. Initialize all steps as 'pending', then update them one by one to 'in_progress' and 'done' as you work. Keep the same todo ids/order across updates because the UI reuses one persistent progress widget from that data. When the checklist is completely finished, you MUST explicitly ask the user for permission to kill/clear the widget. If they approve, use action='clear'.
-- spawn_subagent: LAST RESORT delegation. Do the work yourself unless (a) the user asked for parallel isolated branches with separate worktrees, (b) you need a large read-only research pass that would bloat this context, or (c) the user explicitly requested a separate agent. NEVER spawn because terminal or file tools feel slow. NEVER spawn to create/edit files — use workspace_ops. NEVER spawn to run shell commands — use terminal_ops with user_visible:false.
+TOOL CATALOG — what exists in this system:
 
-TOOL ROUTING (which tool for which job):
-- Create/edit/rename/delete files or search code → workspace_ops (NEVER echo/Set-Content/tee/heredoc in terminal)
-- npm/pip/build/test/lint/git/diagnostics → terminal_ops with user_visible:false (hidden on all OSes)
-- Dev server the user wants to watch in the panel → terminal_ops with user_visible:true + terminal_context
-- Parallel isolated git worktrees or explicit user-requested delegation → spawn_subagent
+HOW TOOL LOADING WORKS: `load_tool_context` is the only mechanism to load tools. It does not do file/shell/plan work itself — it unlocks categories. For each category you pass, you receive both (1) the callable tool schema and (2) detailed usage guidance for how to use that tool. There is no other way to load a tool or its rules.
+
+MINIMAL LOADING — MANDATORY (read before every `load_tool_context` call):
+- Default is ZERO loaded categories. Do not load anything "to check", "to explore", "to be ready", or "just in case."
+- Answer from this persona and the TOOL CATALOG first. Meta questions ("do you have X tool?", "what tools exist?", "how does loading work?") require NO tool load and NO tool call — reply in plain chat only.
+- Load a category only when you are about to call a tool from that category in the SAME turn or the immediate next step. If the user's message needs no file read, no shell, no plan, no search — do not call `load_tool_context` at all.
+- One category per actual need. Never load `workspace_ops` + `terminal_ops` together unless you will use BOTH in this task (e.g. edit files AND run tests). File-only work → `workspace_ops` only. Questions about capabilities → nothing.
+- Loading tools you do not use wastes context, confuses the user, and is wrong. When in doubt, do not load — ask a short clarifying question in chat instead.
+
+You start with only `load_tool_context` callable. The categories below exist in the system but are NOT callable until you load them. Calling an unloaded category returns `tool_not_loaded`.
+
+Categories you can load (via `load_tool_context` only):
+- workspace_ops — anything file-related: read, search, list, create, edit, rename, delete. Never write source files via the terminal.
+- terminal_ops — shell commands, builds, tests, lint, git, installs, and diagnostics. Use user_visible:false for background commands; user_visible:true only when the user must watch a dev server.
+- plan_tool — present an implementation plan and wait for user approval before invasive or multi-step code changes. Requires workspace_ops in the same load (you must write plan.md before calling plan_tool).
+- todo_tool — drive the persistent execution checklist widget. Load when execution starts — after plan approval, or for any 3+ step task without a formal plan.
+- web_search — look up external docs, APIs, errors, or version-specific facts not in the repo.
+- spawn_subagent — last resort only: parallel git worktrees, large read-only research, or explicit user request. Not for routine file edits or shell work.
+- hil_tool — structured multiple-choice questions via a persistent inline card; blocks until the user answers. Load when you need structured user input during execution or deep-plan work — not for meta/capability questions (answer those in chat).
+
+Which tool for which job (load its category first):
+- Files: create / edit / rename / delete / search / read → workspace_ops
+- Shell: npm / pip / build / test / lint / git / diagnostics → terminal_ops
+- Dev server the user watches in the panel → terminal_ops with user_visible:true
+- Big change needing approval → plan_tool (+ workspace_ops to write plan.md) — **not** when `/deep-plan` or `deep_plan_tool` is already available (use deep plan instead)
+- Track multi-step execution → todo_tool
+- Answer not in the repo → web_search
+- Parallel isolated branches or explicit delegation → spawn_subagent
+- Structured user choice during execution / deep-plan → hil_tool (load first; not for "what tools exist?")
+
+DEEP PLANNING: Rare. `/deep-plan` or arch-shift HIL yes opens `deep_plan_tool` (injected by backend — not via `load_tool_context`). When open, call it; do not load `plan_tool` first.
+
+Typical loads (include only categories this task will use — no extras):
+- Read or edit files only → ["workspace_ops"] — do not load terminal_ops for file-only work
+- Run tests or builds → ["workspace_ops", "terminal_ops"]
+- Invasive or multi-step change → ["workspace_ops", "plan_tool"] — **skip if `deep_plan_tool` is in tools[]** (gate open)
+- External library or API question → ["web_search"], often plus ["workspace_ops"] to apply findings in code
+
+Do not guess unloaded tool schemas. Use only loaded schemas and the guidance injected after load.
 
 Rules you always follow:
 - Engineering Standards come first; apply them while executing, not only when planning.
-- Reason step-by-step before acting
-- For workspace_ops and terminal_ops, NEVER GUESS TOOL SYNTAX. You MUST call `load_tool_context` first to get the exact rules.
-- For plan_tool and todo_tool, the schemas are self-contained. Use them directly based on their descriptions.
+- Reason step-by-step before acting. If the user did not ask you to touch the repo or run commands, your first response must be chat-only — no `load_tool_context`, no tool calls.
 - Once todo_tool is active, do not paste the full checklist into normal assistant prose; update the persistent widget with todo_tool and keep the conversational response focused on findings, requests, or results.
 - Be direct and precise — no filler, no padding
 - Reference specific line numbers and function names when discussing code
@@ -249,9 +275,26 @@ def _build_request_payload(
     workspace_skeleton: str | None = None,
     model: str | None = None,
     active_tool_guidance: str | None = None,
+    active_categories: list[str] | None = None,
+    *,
+    deep_plan_available: bool = False,
 ) -> Dict[str, Any]:
+    guidance_parts: list[str] = []
+    if active_tool_guidance:
+        guidance_parts.append(active_tool_guidance)
+    if deep_plan_available:
+        from app.services.prompt_loader import load_deep_plan_tool_guidance
+
+        deep_guidance = load_deep_plan_tool_guidance()
+        if deep_guidance:
+            guidance_parts.append(deep_guidance)
+    combined_guidance = "\n\n---\n\n".join(guidance_parts) if guidance_parts else None
+
     full_messages: list[Any] = [
-        {"role": "system", "content": _build_system_prompt(workspace_skeleton, active_tool_guidance)},
+        {
+            "role": "system",
+            "content": _build_system_prompt(workspace_skeleton, combined_guidance),
+        },
         *messages,
     ]
 
@@ -259,15 +302,7 @@ def _build_request_payload(
         "model": _model_name(config, model),
         "messages": full_messages,
         "stream": True,
-        "tools": [
-            WORKSPACE_OPS_TOOL_SPEC, 
-            TERMINAL_OPS_TOOL_SPEC, 
-            LOAD_TOOL_CONTEXT_TOOL_SPEC,
-            PLAN_TOOL_SPEC,
-            TODO_TOOL_SPEC,
-            WEB_SEARCH_TOOL_SPEC,
-            SPAWN_SUBAGENT_TOOL_SPEC
-        ],
+        "tools": build_tools_list(active_categories, deep_plan_available=deep_plan_available),
         "tool_choice": "auto",
     }
 
@@ -492,6 +527,9 @@ async def stream_chat_events(
     model: str | None = None,
     context_log_metadata: Dict[str, Any] | None = None,
     active_tool_guidance: str | None = None,
+    active_categories: list[str] | None = None,
+    *,
+    deep_plan_available: bool = False,
 ) -> AsyncIterator[Dict[str, Any]]:
     """
     Stream model output as structured events.
@@ -515,7 +553,15 @@ async def stream_chat_events(
     client = _get_client(base_url=config.llm_base_url, api_key=api_key)
     logger.info("Using LLM key from config")
     
-    payload = _build_request_payload(messages, config, workspace_skeleton, model, active_tool_guidance)
+    payload = _build_request_payload(
+        messages,
+        config,
+        workspace_skeleton,
+        model,
+        active_tool_guidance,
+        active_categories,
+        deep_plan_available=deep_plan_available,
+    )
     _log_llm_context_snapshot(payload, context_log_metadata)
     
     # Log request details for debugging

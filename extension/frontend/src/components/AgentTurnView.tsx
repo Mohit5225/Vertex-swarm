@@ -15,8 +15,9 @@ import {
   turnHasLiveWork,
 } from '../lib/agentTurnTimeline'
 import { type SessionEvent } from '../store/chatStore'
-import { FileEditRow } from './AgentProcess'
+import { FileEditRow } from './FileEditRow'
 import TerminalToolCard from './TerminalToolCard'
+import HilQuestionCard from './HilQuestionCard'
 import ToolCallDebugPanel from './ToolCallDebugPanel'
 
 interface Props {
@@ -243,9 +244,20 @@ const AgentTurnView: React.FC<Props> = ({
 
         if (segment.kind === 'context') {
           return (
-            <p key={segment.id} className="px-1 text-[12px] leading-5 text-[var(--vs-text-tertiary)]">
+            <p
+              key={segment.id}
+              className="px-1 text-[12px] leading-5 text-[var(--vs-text-tertiary)] whitespace-pre-line"
+            >
               {segment.label}
             </p>
+          )
+        }
+
+        if (segment.kind === 'hil') {
+          return (
+            <div key={segment.id} className="relative z-10">
+              <HilQuestionCard card={segment.card} />
+            </div>
           )
         }
 

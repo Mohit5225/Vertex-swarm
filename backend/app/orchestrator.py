@@ -18,12 +18,48 @@ from app.stdio_transport import StdioTransport
 from app.schemas.tool import ToolResultSchema
 from app.services.llm_service import stream_chat_events, format_tool_response
 from app.services.tool_memory import build_tool_memory_from_trace_events, format_tool_memory_for_prompt
+from app.services.tool_registry import build_tools_list, is_loadable_tool_loaded, resolve_loadable_tool_name
 from app.services.prompt_loader import build_injected_guidance, load_categories, SUPPORTED_CATEGORIES
+from app.services.hil_support import validate_hil_ask_payload, normalize_hil_questions, enrich_hil_answers
+from app.services.deep_plan import (
+    DeepPlanOrchestrator,
+    apply_session_start_flags,
+    consume_deep_plan_gate,
+    is_deep_plan_available,
+    planning_gate_answers_confirm_deep_plan,
+    read_session_state,
+    resolve_deep_plan_gate,
+    set_deep_plan_confirmed,
+)
 from app.services.websearch import search_web
 from app.utils.token_profiler import TokenProfiler
 from app.services.llm_service import DEVELOPER_ASSISTANT_PERSONA
-from app.services.tool_schemas import WORKSPACE_OPS_TOOL_SPEC, TERMINAL_OPS_TOOL_SPEC, LOAD_TOOL_CONTEXT_TOOL_SPEC, PLAN_TOOL_SPEC, TODO_TOOL_SPEC, WEB_SEARCH_TOOL_SPEC
 logger = logging.getLogger(__name__)
+
+# How long hil_tool waits for session/hil_respond before failing the tool call.
+_HIL_RESPONSE_TIMEOUT_SECONDS = 86_400
+
+
+class _PendingHilSession:
+    """One blocked hil_tool call — queue receives answers from session/hil_respond."""
+
+    __slots__ = ("queue", "chat_id", "message_id", "tool_call_id", "emit_trace_and_push", "hil_context")
+
+    def __init__(
+        self,
+        *,
+        chat_id: str,
+        message_id: str,
+        tool_call_id: str,
+        emit_trace_and_push: Any,
+        hil_context: str | None = None,
+    ) -> None:
+        self.queue: asyncio.Queue = asyncio.Queue()
+        self.chat_id = chat_id
+        self.message_id = message_id
+        self.tool_call_id = tool_call_id
+        self.emit_trace_and_push = emit_trace_and_push
+        self.hil_context = hil_context
 
 
 class LLMOrchestrator:
@@ -34,6 +70,45 @@ class LLMOrchestrator:
         self.stdio = StdioTransport()
         self.active_tool_queues: dict[str, asyncio.Queue] = {}
         self.job_completion_queues: dict[str, list[dict[str, Any]]] = {}
+        # hil_session_id → blocked ask; only one pending HIL per chat at a time (v1).
+        self.pending_hil_sessions: dict[str, _PendingHilSession] = {}
+        # pipeline_id → approval queue for deep_plan_tool
+        self.pending_deep_plan_approvals: dict[str, asyncio.Queue] = {}
+
+    async def wait_for_deep_plan_approval(
+        self,
+        pipeline_id: str,
+        timeout_seconds: int = 86_400,
+    ) -> dict[str, Any] | None:
+        queue: asyncio.Queue = asyncio.Queue()
+        self.pending_deep_plan_approvals[pipeline_id] = queue
+        try:
+            result = await asyncio.wait_for(queue.get(), timeout=timeout_seconds)
+            if isinstance(result, dict):
+                return result
+            return None
+        except asyncio.TimeoutError:
+            return None
+        finally:
+            self.pending_deep_plan_approvals.pop(pipeline_id, None)
+
+    async def handle_planning_approve(self, pipeline_id: str) -> tuple[bool, str]:
+        queue = self.pending_deep_plan_approvals.get(pipeline_id)
+        if queue is None:
+            return False, "Unknown or expired pipeline_id"
+        await queue.put({"approved": True})
+        return True, "ok"
+
+    async def handle_planning_reject(
+        self,
+        pipeline_id: str,
+        rejection_feedback: str,
+    ) -> tuple[bool, str]:
+        queue = self.pending_deep_plan_approvals.get(pipeline_id)
+        if queue is None:
+            return False, "Unknown or expired pipeline_id"
+        await queue.put({"approved": False, "rejection_feedback": rejection_feedback})
+        return True, "ok"
 
     def enqueue_job_completion(self, chat_id: str, payload: dict[str, Any]) -> None:
         self.job_completion_queues.setdefault(chat_id, []).append(payload)
@@ -64,6 +139,51 @@ class LLMOrchestrator:
             await self.active_tool_queues[tool_call_id].put(result)
         else:
             logger.warning(f"Received tool result for unknown tool_call_id: {tool_call_id}")
+
+    async def handle_hil_respond(
+        self,
+        hil_session_id: str,
+        answers: list[dict[str, Any]],
+    ) -> tuple[bool, str]:
+        """Resolve a blocked hil_tool call. Called from session/hil_respond RPC."""
+        pending = self.pending_hil_sessions.get(hil_session_id)
+        if pending is None:
+            return False, "Unknown or expired hil_session_id"
+
+        # Emit hil_resolved so the inline card updates in place (persisted on the message).
+        resolved_event = _build_event(
+            "hil_resolved",
+            metadata={
+                "hil_session_id": hil_session_id,
+                "answers": answers,
+                "status": "resolved",
+            },
+            chat_id=pending.chat_id,
+            message_id=pending.message_id,
+        )
+        await pending.emit_trace_and_push(resolved_event)
+
+        # Unblock the waiting _execute_tool_call coroutine.
+        await pending.queue.put(answers)
+        return True, "ok"
+
+    async def _wait_for_hil_response(
+        self,
+        hil_session_id: str,
+        timeout_seconds: int = _HIL_RESPONSE_TIMEOUT_SECONDS,
+    ) -> list[dict[str, Any]] | None:
+        pending = self.pending_hil_sessions.get(hil_session_id)
+        if pending is None:
+            return None
+        try:
+            answers = await asyncio.wait_for(pending.queue.get(), timeout=timeout_seconds)
+            if isinstance(answers, list):
+                return answers
+            return None
+        except asyncio.TimeoutError:
+            return None
+        finally:
+            self.pending_hil_sessions.pop(hil_session_id, None)
 
     async def handle_session_start(self, chat_id: str, message: str, context: dict) -> None:
         await _run_agent_loop_impl(self, chat_id, message, context)
@@ -110,6 +230,14 @@ def _preview(value: str, limit: int = 180) -> str:
     if len(normalized) <= limit:
         return normalized
     return f"{normalized[: limit - 3]}..."
+
+
+def _is_hil_tool_call(call: dict[str, Any]) -> bool:
+    return call.get("tool_name") == "hil_tool"
+
+
+def _is_deep_plan_tool_call(call: dict[str, Any]) -> bool:
+    return call.get("tool_name") == "deep_plan_tool"
 
 
 def _build_job_completion_message(payload: dict[str, Any]) -> dict[str, str]:
@@ -334,6 +462,58 @@ def _log_trace_event(
 
 
 # ---------------------------------------------------------------------------
+# Tool call helpers
+# ---------------------------------------------------------------------------
+
+def _is_load_tool_context_call(call: dict[str, Any]) -> bool:
+    tool_name = call.get("tool_name", "")
+    return tool_name in ("load_tool_context", "workspace_ops.load_tool_context")
+
+
+async def _reject_if_tool_not_loaded(
+    *,
+    tool_name: str,
+    tool_call_id: str,
+    tool_args: dict[str, Any],
+    active_categories_holder: list[list[str]],
+    synthetic_session_id: str,
+    chat_id: str,
+    request_message_id: str,
+    emit_trace_and_push: Any,
+    extension_execute: bool = False,
+) -> tuple[str, str, str, str, str | None, dict[str, Any] | None] | None:
+    """Return an error result tuple when a loadable tool was called without loaded context."""
+    loadable_category = resolve_loadable_tool_name(tool_name)
+    if loadable_category is None or is_loadable_tool_loaded(tool_name, active_categories_holder[0]):
+        return None
+
+    result_content = (
+        f"Error: {loadable_category} context is not loaded. "
+        f"Call load_tool_context with ['{loadable_category}'] first — that loads the tool schema and usage guidance together."
+    )
+    tool_event = _build_event(
+        "tool_call",
+        metadata={"phase": "tool_requested", "extension_execute": extension_execute},
+        tool_call_id=tool_call_id,
+        tool_name=tool_name,
+        args=tool_args,
+        session_id=synthetic_session_id,
+        chat_id=str(chat_id),
+        message_id=request_message_id,
+    )
+    await emit_trace_and_push(tool_event)
+    error_event = _build_event(
+        "tool_result",
+        metadata={"phase": "tool_result", "status": "error", "error_code": "tool_not_loaded"},
+        status="error",
+        content=result_content,
+        error_code="tool_not_loaded",
+        tool_call_id=tool_call_id,
+    )
+    await emit_trace_and_push(error_event)
+    return (tool_call_id, tool_name, result_content, "error", "tool_not_loaded", None)
+
+# ---------------------------------------------------------------------------
 # _execute_tool_call
 # ---------------------------------------------------------------------------
 # A standalone coroutine that handles exactly ONE tool call event produced by
@@ -363,13 +543,13 @@ async def _execute_tool_call(
     # ── mutable shared state (load_tool_context updates these) ───────────
     active_tool_guidance_holder: list[str | None],  # [0] is the current value
     active_categories_holder: list[list[str]],       # [0] is the current list
-) -> tuple[str, str, str, str, str | None]:  # (tool_call_id, tool_name, content, status, error_code)
+    deep_plan_available_holder: list[bool] | None = None,
+) -> tuple[str, str, str, str, str | None, dict[str, Any] | None]:
     """Execute a single tool call and return its result tuple.
 
     Designed to run concurrently with other _execute_tool_call coroutines via
-    asyncio.gather.  All I/O is awaited; no shared mutable state is written
-    except through the explicit *_holder lists (which are only written by
-    load_tool_context, and that tool is never parallelised).
+    asyncio.gather, except load_tool_context which must finish before other
+    tools in the same LLM turn can rely on loaded categories.
     """
     tool_name: str = event.get("tool_name", "")
     tool_call_id: str = event.get("tool_call_id", "")
@@ -404,18 +584,221 @@ async def _execute_tool_call(
             logger.exception("Failed to persist active_tool_categories session_id=%s", synthetic_session_id)
 
         if newly_loaded:
-            label = ", ".join(c.replace("_", " ").title() for c in newly_loaded)
             await emit_trace_and_push(
-                build_status_event(f"Loaded {label} guidance", "tool_context_loaded")
+                _build_event(
+                    "status",
+                    metadata={"phase": "tools_loaded", "categories": newly_loaded},
+                    session_id=synthetic_session_id,
+                    chat_id=str(chat_id),
+                    message_id=request_message_id,
+                )
             )
 
         combined_prose = "\n\n---\n\n".join(loaded_prose.values())
-        result_content = (
-            f"Tool guidance loaded for: {', '.join(newly_loaded)}.\n\n{combined_prose}"
-            if newly_loaded
-            else f"No new categories loaded. Already active: {', '.join(active_categories_holder[0]) or 'none'}."
+        if newly_loaded:
+            result_content = (
+                f"Loaded tools: {', '.join(newly_loaded)}. "
+                f"Schemas and usage guidance are ready.\n\n{combined_prose}"
+            )
+        elif active_categories_holder[0]:
+            result_content = f"Already loaded: {', '.join(active_categories_holder[0])}."
+        else:
+            result_content = "No tool categories loaded."
+        return (tool_call_id, tool_name, result_content, "success", None, None)
+
+    not_loaded = await _reject_if_tool_not_loaded(
+        tool_name=tool_name,
+        tool_call_id=tool_call_id,
+        tool_args=tool_args,
+        active_categories_holder=active_categories_holder,
+        synthetic_session_id=synthetic_session_id,
+        chat_id=chat_id,
+        request_message_id=request_message_id,
+        emit_trace_and_push=emit_trace_and_push,
+        extension_execute=resolve_loadable_tool_name(tool_name) in ("workspace_ops", "terminal_ops"),
+    )
+    if not_loaded is not None:
+        return not_loaded
+
+    # ── hil_tool ──────────────────────────────────────────────────────────
+    # Blocks the agent until session/hil_respond delivers answers (not a chat message).
+    if tool_name == "hil_tool":
+        validation_error, error_code = validate_hil_ask_payload(tool_args)
+
+        tool_event = _build_event(
+            "tool_call",
+            metadata={"phase": "tool_requested", "extension_execute": False},
+            tool_call_id=tool_call_id,
+            tool_name=tool_name,
+            args=tool_args,
+            session_id=synthetic_session_id,
+            chat_id=str(chat_id),
+            message_id=request_message_id,
         )
-        return (tool_call_id, tool_name, result_content, "success", None)
+        await emit_trace_and_push(tool_event)
+
+        if validation_error:
+            error_event = _build_event(
+                "tool_result",
+                metadata={"phase": "tool_result", "status": "error", "error_code": error_code},
+                status="error",
+                content=validation_error,
+                error_code=error_code,
+                tool_call_id=tool_call_id,
+            )
+            await emit_trace_and_push(error_event)
+            return (tool_call_id, tool_name, validation_error, "error", error_code, None)
+
+        # One pending HIL per chat — concurrent asks would route answers to the wrong agent.
+        if orchestrator.pending_hil_sessions:
+            busy_msg = "Another HIL question is already pending. Wait for the user to answer it first."
+            error_event = _build_event(
+                "tool_result",
+                metadata={"phase": "tool_result", "status": "error", "error_code": "hil_already_pending"},
+                status="error",
+                content=busy_msg,
+                error_code="hil_already_pending",
+                tool_call_id=tool_call_id,
+            )
+            await emit_trace_and_push(error_event)
+            return (tool_call_id, tool_name, busy_msg, "error", "hil_already_pending", None)
+
+        payload = tool_args.get("payload", {})
+        questions = normalize_hil_questions(payload.get("questions", []))
+        hil_session_id = f"hil_{uuid4().hex[:12]}"
+        agent_label = str(payload.get("agent_label", "")).strip()
+        hil_context = payload.get("context")
+
+        orchestrator.pending_hil_sessions[hil_session_id] = _PendingHilSession(
+            chat_id=str(chat_id),
+            message_id=request_message_id,
+            tool_call_id=tool_call_id,
+            emit_trace_and_push=emit_trace_and_push,
+            hil_context=str(hil_context) if hil_context is not None else None,
+        )
+
+        # hil_question drives HilQuestionCard in the webview (persisted on message.events).
+        await emit_trace_and_push(
+            _build_event(
+                "hil_question",
+                metadata={
+                    "hil_session_id": hil_session_id,
+                    "agent_label": agent_label,
+                    "questions": questions,
+                    "current_index": 1,
+                    "total": len(questions),
+                    "status": "pending",
+                },
+                chat_id=str(chat_id),
+                message_id=request_message_id,
+            )
+        )
+        await emit_trace_and_push(
+            build_status_event("HIL card active — answer to continue", "hil_card")
+        )
+
+        raw_answers = await orchestrator._wait_for_hil_response(hil_session_id)
+        if raw_answers is None:
+            timeout_msg = "Timed out waiting for HIL response."
+            error_event = _build_event(
+                "tool_result",
+                metadata={"phase": "tool_result", "status": "error", "error_code": "hil_timeout"},
+                status="error",
+                content=timeout_msg,
+                error_code="hil_timeout",
+                tool_call_id=tool_call_id,
+            )
+            await emit_trace_and_push(error_event)
+            return (tool_call_id, tool_name, timeout_msg, "error", "hil_timeout", None)
+
+        enriched = enrich_hil_answers(questions, raw_answers)
+        if hil_context == "planning_gate" and planning_gate_answers_confirm_deep_plan(enriched):
+            await set_deep_plan_confirmed(orchestrator, str(chat_id))
+            if deep_plan_available_holder is not None:
+                deep_plan_available_holder[0] = True
+        result_content = "User answered HIL questions."
+        tool_data = {"hil_session_id": hil_session_id, "answers": enriched}
+        success_event = _build_event(
+            "tool_result",
+            metadata={"phase": "tool_result", "status": "success"},
+            status="success",
+            content=result_content,
+            tool_call_id=tool_call_id,
+            data=tool_data,
+        )
+        await emit_trace_and_push(success_event)
+        return (tool_call_id, tool_name, result_content, "success", None, tool_data)
+
+    # ── deep_plan_tool ────────────────────────────────────────────────────
+    if tool_name == "deep_plan_tool":
+        deep_available = (
+            deep_plan_available_holder[0]
+            if deep_plan_available_holder is not None
+            else False
+        )
+        tool_event = _build_event(
+            "tool_call",
+            metadata={"phase": "tool_requested", "extension_execute": False},
+            tool_call_id=tool_call_id,
+            tool_name=tool_name,
+            args=tool_args,
+            session_id=synthetic_session_id,
+            chat_id=str(chat_id),
+            message_id=request_message_id,
+        )
+        await emit_trace_and_push(tool_event)
+
+        if not deep_available:
+            err = (
+                "deep_plan_tool is not available. User must type /deep-plan or confirm deep "
+                "planning via hil_tool (planning_gate) first."
+            )
+            error_event = _build_event(
+                "tool_result",
+                metadata={"phase": "tool_result", "status": "error", "error_code": "deep_plan_not_available"},
+                status="error",
+                content=err,
+                error_code="deep_plan_not_available",
+                tool_call_id=tool_call_id,
+            )
+            await emit_trace_and_push(error_event)
+            return (tool_call_id, tool_name, err, "error", "deep_plan_not_available", None)
+
+        action = tool_args.get("action")
+        payload = tool_args.get("payload", {})
+        if not isinstance(payload, dict):
+            payload = {}
+
+        await emit_trace_and_push(
+            build_status_event("Deep planning pipeline running...", "deep_plan_running")
+        )
+
+        await consume_deep_plan_gate(orchestrator, str(chat_id))
+        if deep_plan_available_holder is not None:
+            deep_plan_available_holder[0] = False
+
+        runner = DeepPlanOrchestrator(
+            orchestrator,
+            chat_id=str(chat_id),
+            message_id=request_message_id,
+            session_id=synthetic_session_id,
+            emit_trace_and_push=emit_trace_and_push,
+            build_event=_build_event,
+        )
+        status, content, data = await runner.run(action=str(action), payload=payload)
+        result_status = "success" if status == "success" else "error"
+        error_code = None if status == "success" else (data or {}).get("error_code", "pipeline_error")
+        result_event = _build_event(
+            "tool_result",
+            metadata={"phase": "tool_result", "status": result_status, "error_code": error_code},
+            status=result_status,
+            content=content,
+            error_code=error_code,
+            tool_call_id=tool_call_id,
+            data=data,
+        )
+        await emit_trace_and_push(result_event)
+        return (tool_call_id, tool_name, content, result_status, error_code, data)
 
     # ── plan_tool ─────────────────────────────────────────────────────────
     if tool_name == "plan_tool":
@@ -438,13 +821,13 @@ async def _execute_tool_call(
             result_content = "Error: 'revise' action requires a 'plan_id' in the payload."
             error_event = _build_event("tool_result", metadata={"phase": "tool_result", "status": "error", "error_code": "validation_error"}, status="error", content=result_content, error_code="validation_error", tool_call_id=tool_call_id)
             await emit_trace_and_push(error_event)
-            return (tool_call_id, tool_name, result_content, "error", "validation_error")
+            return (tool_call_id, tool_name, result_content, "error", "validation_error", None)
 
         if action == "present" and payload.get("plan_id"):
             result_content = "Error: 'present' action must NOT include a 'plan_id' in the payload."
             error_event = _build_event("tool_result", metadata={"phase": "tool_result", "status": "error", "error_code": "validation_error"}, status="error", content=result_content, error_code="validation_error", tool_call_id=tool_call_id)
             await emit_trace_and_push(error_event)
-            return (tool_call_id, tool_name, result_content, "error", "validation_error")
+            return (tool_call_id, tool_name, result_content, "error", "validation_error", None)
 
         title = payload.get("title", "Implementation Plan")
         plan_markdown = payload.get("plan_markdown", "")
@@ -462,7 +845,7 @@ async def _execute_tool_call(
         result_content = "Plan presented to user. Waiting for user approval."
         success_event = _build_event("tool_result", metadata={"phase": "tool_result", "status": "success"}, status="success", content=result_content, tool_call_id=tool_call_id)
         await emit_trace_and_push(success_event)
-        return (tool_call_id, tool_name, result_content, "success", None)
+        return (tool_call_id, tool_name, result_content, "success", None, None)
 
     # ── todo_tool ─────────────────────────────────────────────────────────
     if tool_name == "todo_tool":
@@ -486,11 +869,13 @@ async def _execute_tool_call(
             await emit_trace_and_push(_build_event("todo_init", metadata={"plan_id": payload.get("plan_id"), "items": todos}))
         elif action == "update":
             await emit_trace_and_push(_build_event("todo_update", metadata={"items": todos}))
+        elif action == "clear":
+            await emit_trace_and_push(_build_event("todo_clear", metadata={}))
 
         result_content = "Todo list updated successfully."
         success_event = _build_event("tool_result", metadata={"phase": "tool_result", "status": "success"}, status="success", content=result_content, tool_call_id=tool_call_id)
         await emit_trace_and_push(success_event)
-        return (tool_call_id, tool_name, result_content, "success", None)
+        return (tool_call_id, tool_name, result_content, "success", None, None)
 
     # ── web_search ────────────────────────────────────────────────────────
     if tool_name == "web_search":
@@ -518,13 +903,13 @@ async def _execute_tool_call(
             logger.info("Web search successful for query: %s", query)
             success_event = _build_event("tool_result", metadata={"phase": "tool_result", "status": "success"}, status="success", content="Web search successful", tool_call_id=tool_call_id)
             await emit_trace_and_push(success_event)
-            return (tool_call_id, tool_name, result_content, "success", None)
+            return (tool_call_id, tool_name, result_content, "success", None, None)
         except Exception as e:
             logger.error("Web search failed: %s", e, exc_info=True)
             result_content = f"Web search failed: {str(e)}"
             error_event = _build_event("tool_result", metadata={"phase": "tool_result", "status": "error", "error_code": "search_error"}, status="error", content=result_content, error_code="search_error", tool_call_id=tool_call_id)
             await emit_trace_and_push(error_event)
-            return (tool_call_id, tool_name, result_content, "error", "search_error")
+            return (tool_call_id, tool_name, result_content, "error", "search_error", None)
 
     # ── spawn_subagent ────────────────────────────────────────────────────
     if tool_name == "spawn_subagent":
@@ -578,13 +963,13 @@ async def _execute_tool_call(
             logger.info("Subagent %s completed.", agent_id)
             success_event = _build_event("tool_result", metadata={"phase": "tool_result", "status": "success"}, status="success", content=f"Subagent finished. Result: {subagent_result}", tool_call_id=tool_call_id)
             await emit_trace_and_push(success_event)
-            return (tool_call_id, tool_name, subagent_result, "success", None)
+            return (tool_call_id, tool_name, subagent_result, "success", None, None)
         except Exception as e:
             logger.error("Subagent %s failed: %s", agent_id, e, exc_info=True)
             result_content = f"Subagent crashed with exception: {str(e)}"
             error_event = _build_event("tool_result", metadata={"phase": "tool_result", "status": "error", "error_code": "subagent_error"}, status="error", content=result_content, error_code="subagent_error", tool_call_id=tool_call_id)
             await emit_trace_and_push(error_event)
-            return (tool_call_id, tool_name, result_content, "error", "subagent_error")
+            return (tool_call_id, tool_name, result_content, "error", "subagent_error", None)
 
     # ── workspace_ops / terminal_ops (extension-side tools) ───────────────
     # Emit the tool_call event; the VS Code extension picks it up, executes
@@ -623,7 +1008,7 @@ async def _execute_tool_call(
                 message_id=request_message_id,
             )
         )
-        return (tool_call_id, tool_name, timeout_content, "error", "tool_timeout")
+        return (tool_call_id, tool_name, timeout_content, "error", "tool_timeout", None)
 
     tool_result_event = _build_event(
         "tool_result",
@@ -649,6 +1034,7 @@ async def _execute_tool_call(
         tool_result.content,
         tool_result.status,
         tool_result.error_code,
+        None,
     )
 
 
@@ -667,7 +1053,18 @@ async def _run_agent_loop_impl(
     req_request_context = req_request_context_raw
     
     req_workspace_skeleton = context.get("workspace_skeleton", None)
-    
+
+    await apply_session_start_flags(
+        orchestrator,
+        chat_id,
+        deep_plan_requested=bool(context.get("deep_plan_requested")),
+    )
+
+    session_state = await read_session_state(orchestrator, chat_id)
+    working_memory = session_state.get("working_memory", {}) if isinstance(session_state, dict) else {}
+    if context.get("deep_plan_requested"):
+        working_memory = {**working_memory, "deep_plan_requested": True}
+
     state_str = await orchestrator.nats.kv_get("SESSIONS", f"session.{chat_id}")
     existing_active_categories = context.get("active_tool_categories", [])
     existing_tool_memory = {}
@@ -677,6 +1074,8 @@ async def _run_agent_loop_impl(
             # Merge context inherited categories with session persisted categories
             existing_active_categories = list(dict.fromkeys(existing_active_categories + state["working_memory"]["active_tool_categories"]))
         existing_tool_memory = state.get("working_memory", {}).get("tool_memory", {})
+        if isinstance(state.get("working_memory"), dict):
+            working_memory = {**working_memory, **state["working_memory"]}
 
     await orchestrator.file_store.append_message(chat_id, "user", message, message_id=request_message_id)
     history_raw = await orchestrator.file_store.read_messages(chat_id)
@@ -715,6 +1114,20 @@ async def _run_agent_loop_impl(
                 f"Worktree Root: {worktree_path}\n"
                 "You are operating inside a dedicated git worktree. ALL file read/write operations "
                 "MUST be scoped to this path. Do not access files outside this root."
+            ),
+        })
+
+    deep_plan_gate_open = resolve_deep_plan_gate(
+        working_memory,
+        this_turn_deep_plan_requested=bool(context.get("deep_plan_requested")),
+    )
+    if deep_plan_gate_open:
+        system_context_messages.append({
+            "role": "system",
+            "content": (
+                "DEEP PLAN GATE OPEN: `deep_plan_tool` is already in tools[] with its usage instructions. "
+                "Call `deep_plan_tool` (action start) now. Do NOT `load_tool_context` for plan_tool or "
+                "workspace_ops to start deep planning — that is the standard plan path, not deep plan."
             ),
         })
 
@@ -779,17 +1192,19 @@ async def _run_agent_loop_impl(
     # with itself because the LLM will only call it once per turn.
     active_tool_guidance_holder: list[str | None] = [active_tool_guidance]
     active_categories_holder: list[list[str]] = [existing_active_categories]
+    deep_plan_available_holder: list[bool] = [
+        resolve_deep_plan_gate(
+            working_memory,
+            this_turn_deep_plan_requested=bool(context.get("deep_plan_requested")),
+        )
+    ]
 
     profiler = TokenProfiler(request_message_id)
     profiler.log_constant("dev_persona", DEVELOPER_ASSISTANT_PERSONA)
-    profiler.log_constant("tool_schemas", json.dumps([
-        WORKSPACE_OPS_TOOL_SPEC,
-        TERMINAL_OPS_TOOL_SPEC,
-        LOAD_TOOL_CONTEXT_TOOL_SPEC,
-        PLAN_TOOL_SPEC,
-        TODO_TOOL_SPEC,
-        WEB_SEARCH_TOOL_SPEC
-    ]))
+    profiler.log_constant(
+        "tool_schemas",
+        json.dumps(build_tools_list(existing_active_categories, deep_plan_available=deep_plan_available_holder[0])),
+    )
     profiler.log_constant("ide_context", request_context_message)
     profiler.log_constant("workspace_skeleton", req_workspace_skeleton)
     profiler.log_constant("tool_memory", tool_memory_message)
@@ -843,7 +1258,9 @@ async def _run_agent_loop_impl(
                         "model": orchestrator.config.llm_model,
                         "is_fallback": False,
                     },
-                    active_tool_guidance=active_tool_guidance,
+                    active_tool_guidance=active_tool_guidance_holder[0],
+                    active_categories=active_categories_holder[0],
+                    deep_plan_available=deep_plan_available_holder[0],
                 )
             except RateLimitError:
                 logger.warning(
@@ -867,6 +1284,8 @@ async def _run_agent_loop_impl(
                         "is_fallback": True,
                     },
                     active_tool_guidance=active_tool_guidance_holder[0],
+                    active_categories=active_categories_holder[0],
+                    deep_plan_available=deep_plan_available_holder[0],
                 )
 
             # ── Phase 1: drain the full LLM stream ────────────────────────────────
@@ -988,28 +1407,57 @@ async def _run_agent_loop_impl(
                     )
                 )
 
-                # Launch all tool coroutines in parallel
-                gather_results = await asyncio.gather(
-                    *[
-                        _execute_tool_call(
-                            orchestrator,
-                            call,
-                            user_id=user_id,
-                            chat_id=chat_id,
-                            synthetic_session_id=synthetic_session_id,
-                            request_message_id=request_message_id,
-                            req_workspace_skeleton=req_workspace_skeleton,
-                            existing_active_categories=existing_active_categories,
-                            context=context,
-                            emit_trace_and_push=emit_trace_and_push,
-                            build_status_event=build_status_event,
-                            active_tool_guidance_holder=active_tool_guidance_holder,
-                            active_categories_holder=active_categories_holder,
-                        )
-                        for call in collected_tool_calls
-                    ],
-                    return_exceptions=True,
-                )
+                # load_tool_context must run before other tools in the same turn
+                # so loaded categories are visible to parallel execution tools.
+                # hil_tool blocks on user input — never run it in parallel with other tools.
+                async def _invoke_tool_call(call: dict[str, Any]):
+                    return await _execute_tool_call(
+                        orchestrator,
+                        call,
+                        user_id=user_id,
+                        chat_id=chat_id,
+                        synthetic_session_id=synthetic_session_id,
+                        request_message_id=request_message_id,
+                        req_workspace_skeleton=req_workspace_skeleton,
+                        existing_active_categories=existing_active_categories,
+                        context=context,
+                        emit_trace_and_push=emit_trace_and_push,
+                        build_status_event=build_status_event,
+                        active_tool_guidance_holder=active_tool_guidance_holder,
+                        active_categories_holder=active_categories_holder,
+                        deep_plan_available_holder=deep_plan_available_holder,
+                    )
+
+                load_calls = [c for c in collected_tool_calls if _is_load_tool_context_call(c)]
+                hil_calls = [c for c in collected_tool_calls if _is_hil_tool_call(c)]
+                deep_plan_calls = [c for c in collected_tool_calls if _is_deep_plan_tool_call(c)]
+                other_calls = [
+                    c
+                    for c in collected_tool_calls
+                    if not _is_load_tool_context_call(c)
+                    and not _is_hil_tool_call(c)
+                    and not _is_deep_plan_tool_call(c)
+                ]
+
+                results_by_id: dict[str, Any] = {}
+                for call in load_calls:
+                    results_by_id[call["tool_call_id"]] = await _invoke_tool_call(call)
+
+                if other_calls:
+                    other_results = await asyncio.gather(
+                        *[_invoke_tool_call(call) for call in other_calls],
+                        return_exceptions=True,
+                    )
+                    for call, raw_result in zip(other_calls, other_results):
+                        results_by_id[call["tool_call_id"]] = raw_result
+
+                for call in hil_calls:
+                    results_by_id[call["tool_call_id"]] = await _invoke_tool_call(call)
+
+                for call in deep_plan_calls:
+                    results_by_id[call["tool_call_id"]] = await _invoke_tool_call(call)
+
+                gather_results = [results_by_id[call["tool_call_id"]] for call in collected_tool_calls]
 
                 # Append one tool-role message per result
                 for call, raw_result in zip(collected_tool_calls, gather_results):
@@ -1033,8 +1481,8 @@ async def _run_agent_loop_impl(
                             ),
                         })
                     else:
-                        # raw_result is (tool_call_id, tool_name, content, status, error_code)
-                        _tc_id, _tc_name, content, status, error_code = raw_result
+                        # raw_result is (tool_call_id, tool_name, content, status, error_code, tool_data)
+                        _tc_id, _tc_name, content, status, error_code, tool_data = raw_result
                         profiler.log_turn(llm_round, f"tool_output_{_tc_name}", content)
                         llm_messages.append({
                             "role": "tool",
@@ -1043,6 +1491,7 @@ async def _run_agent_loop_impl(
                                 tool_status=status,
                                 tool_content=content,
                                 error_code=error_code,
+                                tool_data=tool_data,
                             ),
                         })
 

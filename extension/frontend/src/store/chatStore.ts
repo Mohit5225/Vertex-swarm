@@ -9,6 +9,8 @@ export interface SessionEvent {
   id: string
   type: 'thinking' | 'code' | 'output' | 'error' | 'status' | 'tool_call' | 'tool_result'
       | 'plan_permission_request' | 'plan_chunk' | 'plan_ready' | 'todo_init' | 'todo_update' | 'todo_clear'
+      | 'hil_question' | 'hil_resolved'
+      | 'deep_plan_started' | 'deep_plan_stage_status' | 'deep_plan_ready' | 'deep_plan_permission_request'
   content?: string
   timestamp?: number
   metadata?: Record<string, unknown>
@@ -57,6 +59,7 @@ interface ChatState {
   isStreaming: boolean
   error: string | null
   planReadyForMessageId: string | null
+  deepPlanReadyForMessageId: string | null
   currentTodo: TodoState | null
 
   // Actions
@@ -79,6 +82,7 @@ interface ChatState {
   patchMessageId: (tempId: string, realId: string) => void
   truncateAfter: (messageId: string) => void
   setPlanReadyForMessageId: (messageId: string | null) => void
+  setDeepPlanReadyForMessageId: (messageId: string | null) => void
   clearTodo: () => void
 }
 
@@ -251,6 +255,7 @@ export const useChatStore = create<ChatState>((set) => ({
   isStreaming: false,
   error: null,
   planReadyForMessageId: null,
+  deepPlanReadyForMessageId: null,
   currentTodo: null,
 
   setCurrentChatId: (id: string | null) => {
@@ -488,6 +493,8 @@ export const useChatStore = create<ChatState>((set) => ({
       ),
       activeMessageId: state.activeMessageId === tempId ? realId : state.activeMessageId,
       planReadyForMessageId: state.planReadyForMessageId === tempId ? realId : state.planReadyForMessageId,
+      deepPlanReadyForMessageId:
+        state.deepPlanReadyForMessageId === tempId ? realId : state.deepPlanReadyForMessageId,
       currentTodo:
         state.currentTodo?.sourceMessageId === tempId
           ? { ...state.currentTodo, sourceMessageId: realId }
@@ -522,12 +529,17 @@ export const useChatStore = create<ChatState>((set) => ({
       isStreaming: false,
       chats: state.chats,
       planReadyForMessageId: null,
+      deepPlanReadyForMessageId: null,
       currentTodo: null,
     }))
   },
 
   setPlanReadyForMessageId: (messageId: string | null) => {
     set({ planReadyForMessageId: messageId })
+  },
+
+  setDeepPlanReadyForMessageId: (messageId: string | null) => {
+    set({ deepPlanReadyForMessageId: messageId })
   },
 
   clearTodo: () => {

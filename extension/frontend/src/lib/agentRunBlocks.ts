@@ -9,6 +9,7 @@ import {
   getEventToolName,
   normalizeEventText,
 } from './sessionEvents'
+import { loadedToolsLabelFromStatusEvent } from './loadedTools'
 
 type UnknownRecord = Record<string, unknown>
 
@@ -596,18 +597,18 @@ export const buildAgentRunBlocks = (events: SessionEvent[], content?: string): A
     if (event.type === 'status') {
       const phase = getEventPhase(event)
 
-      if (phase === 'tool_context_loaded') {
-        const text = normalizeEventText(event.content)
-        if (text) {
+      if (phase === 'tools_loaded' || phase === 'tool_context_loaded') {
+        const label = loadedToolsLabelFromStatusEvent(event)
+        if (label) {
           const block = ensureProcessBlock()
           block.steps.push({
             kind: 'node',
             node: {
               id: event.id,
-              toolName: 'context_loaded',
-              action: 'context_loaded',
+              toolName: 'tools_loaded',
+              action: 'tools_loaded',
               state: 'success',
-              summary: text,
+              summary: label,
               startedAt: event.timestamp,
               completedAt: event.timestamp,
             }

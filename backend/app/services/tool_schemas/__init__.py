@@ -5,6 +5,8 @@ from .plan import PLAN_TOOL_SPEC
 from .todo import TODO_TOOL_SPEC
 from .web_search import WEB_SEARCH_TOOL_SPEC
 from .subagent import SPAWN_SUBAGENT_TOOL_SPEC
+from .hil_tool import HIL_TOOL_SPEC
+from .deep_plan import DEEP_PLAN_TOOL_SPEC
 
 __all__ = [
     "WORKSPACE_OPS_TOOL_SPEC",
@@ -14,4 +16,6 @@ __all__ = [
     "TODO_TOOL_SPEC",
     "WEB_SEARCH_TOOL_SPEC",
     "SPAWN_SUBAGENT_TOOL_SPEC",
+    "HIL_TOOL_SPEC",
+    "DEEP_PLAN_TOOL_SPEC",
 ]

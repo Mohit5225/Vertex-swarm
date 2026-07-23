@@ -13,6 +13,12 @@ import {
   getEventToolCallId,
   normalizeEventText,
 } from './sessionEvents'
+import { loadedToolsLabelFromStatusEvent } from './loadedTools'
+import {
+  applyHilResolvedEvent,
+  cardFromHilQuestionEvent,
+} from './hilCardState'
+import { type HilCardState } from './hilTypes'
 
 const HIDDEN_STATUS_PHASES = new Set([
   'preparing_context',
@@ -22,6 +28,7 @@ const HIDDEN_STATUS_PHASES = new Set([
   'tool_result',
   'tool_result_received',
   'resuming_after_tool',
+  'awaiting_hil',
   'assistant_output',
   'completed',
 ])
@@ -76,6 +83,11 @@ export type TurnSegment =
       kind: 'context'
       id: string
       label: string
+    }
+  | {
+      kind: 'hil'
+      id: string
+      card: HilCardState
     }
   | {
       kind: 'system'
@@ -486,7 +498,7 @@ const TERMINAL_CARD_ACTIONS = new Set([
 ])
 
 const classifyNode = (node: ToolExecutionNode) => {
-  if (node.action === 'context_loaded') {
+  if (node.action === 'tools_loaded' || node.action === 'context_loaded') {
     return 'context' as const
   }
   if (
@@ -533,6 +545,8 @@ export const buildAgentTurnTimeline = (
   const segments: TurnSegment[] = []
   const openToolNodes = new Map<string, ToolExecutionNode>()
   const segmentNodes = new Map<string, ToolExecutionNode>()
+  const hilCardBySession = new Map<string, HilCardState>()
+  const skippedHilToolCallIds = new Set<string>()
 
   let exploreBuffer: ToolExecutionNode[] = []
   let activeExploreSegment: Extract<TurnSegment, { kind: 'explore' }> | null = null
@@ -773,6 +787,13 @@ export const buildAgentTurnTimeline = (
     if (event.type === 'tool_call') {
       flushThought(false)
       const node = createToolNodeFromCall(event)
+      // hil_tool UI is the inline card — skip the generic tool receipt row
+      if (node.toolName === 'hil_tool') {
+        if (node.toolCallId) {
+          skippedHilToolCallIds.add(node.toolCallId)
+        }
+        continue
+      }
       if (node.toolCallId) {
         openToolNodes.set(node.toolCallId, node)
       }
@@ -782,7 +803,16 @@ export const buildAgentTurnTimeline = (
 
     if (event.type === 'tool_result') {
       const toolCallId = getEventToolCallId(event)
+      if (toolCallId && skippedHilToolCallIds.has(toolCallId)) {
+        skippedHilToolCallIds.delete(toolCallId)
+        continue
+      }
+
       const matchingNode = toolCallId ? openToolNodes.get(toolCallId) : undefined
+
+      if (matchingNode?.toolName === 'hil_tool') {
+        continue
+      }
 
       if (matchingNode) {
         applyToolResultToNode(matchingNode, event)
@@ -796,19 +826,62 @@ export const buildAgentTurnTimeline = (
       continue
     }
 
+    if (event.type === 'hil_question') {
+      const card = cardFromHilQuestionEvent(event)
+      if (!card) {
+        continue
+      }
+      flushWorkBuffers()
+      hilCardBySession.set(card.hilSessionId, card)
+      segments.push({
+        kind: 'hil',
+        id: card.hilSessionId,
+        card,
+      })
+      continue
+    }
+
+    if (event.type === 'hil_resolved') {
+      const updated = applyHilResolvedEvent(hilCardBySession, event)
+      if (!updated) {
+        continue
+      }
+      const segmentIndex = segments.findIndex(
+        (segment) => segment.kind === 'hil' && segment.id === updated.hilSessionId
+      )
+      if (segmentIndex !== -1) {
+        segments[segmentIndex] = {
+          kind: 'hil',
+          id: updated.hilSessionId,
+          card: updated,
+        }
+      }
+      continue
+    }
+
     if (event.type === 'status') {
       const phase = getEventPhase(event)
 
-      if (phase === 'tool_context_loaded') {
-        const text = normalizeEventText(event.content)
-        if (text) {
+      if (phase === 'tools_loaded' || phase === 'tool_context_loaded') {
+        const label = loadedToolsLabelFromStatusEvent(event)
+        if (label) {
           flushWorkBuffers()
           segments.push({
             kind: 'context',
             id: event.id,
-            label: text,
+            label,
           })
         }
+        continue
+      }
+
+      if (phase === 'hil_card' || phase === 'awaiting_hil') {
+        flushWorkBuffers()
+        segments.push({
+          kind: 'context',
+          id: event.id,
+          label: 'HIL card active — answer to continue',
+        })
         continue
       }
 
@@ -890,6 +963,10 @@ export const segmentIsLive = (segment: TurnSegment, isTurnLive: boolean) => {
 
   if (segment.kind === 'edit' || segment.kind === 'terminal' || segment.kind === 'tool') {
     return segment.node.state === 'running'
+  }
+
+  if (segment.kind === 'hil') {
+    return segment.card.status === 'pending'
   }
 
   return false
@@ -1000,6 +1077,8 @@ export const summarizeTurnRollup = (segments: TurnSegment[]) => {
 
 export const segmentIsAlwaysVisible = (segment: TurnSegment) =>
   segment.kind === 'narrative' ||
+  segment.kind === 'context' ||
+  segment.kind === 'hil' ||
   segment.kind === 'edit' ||
   segment.kind === 'terminal' ||
   segment.kind === 'system'

@@ -15,7 +15,15 @@ _PROMPTS_DIR = Path(__file__).parent.parent / "prompts" / "tools"
 _cache: dict[str, str] = {}
 
 # Canonical list of supported categories
-SUPPORTED_CATEGORIES: list[str] = ["workspace_ops", "terminal_ops"]
+SUPPORTED_CATEGORIES: list[str] = [
+    "workspace_ops",
+    "terminal_ops",
+    "plan_tool",
+    "todo_tool",
+    "web_search",
+    "spawn_subagent",
+    "hil_tool",
+]
 
 
 def load_category(category: str) -> Optional[str]:
@@ -75,3 +83,24 @@ def build_injected_guidance(active_categories: list[str]) -> str:
             sections.append(prose)
 
     return "\n\n---\n\n".join(sections)
+
+
+_DEEP_PLAN_GUIDANCE_CACHE: str | None = None
+
+
+def load_deep_plan_tool_guidance() -> str | None:
+    """Usage guidance for deep_plan_tool — injected when session gate opens."""
+    global _DEEP_PLAN_GUIDANCE_CACHE
+    if _DEEP_PLAN_GUIDANCE_CACHE is not None:
+        return _DEEP_PLAN_GUIDANCE_CACHE
+
+    file_path = _PROMPTS_DIR / "deep_plan_tool.md"
+    if not file_path.exists():
+        logger.error("prompt_loader: deep_plan_tool guidance missing: %s", file_path)
+        return None
+    try:
+        _DEEP_PLAN_GUIDANCE_CACHE = file_path.read_text(encoding="utf-8").strip()
+        return _DEEP_PLAN_GUIDANCE_CACHE
+    except OSError as exc:
+        logger.error("prompt_loader: failed to read %s: %s", file_path, exc)
+        return None

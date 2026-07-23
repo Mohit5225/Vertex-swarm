@@ -16,6 +16,12 @@ const KNOWN_EVENT_TYPES: SessionEvent['type'][] = [
   'todo_init',
   'todo_update',
   'todo_clear',
+  'hil_question',
+  'hil_resolved',
+  'deep_plan_started',
+  'deep_plan_stage_status',
+  'deep_plan_ready',
+  'deep_plan_permission_request',
 ]
 
 const asRecord = (value: unknown): UnknownRecord | undefined =>

@@ -8,6 +8,7 @@ import { describePendingMessage } from '../lib/trace'
 import { isLiveAgentTurn } from '../lib/liveAgentTurn'
 import { getVsCodeApi } from '../lib/vscode'
 import PlanCard from './PlanCard'
+import DeepPlanCard from './DeepPlanCard'
 import { FileChangesCard } from './FileChangesCard'
 import { collectMessageFileChanges } from '../lib/messageDiffs'
 import AgentTurnView from './AgentTurnView'
@@ -31,13 +32,14 @@ const renderAssistantText = (content: string) => (
 const MessageRenderer: React.FC<Props> = ({ message }) => {
   const isUser = message.type === 'user'
   const isSystem = message.type === 'system'
-  const { activeMessageId, isStreaming, messages, currentChatId, planReadyForMessageId } =
+  const { activeMessageId, isStreaming, messages, currentChatId, planReadyForMessageId, deepPlanReadyForMessageId } =
     useChatStore((state) => ({
       activeMessageId: state.activeMessageId,
       isStreaming: state.isStreaming,
       messages: state.messages,
       currentChatId: state.currentChatId,
       planReadyForMessageId: state.planReadyForMessageId,
+      deepPlanReadyForMessageId: state.deepPlanReadyForMessageId,
     }))
   const isStreamingMessage = isLiveAgentTurn(
     message,
@@ -62,6 +64,20 @@ const MessageRenderer: React.FC<Props> = ({ message }) => {
     () => message.events?.some((e) => e.type === 'plan_permission_request'),
     [message.events]
   )
+
+  const hasDeepPlanPermissionRequest = useMemo(
+    () => message.events?.some((e) => e.type === 'deep_plan_permission_request'),
+    [message.events]
+  )
+
+  const deepPlanMeta = useMemo(() => {
+    const evt = message.events?.find((e) => e.type === 'deep_plan_permission_request')
+    const meta = evt?.metadata
+    return {
+      pipelineId: typeof meta?.pipeline_id === 'string' ? meta.pipeline_id : '',
+      title: typeof meta?.title === 'string' ? meta.title : undefined,
+    }
+  }, [message.events])
 
   const renderedAssistantContent = message.content ? renderAssistantText(message.content) : null
 
@@ -96,7 +112,8 @@ const MessageRenderer: React.FC<Props> = ({ message }) => {
     !isStreamingMessage &&
     !message.content?.trim() &&
     !hasRenderableTurn &&
-    !hasPlanPermissionRequest
+    !hasPlanPermissionRequest &&
+    !hasDeepPlanPermissionRequest
   ) {
     return null
   }
@@ -135,6 +152,22 @@ const MessageRenderer: React.FC<Props> = ({ message }) => {
                   planStatus = 'executed';
                 }
                 return <PlanCard status={planStatus} />;
+              })()}
+
+              {hasDeepPlanPermissionRequest && deepPlanMeta.pipelineId && (() => {
+                let deepStatus: 'running' | 'ready' | 'resolved' = 'running';
+                if (deepPlanReadyForMessageId === message.id) {
+                  deepStatus = 'ready';
+                } else if (isHistorical) {
+                  deepStatus = 'resolved';
+                }
+                return (
+                  <DeepPlanCard
+                    pipelineId={deepPlanMeta.pipelineId}
+                    title={deepPlanMeta.title}
+                    status={deepStatus}
+                  />
+                );
               })()}
 
               {!isStreamingMessage && turnChangeSummary.changes.length > 0 && (

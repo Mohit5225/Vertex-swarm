@@ -190,6 +190,57 @@ class WorkerNode:
         except Exception as e:
             logger.error(f"Failed to parse tool result: {e}")
 
+    async def handle_hil_respond(self, params: Dict[str, Any]):
+        """Route HilQuestionCard answers into the blocked hil_tool coroutine."""
+        if not self.orchestrator:
+            return
+        if not self.has_valid_entitlement():
+            return
+
+        hil_session_id = params.get("hil_session_id")
+        answers = params.get("answers")
+        if not hil_session_id or not isinstance(answers, list):
+            logger.warning("session/hil_respond missing hil_session_id or answers")
+            return
+
+        ok, message = await self.orchestrator.handle_hil_respond(hil_session_id, answers)
+        if not ok:
+            logger.warning("session/hil_respond rejected: %s", message)
+
+    async def handle_planning_approve(self, params: Dict[str, Any]):
+        if not self.orchestrator:
+            return
+        if not self.has_valid_entitlement():
+            return
+
+        pipeline_id = params.get("pipeline_id")
+        if not pipeline_id:
+            logger.warning("session/planning_approve missing pipeline_id")
+            return
+
+        ok, message = await self.orchestrator.handle_planning_approve(str(pipeline_id))
+        if not ok:
+            logger.warning("session/planning_approve rejected: %s", message)
+
+    async def handle_planning_reject(self, params: Dict[str, Any]):
+        if not self.orchestrator:
+            return
+        if not self.has_valid_entitlement():
+            return
+
+        pipeline_id = params.get("pipeline_id")
+        feedback = params.get("rejection_feedback", "")
+        if not pipeline_id:
+            logger.warning("session/planning_reject missing pipeline_id")
+            return
+
+        ok, message = await self.orchestrator.handle_planning_reject(
+            str(pipeline_id),
+            str(feedback or ""),
+        )
+        if not ok:
+            logger.warning("session/planning_reject rejected: %s", message)
+
     async def handle_update_keys(self, params: Dict[str, Any]):
         if not self.orchestrator:
             return
@@ -278,6 +329,12 @@ class WorkerNode:
                     await self.handle_session_start(params)
                 elif method == "session/cancel":
                     await self.handle_session_cancel(params)
+                elif method == "session/hil_respond":
+                    await self.handle_hil_respond(params)
+                elif method == "session/planning_approve":
+                    await self.handle_planning_approve(params)
+                elif method == "session/planning_reject":
+                    await self.handle_planning_reject(params)
                 elif method == "tool/result":
                     await self.handle_tool_result(params)
                 elif method == "config/update_keys":
