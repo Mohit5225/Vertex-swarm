@@ -7,6 +7,7 @@ from .web_search import WEB_SEARCH_TOOL_SPEC
 from .subagent import SPAWN_SUBAGENT_TOOL_SPEC
 from .hil_tool import HIL_TOOL_SPEC
 from .deep_plan import DEEP_PLAN_TOOL_SPEC
+from .run_planning_stage import RUN_PLANNING_STAGE_TOOL_SPEC
 
 __all__ = [
     "WORKSPACE_OPS_TOOL_SPEC",
@@ -18,4 +19,5 @@ __all__ = [
     "SPAWN_SUBAGENT_TOOL_SPEC",
     "HIL_TOOL_SPEC",
     "DEEP_PLAN_TOOL_SPEC",
+    "RUN_PLANNING_STAGE_TOOL_SPEC",
 ]

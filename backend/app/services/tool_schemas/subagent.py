@@ -5,14 +5,13 @@ SPAWN_SUBAGENT_TOOL_SPEC: dict[str, Any] = {
     "function": {
         "name": "spawn_subagent",
         "description": (
-            "Spawn an isolated child agent for a narrowly scoped task. Blocks until the subagent returns. "
-            "USE SPARINGLY — default to doing the work yourself with workspace_ops and hidden terminal_ops. "
-            "Valid uses: (1) parallel independent workstreams where each needs its own git worktree_path, "
-            "(2) large read-only research that would bloat parent context, "
-            "(3) user explicitly requested a separate exploration branch. "
-            "DO NOT use for: file creation/editing (use workspace_ops), package installs or builds (use hidden terminal_ops), "
-            "routine sequential plan steps, or because another tool feels slow. "
-            "Never spawn a subagent to work around terminal visibility — use user_visible:false instead."
+            "Spawn an isolated child agent for a scoped task. Blocks until the subagent returns or times out. "
+            "When the user asks to spawn subagents, CALL THIS TOOL — do not rewrite their deliverable yourself. "
+            "Valid uses: (1) user explicitly requested subagents, (2) parallel independent workstreams "
+            "(use worktree_path when mutating in parallel), (3) large research or plan-doc work that should stay "
+            "out of parent context — the child may read AND write the paths named in prompt. "
+            "Do not use for routine one-file edits, or for installs/builds (use terminal_ops with user_visible:false). "
+            "After loading this tool, call it promptly with a complete prompt; do not reload tools instead of spawning."
         ),
         "parameters": {
             "type": "object",
@@ -27,7 +26,7 @@ SPAWN_SUBAGENT_TOOL_SPEC: dict[str, Any] = {
                 },
                 "timeout": {
                     "type": "integer",
-                    "description": "Maximum execution time in seconds (default 300, max 900).",
+                    "description": "Maximum execution time in seconds (default 600, max 900). Use 600–900 for large plan documents.",
                 },
                 "worktree_path": {
                     "type": "string",

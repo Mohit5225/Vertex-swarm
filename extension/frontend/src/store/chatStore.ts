@@ -11,6 +11,7 @@ export interface SessionEvent {
       | 'plan_permission_request' | 'plan_chunk' | 'plan_ready' | 'todo_init' | 'todo_update' | 'todo_clear'
       | 'hil_question' | 'hil_resolved'
       | 'deep_plan_started' | 'deep_plan_stage_status' | 'deep_plan_ready' | 'deep_plan_permission_request'
+      | 'deep_plan_artifact_saved' | 'deep_plan_mode_active'
   content?: string
   timestamp?: number
   metadata?: Record<string, unknown>
@@ -38,6 +39,8 @@ export interface ChatMessage {
   content: string
   events?: SessionEvent[]
   timestamp: number
+  /** User message sent while deep plan composer mode was active */
+  deepPlan?: boolean
   /** Persisted wall-clock duration for completed turns (reload-safe). */
   turnDurationMs?: number
 }
@@ -75,6 +78,12 @@ interface ChatState {
   addMessage: (message: ChatMessage) => void
   beginAssistantMessage: () => void
   addEvent: (event: SessionEvent) => void
+  enrichToolResultFileChanges: (payload: {
+    tool_call_id: string
+    file_changes: unknown[]
+    snapshot_id?: string
+    snapshot_session_id?: string
+  }) => void
   setStreaming: (streaming: boolean) => void
   setError: (error: string | null) => void
   finishStreaming: () => void
@@ -434,6 +443,10 @@ export const useChatStore = create<ChatState>((set) => ({
         lastEvent?.type !== 'todo_update' &&
         lastEvent?.type !== 'todo_init' &&
         lastEvent?.type !== 'plan_permission_request' &&
+        normalizedEvent.type !== 'deep_plan_stage_status' &&
+        normalizedEvent.type !== 'deep_plan_artifact_saved' &&
+        !normalizedEvent.metadata?.deep_plan_worker &&
+        !normalizedEvent.metadata?.subagent_trace &&
         normalizeEventComparisonContent(lastEvent?.content) ===
           normalizeEventComparisonContent(normalizedEvent.content)
 
@@ -449,9 +462,15 @@ export const useChatStore = create<ChatState>((set) => ({
           ]
         : [...currentEvents, normalizedEvent]
 
+      const isNestedTraceEvent =
+        Boolean(normalizedEvent.metadata?.subagent_trace) ||
+        Boolean(normalizedEvent.metadata?.deep_plan_worker)
+
       messages[targetIndex] = {
         ...targetMessage,
-        content: appendEventContent(targetMessage.content, normalizedEvent),
+        content: isNestedTraceEvent
+          ? targetMessage.content
+          : appendEventContent(targetMessage.content, normalizedEvent),
         events: nextEvents,
       }
 
@@ -463,6 +482,65 @@ export const useChatStore = create<ChatState>((set) => ({
         currentTodo: normalizedEvent.type === 'todo_clear' ? null : (todoState ?? state.currentTodo),
       }
     })
+  },
+
+  enrichToolResultFileChanges: (payload) => {
+    set((state) => ({
+      messages: state.messages.map((message) => {
+        if (!message.events?.length) {
+          return message
+        }
+
+        const events = message.events.map((event) => {
+          if (event.type !== 'tool_result') {
+            return event
+          }
+
+          const metadata = event.metadata ?? {}
+          if (metadata.tool_call_id !== payload.tool_call_id) {
+            return event
+          }
+
+          const existingData =
+            metadata.data && typeof metadata.data === 'object' && !Array.isArray(metadata.data)
+              ? (metadata.data as Record<string, unknown>)
+              : {}
+          const enrichedData = {
+            ...existingData,
+            file_changes: payload.file_changes,
+            snapshot_id: payload.snapshot_id ?? existingData.snapshot_id,
+            snapshot_session_id:
+              payload.snapshot_session_id ?? existingData.snapshot_session_id,
+          }
+
+          const debug =
+            metadata.debug && typeof metadata.debug === 'object' && !Array.isArray(metadata.debug)
+              ? (metadata.debug as Record<string, unknown>)
+              : {}
+          const resultDebug =
+            debug.result && typeof debug.result === 'object' && !Array.isArray(debug.result)
+              ? (debug.result as Record<string, unknown>)
+              : {}
+
+          return {
+            ...event,
+            metadata: {
+              ...metadata,
+              data: enrichedData,
+              debug: {
+                ...debug,
+                result: {
+                  ...resultDebug,
+                  data: enrichedData,
+                },
+              },
+            },
+          }
+        })
+
+        return { ...message, events }
+      }),
+    }))
   },
 
   setStreaming: (streaming: boolean) => {

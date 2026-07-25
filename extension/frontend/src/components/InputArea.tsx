@@ -1,6 +1,18 @@
-import React, { useEffect, useRef, useState } from 'react'
+import React, { useEffect, useMemo, useRef, useState } from 'react'
 import { useChatStore } from '../store/chatStore'
+import { useDeepPlanStore } from '../store/deepPlanStore'
 import { getVsCodeApi } from '../lib/vscode'
+import {
+  buildDeepPlanComposerLabel,
+  findDeepPlanHandoffEvents,
+} from '../lib/deepPlanJobTimeline'
+import {
+  DEEP_PLAN_COMMAND,
+  filterSlashCommands,
+  hasDeepPlanPrefix,
+  isTypingSlashCommand,
+  type SlashCommand,
+} from '../lib/slashCommands'
 import { ArrowUp, Plus, Sparkles, Square } from 'lucide-react'
 
 interface Props {
@@ -13,6 +25,22 @@ interface Props {
   onQueuedEditApplied?: () => void
 }
 
+const splitDeepPlanMessage = (text: string): { token: boolean; body: string } => {
+  if (!hasDeepPlanPrefix(text)) {
+    return { token: false, body: text }
+  }
+  const rest = text.trimStart().slice(DEEP_PLAN_COMMAND.length).trimStart()
+  return { token: true, body: rest }
+}
+
+const composeMessage = (token: boolean, body: string): string => {
+  const trimmedBody = body.trim()
+  if (token) {
+    return trimmedBody ? `${DEEP_PLAN_COMMAND} ${trimmedBody}` : DEEP_PLAN_COMMAND
+  }
+  return body
+}
+
 const InputArea: React.FC<Props> = ({
   disabled = false,
   queuedPrompt,
@@ -22,14 +50,53 @@ const InputArea: React.FC<Props> = ({
   queuedEdit,
   onQueuedEditApplied,
 }) => {
-  const [message, setMessage] = useState('')
+  const [body, setBody] = useState('')
+  const [deepPlanToken, setDeepPlanToken] = useState(false)
   const [isFocused, setIsFocused] = useState(false)
   const [showQuickActions, setShowQuickActions] = useState(false)
   const [showContextDismissButton, setShowContextDismissButton] = useState(false)
   const [isHoveringStop, setIsHoveringStop] = useState(false)
-  const trimmedMessage = message.trim()
+  const [slashHighlight, setSlashHighlight] = useState(0)
+
+  const deepPlanSessionActive = useDeepPlanStore((s) => s.active)
+  const deepPlanPhase = useDeepPlanStore((s) => s.phase)
+  const deepPlanStageLabel = useDeepPlanStore((s) => s.stageLabel)
+  const deepPlanPipelineId = useDeepPlanStore((s) => s.pipelineId)
+  const activateDeepPlan = useDeepPlanStore((s) => s.activate)
+  const deactivateDeepPlan = useDeepPlanStore((s) => s.deactivate)
+  const messages = useChatStore((s) => s.messages)
+  const isStreaming = useChatStore((s) => s.isStreaming)
+
+  const deepPlanComposerLabel = useMemo(() => {
+    if (!deepPlanSessionActive || deepPlanPhase === 'off') {
+      return deepPlanStageLabel
+    }
+    const handoffEvents = findDeepPlanHandoffEvents(messages, deepPlanPipelineId)
+    return buildDeepPlanComposerLabel(
+      handoffEvents,
+      deepPlanStageLabel,
+      isStreaming && deepPlanPhase === 'pipeline_running',
+    )
+  }, [
+    deepPlanSessionActive,
+    deepPlanPhase,
+    deepPlanStageLabel,
+    deepPlanPipelineId,
+    messages,
+    isStreaming,
+  ])
+
+  const showToken =
+    deepPlanToken ||
+    (deepPlanSessionActive && deepPlanPhase === 'requirement_extraction')
+  const slashMenuOpen = !showToken && isTypingSlashCommand(body)
+  const slashCommands = slashMenuOpen ? filterSlashCommands(body.trimStart()) : []
+  const composed = composeMessage(showToken, body)
+  const trimmedMessage = composed.trim()
+
   const isRunning = disabled
   const isSendDisabled = !isRunning && !trimmedMessage
+
   const {
     addMessage,
     beginAssistantMessage,
@@ -40,12 +107,12 @@ const InputArea: React.FC<Props> = ({
   const textareaRef = useRef<HTMLTextAreaElement>(null)
   const quickActionsRef = useRef<HTMLDivElement>(null)
   const contextBadgeRef = useRef<HTMLDivElement>(null)
+  const slashMenuRef = useRef<HTMLDivElement>(null)
 
   const resizeTextarea = () => {
     if (!textareaRef.current) {
       return
     }
-
     textareaRef.current.style.height = 'auto'
     textareaRef.current.style.height = `${Math.min(
       textareaRef.current.scrollHeight,
@@ -53,13 +120,51 @@ const InputArea: React.FC<Props> = ({
     )}px`
   }
 
+  const clearDeepPlanToken = () => {
+    setDeepPlanToken(false)
+    if (
+      deepPlanSessionActive &&
+      (deepPlanPhase === 'requirement_extraction' || deepPlanPhase === 'awaiting_approval')
+    ) {
+      deactivateDeepPlan()
+      getVsCodeApi()?.postMessage({ type: 'exit-deep-plan-mode', payload: {} })
+    }
+  }
+
+  const applySlashCommand = (cmd: SlashCommand) => {
+    if (cmd.activatesDeepPlan) {
+      setDeepPlanToken(true)
+      setBody('')
+    } else {
+      setBody(cmd.insertPrefix)
+    }
+    setSlashHighlight(0)
+    requestAnimationFrame(() => {
+      resizeTextarea()
+      textareaRef.current?.focus()
+    })
+  }
+
+  const loadComposerText = (text: string) => {
+    const parsed = splitDeepPlanMessage(text)
+    setDeepPlanToken(parsed.token)
+    setBody(parsed.body)
+  }
+
   const handleSend = async () => {
-    if (!trimmedMessage || disabled) {
+    if (disabled || !trimmedMessage) {
       return
     }
 
     const userMessage = trimmedMessage
-    setMessage('')
+    const deepPlanRequested = showToken || deepPlanSessionActive
+
+    if (deepPlanRequested && showToken) {
+      activateDeepPlan('user_slash', 'requirement_extraction')
+    }
+
+    setBody('')
+    setDeepPlanToken(false)
 
     if (textareaRef.current) {
       textareaRef.current.style.height = 'auto'
@@ -70,6 +175,7 @@ const InputArea: React.FC<Props> = ({
       id: tempId,
       type: 'user',
       content: userMessage,
+      deepPlan: deepPlanRequested,
       timestamp: Date.now(),
     })
     beginAssistantMessage()
@@ -83,11 +189,13 @@ const InputArea: React.FC<Props> = ({
           message: userMessage,
           ideContextEnabled,
           tempId,
+          deepPlanRequested,
         },
       })
     } catch (error) {
       console.error('Failed to send message:', error)
       setError('Unable to start the agent stream. Please try again.')
+      setStreaming(false)
     }
   }
 
@@ -96,8 +204,7 @@ const InputArea: React.FC<Props> = ({
       return
     }
 
-    // Add a cancellation system message so the UI matches the backend persistence
-    const { addMessage } = useChatStore.getState()
+    const { addMessage, finishStreaming } = useChatStore.getState()
     addMessage({
       id: `msg-cancel-${Date.now()}`,
       type: 'system',
@@ -106,7 +213,7 @@ const InputArea: React.FC<Props> = ({
     })
 
     setError(null)
-    setStreaming(false)
+    finishStreaming()
 
     try {
       getVsCodeApi()?.postMessage({
@@ -122,6 +229,34 @@ const InputArea: React.FC<Props> = ({
   }
 
   const handleKeyDown = (event: React.KeyboardEvent<HTMLTextAreaElement>) => {
+    if (showToken && event.key === 'Backspace' && body === '') {
+      event.preventDefault()
+      clearDeepPlanToken()
+      return
+    }
+
+    if (slashMenuOpen && slashCommands.length > 0) {
+      if (event.key === 'ArrowDown') {
+        event.preventDefault()
+        setSlashHighlight((i) => (i + 1) % slashCommands.length)
+        return
+      }
+      if (event.key === 'ArrowUp') {
+        event.preventDefault()
+        setSlashHighlight((i) => (i - 1 + slashCommands.length) % slashCommands.length)
+        return
+      }
+      if (event.key === 'Enter' && !event.shiftKey) {
+        event.preventDefault()
+        applySlashCommand(slashCommands[slashHighlight])
+        return
+      }
+      if (event.key === 'Escape') {
+        event.preventDefault()
+        return
+      }
+    }
+
     if (event.key === 'Enter' && !event.shiftKey) {
       event.preventDefault()
       handleSend()
@@ -129,12 +264,24 @@ const InputArea: React.FC<Props> = ({
   }
 
   const handleInput = (event: React.ChangeEvent<HTMLTextAreaElement>) => {
-    setMessage(event.target.value)
+    const value = event.target.value
+
+    if (!showToken && hasDeepPlanPrefix(value)) {
+      const parsed = splitDeepPlanMessage(value)
+      setDeepPlanToken(true)
+      setBody(parsed.body)
+      return
+    }
+
+    setBody(value)
+    if (slashMenuOpen) {
+      setSlashHighlight(0)
+    }
   }
 
   useEffect(() => {
     resizeTextarea()
-  }, [message])
+  }, [body, showToken])
 
   useEffect(() => {
     if (!disabled && textareaRef.current) {
@@ -143,20 +290,20 @@ const InputArea: React.FC<Props> = ({
   }, [disabled])
 
   useEffect(() => {
+    if (deepPlanSessionActive && deepPlanPhase === 'requirement_extraction') {
+      setDeepPlanToken(true)
+    }
+  }, [deepPlanSessionActive, deepPlanPhase])
+
+  useEffect(() => {
     if (!queuedPrompt) {
       return
     }
-
-    setMessage(queuedPrompt)
+    loadComposerText(queuedPrompt)
     onQueuedPromptApplied?.()
-
     requestAnimationFrame(() => {
       resizeTextarea()
       textareaRef.current?.focus()
-      textareaRef.current?.setSelectionRange(
-        queuedPrompt.length,
-        queuedPrompt.length
-      )
     })
   }, [queuedPrompt, onQueuedPromptApplied])
 
@@ -164,24 +311,17 @@ const InputArea: React.FC<Props> = ({
     if (!queuedEdit) {
       return
     }
-
-    setMessage(queuedEdit)
+    loadComposerText(queuedEdit)
     onQueuedEditApplied?.()
-
     requestAnimationFrame(() => {
       resizeTextarea()
       textareaRef.current?.focus()
-      textareaRef.current?.setSelectionRange(
-        queuedEdit.length,
-        queuedEdit.length
-      )
     })
   }, [queuedEdit, onQueuedEditApplied])
 
   useEffect(() => {
     const handleOutsideClick = (event: MouseEvent) => {
       const target = event.target as Node | null
-
       if (
         showQuickActions &&
         quickActionsRef.current &&
@@ -189,7 +329,6 @@ const InputArea: React.FC<Props> = ({
       ) {
         setShowQuickActions(false)
       }
-
       if (
         showContextDismissButton &&
         contextBadgeRef.current &&
@@ -198,7 +337,6 @@ const InputArea: React.FC<Props> = ({
         setShowContextDismissButton(false)
       }
     }
-
     window.addEventListener('mousedown', handleOutsideClick)
     return () => window.removeEventListener('mousedown', handleOutsideClick)
   }, [showQuickActions, showContextDismissButton])
@@ -209,27 +347,73 @@ const InputArea: React.FC<Props> = ({
     }
   }, [ideContextEnabled, showContextDismissButton])
 
+  const shellClass = [
+    'composer-shell',
+    isFocused ? 'composer-shell--focused' : '',
+    showToken || deepPlanSessionActive ? 'composer-shell--deep-plan' : '',
+  ]
+    .filter(Boolean)
+    .join(' ')
+
   return (
-    <div
-      className={`composer-shell ${isFocused ? 'composer-shell--focused' : ''}`}
-    >
-      <div className="px-4 pt-3">
-        <textarea
-          ref={textareaRef}
-          value={message}
-          onChange={handleInput}
-          onKeyDown={handleKeyDown}
-          onFocus={() => setIsFocused(true)}
-          onBlur={() => setIsFocused(false)}
-          placeholder="Describe the task, files, constraints, and desired outcome."
-          disabled={disabled}
-          className="min-h-[72px] w-full resize-none bg-transparent text-[15px] leading-7 text-[var(--vs-text-primary)] placeholder:text-[var(--vs-text-tertiary)] focus:outline-none disabled:cursor-not-allowed disabled:opacity-60 max-[360px]:min-h-[60px]"
-          rows={1}
-        />
+    <div className={shellClass}>
+      <div className="relative px-4 pt-3">
+        {slashMenuOpen && slashCommands.length > 0 && (
+          <div
+            ref={slashMenuRef}
+            className="popover-panel popover-panel-padded slash-popover-panel absolute bottom-[calc(100%+0.35rem)] left-2 right-2 z-30"
+          >
+            <div className="slash-popover-header">Commands</div>
+            {slashCommands.map((cmd, index) => (
+              <button
+                key={cmd.id}
+                type="button"
+                className={`slash-popover-row ${index === slashHighlight ? 'slash-popover-row--active' : ''}`}
+                onMouseEnter={() => setSlashHighlight(index)}
+                onClick={() => applySlashCommand(cmd)}
+              >
+                <span className="slash-popover-command">{cmd.command}</span>
+                <span className="slash-popover-desc">{cmd.description}</span>
+              </button>
+            ))}
+          </div>
+        )}
+
+        <div className="composer-input-row">
+          {showToken && (
+            <span
+              className="slash-command-pill slash-command-token"
+              contentEditable={false}
+            >
+              {DEEP_PLAN_COMMAND}
+            </span>
+          )}
+          <textarea
+            ref={textareaRef}
+            value={body}
+            onChange={handleInput}
+            onKeyDown={handleKeyDown}
+            onFocus={() => setIsFocused(true)}
+            onBlur={() => setIsFocused(false)}
+            placeholder={
+              showToken
+                ? 'Describe the change…'
+                : 'Describe the task, files, constraints, and desired outcome.'
+            }
+            disabled={disabled || deepPlanPhase === 'pipeline_running'}
+            className="min-h-[72px] min-w-[120px] flex-1 resize-none bg-transparent text-[15px] leading-7 text-[var(--vs-text-primary)] placeholder:text-[var(--vs-text-tertiary)] focus:outline-none disabled:cursor-not-allowed disabled:opacity-60 max-[360px]:min-h-[60px]"
+            rows={1}
+          />
+        </div>
       </div>
 
       <div className="flex items-center justify-between gap-3 border-t border-[var(--vs-border-soft)] px-4 pb-4 pt-3">
         <div className="flex min-w-0 items-center gap-2">
+          {deepPlanSessionActive && deepPlanComposerLabel && deepPlanPhase !== 'off' ? (
+            <span className="truncate text-xs text-[var(--vs-text-tertiary)]">
+              Deep plan: {deepPlanComposerLabel}
+            </span>
+          ) : null}
           <div className="relative" ref={quickActionsRef}>
             <button
               type="button"
@@ -270,42 +454,34 @@ const InputArea: React.FC<Props> = ({
 
           <div className="min-w-0 text-[11px] text-[var(--vs-text-tertiary)]">
             <span>{disabled ? 'Streaming response' : 'Enter to send'}</span>
-            <span className="mx-2 hidden text-white/15 min-[390px]:inline">
-              |
-            </span>
-            <span className="hidden min-[460px]:inline">
-              Shift+Enter for newline
-            </span>
+            <span className="mx-2 hidden text-white/15 min-[390px]:inline">|</span>
+            <span className="hidden min-[460px]:inline">Shift+Enter for newline</span>
           </div>
         </div>
 
-        <div className="flex items-center gap-2">
-          <button
-            type="button"
-            onClick={disabled ? handleCancel : handleSend}
-            onMouseEnter={() => setIsHoveringStop(true)}
-            onMouseLeave={() => setIsHoveringStop(false)}
-            disabled={isSendDisabled}
-            className={`${isRunning
-                ? 'send-btn send-btn--stop'
-                : !trimmedMessage
-                  ? 'send-btn send-btn--disabled'
-                  : 'send-btn'
-              }`}
-            title={isRunning ? 'Stop the running operation' : 'Send message'}
-          >
-            <span className="max-[360px]:hidden">
-              {isRunning
-                ? isHoveringStop ? 'Stop' : 'Running'
-                : 'Send'}
-            </span>
-            {isRunning && isHoveringStop ? (
-              <Square className="h-3.5 w-3.5" />
-            ) : (
-              <ArrowUp className="h-3.5 w-3.5" />
-            )}
-          </button>
-        </div>
+        <button
+          type="button"
+          onClick={disabled ? handleCancel : handleSend}
+          onMouseEnter={() => setIsHoveringStop(true)}
+          onMouseLeave={() => setIsHoveringStop(false)}
+          disabled={isSendDisabled}
+          className={`${isRunning
+              ? 'send-btn send-btn--stop'
+              : isSendDisabled
+                ? 'send-btn send-btn--disabled'
+                : 'send-btn'
+            }`}
+          title={isRunning ? 'Stop the running operation' : 'Send message'}
+        >
+          <span className="max-[360px]:hidden">
+            {isRunning ? (isHoveringStop ? 'Stop' : 'Running') : 'Send'}
+          </span>
+          {isRunning && isHoveringStop ? (
+            <Square className="h-3.5 w-3.5" />
+          ) : (
+            <ArrowUp className="h-3.5 w-3.5" />
+          )}
+        </button>
       </div>
     </div>
   )

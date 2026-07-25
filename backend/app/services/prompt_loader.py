@@ -86,6 +86,55 @@ def build_injected_guidance(active_categories: list[str]) -> str:
 
 
 _DEEP_PLAN_GUIDANCE_CACHE: str | None = None
+_REQ_EXTRACTION_CACHE: str | None = None
+_CATALOG_GUIDE_CACHE: str | None = None
+_DEEP_PLAN_DIR = Path(__file__).parent.parent / "prompts" / "deep_plan"
+
+
+def load_req_extraction_guidance() -> str | None:
+    """Additive req-phase instructions — injected with gate open, before handoff."""
+    global _REQ_EXTRACTION_CACHE
+    if _REQ_EXTRACTION_CACHE is not None:
+        return _REQ_EXTRACTION_CACHE
+    file_path = _DEEP_PLAN_DIR / "req_extraction.md"
+    if not file_path.exists():
+        logger.error("prompt_loader: req_extraction guidance missing: %s", file_path)
+        return None
+    try:
+        _REQ_EXTRACTION_CACHE = file_path.read_text(encoding="utf-8").strip()
+        return _REQ_EXTRACTION_CACHE
+    except OSError as exc:
+        logger.error("prompt_loader: failed to read %s: %s", file_path, exc)
+        return None
+
+
+def load_catalog_guide() -> str | None:
+    """Stage routing guide for req phase (Vertex only)."""
+    global _CATALOG_GUIDE_CACHE
+    if _CATALOG_GUIDE_CACHE is not None:
+        return _CATALOG_GUIDE_CACHE
+    file_path = _DEEP_PLAN_DIR / "catalog_guide.md"
+    if not file_path.exists():
+        logger.error("prompt_loader: catalog_guide missing: %s", file_path)
+        return None
+    try:
+        _CATALOG_GUIDE_CACHE = file_path.read_text(encoding="utf-8").strip()
+        return _CATALOG_GUIDE_CACHE
+    except OSError as exc:
+        logger.error("prompt_loader: failed to read %s: %s", file_path, exc)
+        return None
+
+
+def load_deep_plan_gate_guidance() -> str | None:
+    """Req extraction + catalog + deep_plan_tool usage when gate is open."""
+    sections: list[str] = []
+    for loader in (load_req_extraction_guidance, load_catalog_guide, load_deep_plan_tool_guidance):
+        prose = loader()
+        if prose:
+            sections.append(prose)
+    if not sections:
+        return None
+    return "\n\n---\n\n".join(sections)
 
 
 def load_deep_plan_tool_guidance() -> str | None:

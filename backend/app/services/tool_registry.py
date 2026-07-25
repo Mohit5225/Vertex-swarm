@@ -6,6 +6,7 @@ from app.services.tool_schemas import (
     HIL_TOOL_SPEC,
     LOAD_TOOL_CONTEXT_TOOL_SPEC,
     PLAN_TOOL_SPEC,
+    RUN_PLANNING_STAGE_TOOL_SPEC,
     SPAWN_SUBAGENT_TOOL_SPEC,
     TERMINAL_OPS_TOOL_SPEC,
     TODO_TOOL_SPEC,
@@ -55,8 +56,11 @@ def build_tools_list(
     active_categories: list[str] | None,
     *,
     deep_plan_available: bool = False,
+    deep_plan_pipeline_mode: bool = False,
 ) -> list[dict[str, Any]]:
     """Return load_tool_context plus loadable tools whose category has been loaded."""
+    if deep_plan_pipeline_mode:
+        return [RUN_PLANNING_STAGE_TOOL_SPEC]
     loaded = set(active_categories or [])
     tools = list(CORE_TOOL_SPECS)
     for category in _LOADABLE_TOOL_ORDER:

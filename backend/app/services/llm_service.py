@@ -160,7 +160,7 @@ Categories you can load (via `load_tool_context` only):
 - plan_tool — present an implementation plan and wait for user approval before invasive or multi-step code changes. Requires workspace_ops in the same load (you must write plan.md before calling plan_tool).
 - todo_tool — drive the persistent execution checklist widget. Load when execution starts — after plan approval, or for any 3+ step task without a formal plan.
 - web_search — look up external docs, APIs, errors, or version-specific facts not in the repo.
-- spawn_subagent — last resort only: parallel git worktrees, large read-only research, or explicit user request. Not for routine file edits or shell work.
+- spawn_subagent — when the user asks for subagents, or for parallel/isolated deliverables (including writing plan docs named in the prompt). Not for routine one-file edits or shell work.
 - hil_tool — structured multiple-choice questions via a persistent inline card; blocks until the user answers. Load when you need structured user input during execution or deep-plan work — not for meta/capability questions (answer those in chat).
 
 Which tool for which job (load its category first):
@@ -170,10 +170,10 @@ Which tool for which job (load its category first):
 - Big change needing approval → plan_tool (+ workspace_ops to write plan.md) — **not** when `/deep-plan` or `deep_plan_tool` is already available (use deep plan instead)
 - Track multi-step execution → todo_tool
 - Answer not in the repo → web_search
-- Parallel isolated branches or explicit delegation → spawn_subagent
+- User asked for subagents, or parallel/isolated deliverables → spawn_subagent (then call it; do not only narrate)
 - Structured user choice during execution / deep-plan → hil_tool (load first; not for "what tools exist?")
 
-DEEP PLANNING: Rare. `/deep-plan` or arch-shift HIL yes opens `deep_plan_tool` (injected by backend — not via `load_tool_context`). When open, call it; do not load `plan_tool` first.
+DEEP PLANNING: Rare. `/deep-plan` or arch-shift HIL yes opens the deep plan gate — req-extraction + `deep_plan_tool` schema injected by backend (not via `load_tool_context`). **First:** extract requirements to `plan_pipeline/`; **then** call `deep_plan_tool(start)`. Do not load `plan_tool` for that path.
 
 Typical loads (include only categories this task will use — no extras):
 - Read or edit files only → ["workspace_ops"] — do not load terminal_ops for file-only work
@@ -278,14 +278,15 @@ def _build_request_payload(
     active_categories: list[str] | None = None,
     *,
     deep_plan_available: bool = False,
+    deep_plan_pipeline_mode: bool = False,
 ) -> Dict[str, Any]:
     guidance_parts: list[str] = []
     if active_tool_guidance:
         guidance_parts.append(active_tool_guidance)
-    if deep_plan_available:
-        from app.services.prompt_loader import load_deep_plan_tool_guidance
+    if deep_plan_available and not deep_plan_pipeline_mode:
+        from app.services.prompt_loader import load_deep_plan_gate_guidance
 
-        deep_guidance = load_deep_plan_tool_guidance()
+        deep_guidance = load_deep_plan_gate_guidance()
         if deep_guidance:
             guidance_parts.append(deep_guidance)
     combined_guidance = "\n\n---\n\n".join(guidance_parts) if guidance_parts else None
@@ -302,7 +303,11 @@ def _build_request_payload(
         "model": _model_name(config, model),
         "messages": full_messages,
         "stream": True,
-        "tools": build_tools_list(active_categories, deep_plan_available=deep_plan_available),
+        "tools": build_tools_list(
+            active_categories,
+            deep_plan_available=deep_plan_available,
+            deep_plan_pipeline_mode=deep_plan_pipeline_mode,
+        ),
         "tool_choice": "auto",
     }
 
@@ -530,6 +535,7 @@ async def stream_chat_events(
     active_categories: list[str] | None = None,
     *,
     deep_plan_available: bool = False,
+    deep_plan_pipeline_mode: bool = False,
 ) -> AsyncIterator[Dict[str, Any]]:
     """
     Stream model output as structured events.
@@ -561,6 +567,7 @@ async def stream_chat_events(
         active_tool_guidance,
         active_categories,
         deep_plan_available=deep_plan_available,
+        deep_plan_pipeline_mode=deep_plan_pipeline_mode,
     )
     _log_llm_context_snapshot(payload, context_log_metadata)
     

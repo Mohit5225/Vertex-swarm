@@ -1,17 +1,37 @@
-"""DeepPlanOrchestrator — internal pipeline (Phase 1: stub)."""
+"""DeepPlanOrchestrator — pipeline harness after Vertex req handoff."""
 from __future__ import annotations
 
+import asyncio
 import logging
-from datetime import datetime, timezone
 from typing import Any, TYPE_CHECKING
-from uuid import uuid4
+
+import aiofiles
+
+from .artifacts import normalize_rel_path, validate_handoff
+from .constants import MANIFEST_REL, REQUIREMENTS_REL
+from .gates import clear_deep_plan_pipeline, read_session_state, set_deep_plan_pipeline
+from .harness import PipelineHarness, new_pipeline_id, utc_now_iso
+from .manifest import planner_stages
+from .pipeline_vertex import run_vertex_pipeline_turn
+from .pipeline_state import (
+    STATUS_ABORTED,
+    STATUS_APPROVED,
+    STATUS_FAILED,
+    STATUS_REJECTED,
+    build_initial_pipeline_record,
+    read_pipeline_record,
+    set_pipeline_awaiting_approval,
+    set_pipeline_terminal_status,
+)
 
 if TYPE_CHECKING:
     from app.orchestrator import LLMOrchestrator
 
 logger = logging.getLogger(__name__)
 
-_APPROVAL_TIMEOUT_SECONDS = 86_400
+
+def _ui_trigger(trigger: str) -> str:
+    return "vertex_hil" if trigger == "hil_confirmed_arch_shift" else "user_slash"
 
 
 class DeepPlanOrchestrator:
@@ -32,6 +52,81 @@ class DeepPlanOrchestrator:
         self._emit = emit_trace_and_push
         self._build_event = build_event
 
+    @property
+    def chat_dir(self):
+        return self._parent.file_store.chats_path / self._chat_id
+
+    async def emit_stage(
+        self,
+        pipeline_id: str,
+        stage_id: str,
+        status: str,
+        *,
+        label: str | None = None,
+        reason: str | None = None,
+    ) -> None:
+        metadata: dict[str, Any] = {
+            "pipeline_id": pipeline_id,
+            "stage_id": stage_id,
+            "status": status,
+        }
+        if label:
+            metadata["label"] = label
+        if reason:
+            metadata["reason"] = reason
+        await self._emit(
+            self._build_event(
+                "deep_plan_stage_status",
+                metadata=metadata,
+                chat_id=self._chat_id,
+                message_id=self._message_id,
+            )
+        )
+
+    async def write_artifact(self, relative_path: str, content: str) -> None:
+        target = self.chat_dir / relative_path.replace("\\", "/")
+        target.parent.mkdir(parents=True, exist_ok=True)
+        async with aiofiles.open(target, mode="w", encoding="utf-8") as handle:
+            await handle.write(content)
+
+    async def emit_artifact_saved(
+        self,
+        *,
+        pipeline_id: str,
+        stage_id: str,
+        path: str,
+        content_preview: str | None = None,
+    ) -> None:
+        metadata: dict[str, Any] = {
+            "pipeline_id": pipeline_id,
+            "stage_id": stage_id,
+            "path": path,
+        }
+        if content_preview is not None:
+            metadata["content_preview"] = content_preview[:2000]
+        await self._emit(
+            self._build_event(
+                "deep_plan_artifact_saved",
+                metadata=metadata,
+                chat_id=self._chat_id,
+                message_id=self._message_id,
+            )
+        )
+
+    async def emit_worker_trace(self, stage_id: str, event: dict[str, Any]) -> None:
+        """Route ephemeral worker tool traces to the handoff message."""
+        metadata = dict(event.get("metadata") or {})
+        metadata["deep_plan_stage_id"] = stage_id
+        metadata["deep_plan_worker"] = True
+        tagged = {
+            **event,
+            "chat_id": self._chat_id,
+            "message_id": self._message_id,
+            "session_id": self._session_id,
+            "metadata": metadata,
+        }
+        await self._emit(tagged)
+
     async def run(
         self,
         *,
@@ -41,7 +136,7 @@ class DeepPlanOrchestrator:
         if action == "revise":
             return (
                 "error",
-                "deep_plan revise is not implemented yet (Phase 2). Start a new pipeline with action='start'.",
+                "deep_plan revise is not implemented yet. Start a new /deep-plan after reject.",
                 {"error_code": "not_implemented"},
             )
 
@@ -49,51 +144,138 @@ class DeepPlanOrchestrator:
             return ("error", f"Unsupported deep_plan_tool action: {action!r}", {"error_code": "validation_error"})
 
         title = str(payload.get("title") or "Deep plan").strip()
-        scope_summary = str(payload.get("scope_summary") or "").strip()
-        pipeline_id = f"dplan_{self._chat_id}_{uuid4().hex[:12]}"
+        requirements_path = normalize_rel_path(
+            payload.get("requirements_path"),
+            REQUIREMENTS_REL,
+        )
+        manifest_path = normalize_rel_path(payload.get("manifest_path"), MANIFEST_REL)
+
+        req_meta, manifest, errors = await validate_handoff(
+            self.chat_dir,
+            requirements_path=requirements_path,
+            manifest_path=manifest_path,
+        )
+        if errors or manifest is None:
+            return (
+                "error",
+                "Requirement handoff invalid. Finish req extraction before deep_plan_tool(start).\n"
+                + "\n".join(f"- {e}" for e in errors),
+                {"error_code": "handoff_invalid", "errors": errors},
+            )
+
+        manifest_pipeline_id = str(manifest.get("pipeline_id") or "").strip()
+        pipeline_id = manifest_pipeline_id or new_pipeline_id(self._chat_id)
+        trigger = str(payload.get("trigger") or "user_slash_command")
+
+        await set_deep_plan_pipeline(
+            self._parent,
+            self._chat_id,
+            build_initial_pipeline_record(
+                pipeline_id=pipeline_id,
+                pending_stages=planner_stages(manifest),
+                trigger=trigger,
+                manifest_path=manifest_path,
+                requirements_path=requirements_path,
+                started_at=utc_now_iso(),
+            ),
+        )
 
         await self._emit(
             self._build_event(
-                "deep_plan_started",
-                metadata={"pipeline_id": pipeline_id, "title": title},
-                chat_id=self._chat_id,
-                message_id=self._message_id,
-            )
-        )
-        await self._emit(
-            self._build_event(
-                "deep_plan_stage_status",
+                "deep_plan_mode_active",
                 metadata={
+                    "trigger": _ui_trigger(trigger),
+                    "phase": "pipeline_running",
+                    "stage_label": "Pipeline running",
                     "pipeline_id": pipeline_id,
-                    "stage_id": "stub_pipeline",
-                    "status": "running",
-                    "label": "Stub pipeline (Phase 1)",
                 },
                 chat_id=self._chat_id,
                 message_id=self._message_id,
             )
         )
-
-        index_body = self._build_stub_index(pipeline_id, title, scope_summary, payload)
-        index_rel = "plan_pipeline/index.md"
-        await self._write_artifact(index_rel, index_body)
-
-        await self._emit(
-            self._build_event(
-                "deep_plan_stage_status",
-                metadata={
-                    "pipeline_id": pipeline_id,
-                    "stage_id": "stub_pipeline",
-                    "status": "completed",
-                },
-                chat_id=self._chat_id,
-                message_id=self._message_id,
-            )
+        await self.emit_stage(
+            pipeline_id,
+            "requirement_extraction",
+            "completed",
+            label="Requirement extraction",
         )
+
+        harness = PipelineHarness(self)
+        try:
+            planner_ok, planner_err = await run_vertex_pipeline_turn(
+                self,
+                pipeline_id=pipeline_id,
+                manifest=manifest,
+                manifest_path=manifest_path,
+                requirements_path=requirements_path,
+            )
+        except asyncio.CancelledError:
+            if self._parent.is_pipeline_abort_requested(self._chat_id):
+                await clear_deep_plan_pipeline(self._parent, self._chat_id)
+            self._parent.clear_pipeline_abort(self._chat_id)
+            raise
+        if not planner_ok:
+            self._parent.clear_pipeline_abort(self._chat_id)
+            session_state = await read_session_state(self._parent, self._chat_id)
+            pipeline_record = read_pipeline_record(session_state.get("working_memory", {}))
+            failed_stage = None
+            failure_reason = planner_err
+            if isinstance(pipeline_record, dict):
+                if str(pipeline_record.get("status")) == STATUS_ABORTED:
+                    await clear_deep_plan_pipeline(self._parent, self._chat_id)
+                    self._parent.clear_pipeline_abort(self._chat_id)
+                    return (
+                        "error",
+                        "Deep plan aborted by user.",
+                        {"error_code": "pipeline_aborted", "pipeline_id": pipeline_id},
+                    )
+                failed = pipeline_record.get("failed_stage")
+                if isinstance(failed, dict):
+                    failed_stage = failed.get("stage_id")
+                    failure_reason = failed.get("reason") or planner_err
+            await set_pipeline_terminal_status(
+                self._parent,
+                self._chat_id,
+                STATUS_FAILED,
+            )
+            return (
+                "error",
+                f"Deep plan pipeline failed: {failure_reason}",
+                {
+                    "error_code": "stage_failed",
+                    "pipeline_id": pipeline_id,
+                    "stage_id": failed_stage,
+                    "reason": failure_reason,
+                },
+            )
+
+        self._parent.clear_pipeline_abort(self._chat_id)
+
+        index_rel = await harness.run_assembly(
+            pipeline_id=pipeline_id,
+            title=title,
+            manifest=manifest,
+            requirements_path=requirements_path,
+        )
+
         await self._emit(
             self._build_event(
                 "deep_plan_ready",
                 metadata={"pipeline_id": pipeline_id, "index_path": index_rel},
+                chat_id=self._chat_id,
+                message_id=self._message_id,
+            )
+        )
+        await set_pipeline_awaiting_approval(self._parent, self._chat_id)
+        await self._emit(
+            self._build_event(
+                "deep_plan_mode_active",
+                metadata={
+                    "trigger": _ui_trigger(trigger),
+                    "phase": "awaiting_approval",
+                    "stage_label": "Awaiting approval",
+                    "pipeline_id": pipeline_id,
+                },
                 chat_id=self._chat_id,
                 message_id=self._message_id,
             )
@@ -109,14 +291,32 @@ class DeepPlanOrchestrator:
 
         approval = await self._parent.wait_for_deep_plan_approval(pipeline_id)
         if approval is None:
+            await set_pipeline_terminal_status(self._parent, self._chat_id, STATUS_ABORTED)
+            await clear_deep_plan_pipeline(self._parent, self._chat_id)
             return (
                 "error",
                 "Timed out waiting for deep plan approval.",
                 {"error_code": "pipeline_timeout", "pipeline_id": pipeline_id},
             )
 
+        if approval.get("aborted"):
+            await set_pipeline_terminal_status(self._parent, self._chat_id, STATUS_ABORTED)
+            await clear_deep_plan_pipeline(self._parent, self._chat_id)
+            return (
+                "error",
+                "Deep plan aborted by user.",
+                {"error_code": "pipeline_aborted", "pipeline_id": pipeline_id},
+            )
+
         if not approval.get("approved"):
             feedback = str(approval.get("rejection_feedback") or "")
+            await set_pipeline_terminal_status(
+                self._parent,
+                self._chat_id,
+                STATUS_REJECTED,
+                rejection_feedback=feedback,
+            )
+            await clear_deep_plan_pipeline(self._parent, self._chat_id)
             return (
                 "success",
                 "Deep plan rejected by user.",
@@ -127,65 +327,16 @@ class DeepPlanOrchestrator:
                 },
             )
 
+        artifact_paths = [requirements_path, manifest_path, index_rel]
+        await set_pipeline_terminal_status(self._parent, self._chat_id, STATUS_APPROVED)
+        await clear_deep_plan_pipeline(self._parent, self._chat_id)
         return (
             "success",
-            "Deep plan approved by user. Pipeline complete (stub).",
+            "Deep plan approved. Execute from plan_pipeline/index.md.",
             {
                 "pipeline_id": pipeline_id,
                 "approved": True,
                 "index_path": index_rel,
-                "artifact_paths": [index_rel],
+                "artifact_paths": artifact_paths,
             },
         )
-
-    def _build_stub_index(
-        self,
-        pipeline_id: str,
-        title: str,
-        scope_summary: str,
-        payload: dict[str, Any],
-    ) -> str:
-        constraints = payload.get("stated_constraints") or []
-        constraint_lines = ""
-        if isinstance(constraints, list) and constraints:
-            constraint_lines = "\n".join(f"- {c}" for c in constraints if isinstance(c, str))
-
-        now = datetime.now(timezone.utc).isoformat()
-        return f"""# {title}
-
-> **Phase 1 stub** — full stage agents not implemented yet.
-
-- **pipeline_id:** `{pipeline_id}`
-- **generated_at:** {now}
-
-## Scope (from main agent)
-
-{scope_summary or "_No scope_summary provided._"}
-
-## Stated constraints
-
-{constraint_lines or "_None._"}
-
-## Next steps (after approval)
-
-1. Main agent loads `todo_tool` + `workspace_ops`.
-2. Derive execution steps from this index (stub content until Phase 2+ fills artifacts).
-
-## Artifacts (planned)
-
-| File | Status |
-|------|--------|
-| `01_requirements.md` | Phase 2 |
-| `02_system_plan.md` | Phase 2 |
-| `03_frontend_plan.md` | Phase 2 |
-| `00_pipeline_manifest.json` | Phase 2 |
-"""
-
-    async def _write_artifact(self, relative_path: str, content: str) -> None:
-        chat_dir = self._parent.file_store.chats_path / self._chat_id
-        target = chat_dir / relative_path
-        target.parent.mkdir(parents=True, exist_ok=True)
-        import aiofiles
-
-        async with aiofiles.open(target, mode="w", encoding="utf-8") as handle:
-            await handle.write(content)

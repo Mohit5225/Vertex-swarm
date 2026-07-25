@@ -22,6 +22,8 @@ const KNOWN_EVENT_TYPES: SessionEvent['type'][] = [
   'deep_plan_stage_status',
   'deep_plan_ready',
   'deep_plan_permission_request',
+  'deep_plan_artifact_saved',
+  'deep_plan_mode_active',
 ]
 
 const asRecord = (value: unknown): UnknownRecord | undefined =>
@@ -279,6 +281,18 @@ export const shouldMergeSessionEvents = (
   next: SessionEvent
 ) => {
   if (!previous) {
+    return false
+  }
+
+  // Never merge events from different subagent spawns or different deep-plan workers.
+  const previousSpawn = previous.metadata?.subagent_spawn_tool_call_id
+  const nextSpawn = next.metadata?.subagent_spawn_tool_call_id
+  if (previousSpawn !== nextSpawn) {
+    return false
+  }
+  const previousWorker = previous.metadata?.deep_plan_stage_id
+  const nextWorker = next.metadata?.deep_plan_stage_id
+  if (previousWorker !== nextWorker) {
     return false
   }
 

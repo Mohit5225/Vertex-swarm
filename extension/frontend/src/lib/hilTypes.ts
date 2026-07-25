@@ -19,6 +19,7 @@ export type HilAnswer =
 export interface HilCardState {
   hilSessionId: string
   agentLabel: string
+  context?: string
   questions: HilQuestion[]
   status: 'pending' | 'resolved'
   answers?: HilAnswer[]

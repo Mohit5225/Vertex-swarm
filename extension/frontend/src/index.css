@@ -100,6 +100,81 @@
       inset 0 1px 0 var(--vs-edge-light);
   }
 
+  /* Deep plan — same gold family as send-btn / --vs-accent tokens */
+  .composer-shell--deep-plan {
+    border-color: color-mix(in srgb, var(--vs-accent) 36%, var(--vs-border));
+  }
+
+  .composer-shell--deep-plan.composer-shell--focused {
+    border-color: color-mix(in srgb, var(--vs-accent) 52%, var(--vs-accent-glow));
+    box-shadow:
+      0 -8px 32px rgba(0, 0, 0, 0.28),
+      0 0 0 1px color-mix(in srgb, var(--vs-accent) 24%, transparent),
+      inset 0 1px 0 var(--vs-edge-light);
+  }
+
+  .composer-input-row {
+    @apply flex min-h-[72px] w-full flex-wrap items-start gap-x-1.5 gap-y-1;
+  }
+
+  /* Composer token — send-btn gradient, slightly softer */
+  .slash-command-pill {
+    @apply inline-flex shrink-0 items-center rounded-[5px] px-1.5 py-px text-[13px] font-medium leading-5;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+    color: #0f0d0a;
+    background: linear-gradient(180deg, #dcc99a 0%, #b89448 100%);
+    border: 1px solid color-mix(in srgb, var(--vs-accent) 55%, transparent);
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.2);
+  }
+
+  .slash-command-token {
+    @apply mt-0.5;
+  }
+
+  .slash-popover-panel {
+    background: var(--vs-void) !important;
+    border-color: var(--vs-border);
+    box-shadow:
+      0 20px 50px rgba(0, 0, 0, 0.55),
+      inset 0 1px 0 var(--vs-border-soft) !important;
+  }
+
+  .slash-popover-header {
+    @apply px-2 py-1.5 text-[11px] font-medium uppercase tracking-[0.18em];
+    color: var(--vs-text-tertiary);
+  }
+
+  .slash-popover-row {
+    @apply flex w-full flex-col gap-0.5 rounded-lg px-2.5 py-2 text-left transition;
+  }
+
+  .slash-popover-row:hover {
+    background: rgba(255, 255, 255, 0.03);
+  }
+
+  .slash-popover-row--active {
+    background: rgba(255, 255, 255, 0.04);
+  }
+
+  .slash-popover-command {
+    @apply text-sm;
+    color: var(--vs-text-secondary);
+    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  }
+
+  .slash-popover-row--active .slash-popover-command {
+    color: var(--vs-text-primary);
+  }
+
+  .slash-popover-desc {
+    @apply text-xs leading-snug;
+    color: var(--vs-text-tertiary);
+  }
+
+  .slash-popover-row--active .slash-popover-desc {
+    color: var(--vs-text-secondary);
+  }
+
   .popover-panel {
     @apply overflow-hidden rounded-xl border backdrop-blur-md;
     border-color: var(--vs-border);

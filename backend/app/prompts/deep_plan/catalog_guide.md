@@ -1,6 +1,7 @@
-# Deep plan — stage selection guide (internal router / requirement agent)
+# Deep plan — stage selection guide (Vertex req phase)
 
-> Consumed inside `DeepPlanOrchestrator` only — **not** injected into Vertex's standing persona.
+> Injected during **req extraction** (gate open) so Vertex can write `00_pipeline_manifest.json`.  
+> Pipeline execution uses wave order in `pipeline_orchestration.md` + `run_planning_stage` — not this file at runtime.
 
 ## Always run
 
@@ -30,7 +31,7 @@
 | Situation | Stages |
 |-----------|--------|
 | One clear UI direction | `frontend_plan` only |
-| Two viable architecture/UI forks | `frontend_plan_a` + `frontend_plan_b` → `frontend_merge` |
+| Two viable architecture/UI forks | `frontend_plan_a` + `frontend_plan_b` (end `correction` pass merges if both ran) |
 
 Do not use dual frontend for trivial UI tweaks.
 
@@ -42,7 +43,8 @@ When `system_plan` runs, typical order:
 2. `sdk_practices_audit` — libs match official docs
 3. `code_practices_audit` — repo conventions
 4. `performance_planning` — only if scale/HIL warrants
-5. `gap_check` → `correction` if gaps found
+5. `security_audit` — auth, exposure, migration risk
+6. `correction` — **mandatory end coherence pass** (always include on deep plan lists)
 
 ## Output
 

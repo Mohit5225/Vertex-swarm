@@ -8,6 +8,8 @@ import SessionPanel from './SessionPanel'
 import { getVsCodeApi } from '../lib/vscode'
 import { ChevronDown, Undo2 } from 'lucide-react'
 import TodoWidget from './TodoWidget'
+import AgentTracePanel from './AgentTracePanel'
+import { useAgentPanelStore } from '../store/agentPanelStore'
 
 import { collectMessageFileChanges } from '../lib/messageDiffs'
 import {
@@ -217,6 +219,7 @@ const ChatPanel: React.FC = () => {
   const wasStreamingRef = useRef(false)
   const sessionPanelRef = useRef<HTMLDivElement>(null)
   const historyPanelRef = useRef<HTMLDivElement>(null)
+  const agentPanelOpen = useAgentPanelStore((s) => s.open)
 
   const SCROLL_STICK_THRESHOLD_PX = 96
 
@@ -474,8 +477,9 @@ const ChatPanel: React.FC = () => {
           />
         )}
 
-        <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
-          <div className="flex-1 overflow-hidden">
+        <div className="flex min-h-0 flex-1 overflow-hidden">
+          <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
+            <div className="flex-1 overflow-hidden">
             <div
               ref={messagesScrollRef}
               onScroll={handleMessagesScroll}
@@ -537,6 +541,8 @@ const ChatPanel: React.FC = () => {
               onQueuedEditApplied={() => setQueuedEdit('')}
             />
           </div>
+          </div>
+          {agentPanelOpen ? <AgentTracePanel /> : null}
         </div>
       </div>
 

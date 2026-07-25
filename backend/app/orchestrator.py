@@ -27,10 +27,14 @@ from app.services.deep_plan import (
     consume_deep_plan_gate,
     is_deep_plan_available,
     planning_gate_answers_confirm_deep_plan,
+    read_deep_plan_phase,
     read_session_state,
     resolve_deep_plan_gate,
     set_deep_plan_confirmed,
 )
+from app.services.deep_plan.gates import DEEP_PLAN_CONFIRMED_KEY
+from app.services.deep_plan.artifacts import normalize_rel_path, validate_handoff
+from app.services.deep_plan.constants import MANIFEST_REL, REQUIREMENTS_REL
 from app.services.websearch import search_web
 from app.utils.token_profiler import TokenProfiler
 from app.services.llm_service import DEVELOPER_ASSISTANT_PERSONA
@@ -74,6 +78,19 @@ class LLMOrchestrator:
         self.pending_hil_sessions: dict[str, _PendingHilSession] = {}
         # pipeline_id → approval queue for deep_plan_tool
         self.pending_deep_plan_approvals: dict[str, asyncio.Queue] = {}
+        # chat_id → active deep plan pipeline context for run_planning_stage
+        self.active_pipeline_by_chat: dict[str, dict[str, Any]] = {}
+        # chat_id set when user aborts during pipeline_running (cooperative cancel)
+        self.pipeline_abort_by_chat: set[str] = set()
+
+    def request_pipeline_abort(self, chat_id: str) -> None:
+        self.pipeline_abort_by_chat.add(str(chat_id))
+
+    def is_pipeline_abort_requested(self, chat_id: str) -> bool:
+        return str(chat_id) in self.pipeline_abort_by_chat
+
+    def clear_pipeline_abort(self, chat_id: str) -> None:
+        self.pipeline_abort_by_chat.discard(str(chat_id))
 
     async def wait_for_deep_plan_approval(
         self,
@@ -110,6 +127,23 @@ class LLMOrchestrator:
         await queue.put({"approved": False, "rejection_feedback": rejection_feedback})
         return True, "ok"
 
+    async def handle_abort_deep_plan(self, chat_id: str) -> tuple[bool, str, bool]:
+        """Returns (ok, message, hard_cancel). hard_cancel=True → cancel active session task."""
+        from app.services.deep_plan import abort_deep_plan_req
+        from app.services.deep_plan.gates import abort_deep_plan_pipeline
+
+        ok, message, pipeline_id, hard_cancel = await abort_deep_plan_pipeline(self, chat_id)
+        if ok:
+            if pipeline_id:
+                queue = self.pending_deep_plan_approvals.get(pipeline_id)
+                if queue is not None:
+                    await queue.put({"approved": False, "aborted": True})
+            return True, "ok", hard_cancel
+
+        if await abort_deep_plan_req(self, chat_id):
+            return True, "ok", False
+        return False, message or "pipeline_running", False
+
     def enqueue_job_completion(self, chat_id: str, payload: dict[str, Any]) -> None:
         self.job_completion_queues.setdefault(chat_id, []).append(payload)
 
@@ -119,19 +153,44 @@ class LLMOrchestrator:
     def clear_job_completions(self, chat_id: str) -> None:
         self.job_completion_queues.pop(chat_id, None)
 
-    async def _wait_for_tool_result(
+    def _begin_tool_result_wait(self, tool_call_id: str) -> asyncio.Queue:
+        """Register a result queue before emitting tool_call to the extension."""
+        queue: asyncio.Queue = asyncio.Queue()
+        self.active_tool_queues[tool_call_id] = queue
+        return queue
+
+    async def _finish_tool_result_wait(
         self,
         tool_call_id: str,
+        queue: asyncio.Queue,
         timeout_seconds: int = 360,
     ) -> ToolResultSchema | None:
-        queue = asyncio.Queue()
-        self.active_tool_queues[tool_call_id] = queue
         try:
             return await asyncio.wait_for(queue.get(), timeout=timeout_seconds)
         except asyncio.TimeoutError:
             return None
         finally:
             self.active_tool_queues.pop(tool_call_id, None)
+
+    async def _wait_for_tool_result(
+        self,
+        tool_call_id: str,
+        timeout_seconds: int = 360,
+    ) -> ToolResultSchema | None:
+        queue = self._begin_tool_result_wait(tool_call_id)
+        return await self._finish_tool_result_wait(tool_call_id, queue, timeout_seconds)
+
+    async def _notify_extension_abort_session_tools(self, session_id: str) -> None:
+        """Tell the extension host to cancel in-flight tools for a nested session."""
+        if not self.stdio:
+            return
+        await self.stdio.write_message(
+            {
+                "jsonrpc": "2.0",
+                "method": "tool/abort",
+                "params": {"session_id": session_id},
+            }
+        )
 
     async def handle_tool_result(self, result: ToolResultSchema) -> None:
         tool_call_id = result.tool_call_id
@@ -238,6 +297,10 @@ def _is_hil_tool_call(call: dict[str, Any]) -> bool:
 
 def _is_deep_plan_tool_call(call: dict[str, Any]) -> bool:
     return call.get("tool_name") == "deep_plan_tool"
+
+
+def _is_run_planning_stage_call(call: dict[str, Any]) -> bool:
+    return call.get("tool_name") == "run_planning_stage"
 
 
 def _build_job_completion_message(payload: dict[str, Any]) -> dict[str, str]:
@@ -684,6 +747,7 @@ async def _execute_tool_call(
                 metadata={
                     "hil_session_id": hil_session_id,
                     "agent_label": agent_label,
+                    "context": hil_context,
                     "questions": questions,
                     "current_index": 1,
                     "total": len(questions),
@@ -716,6 +780,31 @@ async def _execute_tool_call(
             await set_deep_plan_confirmed(orchestrator, str(chat_id))
             if deep_plan_available_holder is not None:
                 deep_plan_available_holder[0] = True
+            await emit_trace_and_push(
+                _build_event(
+                    "deep_plan_mode_active",
+                    metadata={
+                        "trigger": "vertex_hil",
+                        "phase": "requirement_extraction",
+                        "stage_label": "Requirement extraction",
+                    },
+                    chat_id=str(chat_id),
+                    message_id=request_message_id,
+                )
+            )
+            await emit_trace_and_push(
+                _build_event(
+                    "deep_plan_started",
+                    metadata={
+                        "trigger": "vertex_hil",
+                        "phase": "requirement_extraction",
+                        "stage_id": "requirement_extraction",
+                        "title": "Deep plan",
+                    },
+                    chat_id=str(chat_id),
+                    message_id=request_message_id,
+                )
+            )
         result_content = "User answered HIL questions."
         tool_data = {"hil_session_id": hil_session_id, "answers": enriched}
         success_event = _build_event(
@@ -728,6 +817,72 @@ async def _execute_tool_call(
         )
         await emit_trace_and_push(success_event)
         return (tool_call_id, tool_name, result_content, "success", None, tool_data)
+
+    # ── run_planning_stage (Vertex pipeline orchestration only) ───────────
+    if tool_name == "run_planning_stage":
+        tool_event = _build_event(
+            "tool_call",
+            metadata={"phase": "tool_requested", "extension_execute": False},
+            tool_call_id=tool_call_id,
+            tool_name=tool_name,
+            args=tool_args,
+            session_id=synthetic_session_id,
+            chat_id=str(chat_id),
+            message_id=request_message_id,
+        )
+        await emit_trace_and_push(tool_event)
+
+        pipeline_ctx = orchestrator.active_pipeline_by_chat.get(str(chat_id))
+        if not pipeline_ctx:
+            err = (
+                "run_planning_stage is only available while deep_plan_tool is running "
+                "the planner pipeline."
+            )
+            error_event = _build_event(
+                "tool_result",
+                metadata={"phase": "tool_result", "status": "error", "error_code": "no_pipeline_context"},
+                status="error",
+                content=err,
+                error_code="no_pipeline_context",
+                tool_call_id=tool_call_id,
+            )
+            await emit_trace_and_push(error_event)
+            return (tool_call_id, tool_name, err, "error", "no_pipeline_context", None)
+
+        from app.services.deep_plan.planning_stage_tool import execute_run_planning_stage
+
+        deep_o = pipeline_ctx["deep_o"]
+        result_status, result_content, tool_data = await execute_run_planning_stage(
+            deep_o,
+            stage_id=str(tool_args.get("stage_id") or ""),
+            pipeline_id=str(tool_args.get("pipeline_id") or ""),
+            manifest=pipeline_ctx["manifest"],
+            requirements_path=pipeline_ctx["requirements_path"],
+        )
+        is_error = result_status == "error"
+        success_event = _build_event(
+            "tool_result",
+            metadata={
+                "phase": "tool_result",
+                "status": "error" if is_error else "success",
+                **({"error_code": (tool_data or {}).get("error_code")} if is_error else {}),
+            },
+            status="error" if is_error else "success",
+            content=result_content,
+            tool_call_id=tool_call_id,
+            data=tool_data,
+            **({"error_code": (tool_data or {}).get("error_code")} if is_error and tool_data else {}),
+        )
+        await emit_trace_and_push(success_event)
+        error_code = (tool_data or {}).get("error_code") if is_error else None
+        return (
+            tool_call_id,
+            tool_name,
+            result_content,
+            result_status,
+            error_code,
+            tool_data,
+        )
 
     # ── deep_plan_tool ────────────────────────────────────────────────────
     if tool_name == "deep_plan_tool":
@@ -769,6 +924,53 @@ async def _execute_tool_call(
         if not isinstance(payload, dict):
             payload = {}
 
+        if str(action) == "start":
+            try:
+                requirements_path = normalize_rel_path(
+                    payload.get("requirements_path"),
+                    REQUIREMENTS_REL,
+                )
+                manifest_path = normalize_rel_path(
+                    payload.get("manifest_path"),
+                    MANIFEST_REL,
+                )
+            except ValueError as exc:
+                err = str(exc)
+                error_event = _build_event(
+                    "tool_result",
+                    metadata={"phase": "tool_result", "status": "error", "error_code": "handoff_invalid"},
+                    status="error",
+                    content=err,
+                    error_code="handoff_invalid",
+                    tool_call_id=tool_call_id,
+                )
+                await emit_trace_and_push(error_event)
+                return (tool_call_id, tool_name, err, "error", "handoff_invalid", None)
+
+            chat_dir = orchestrator.file_store.chats_path / str(chat_id)
+            _, _, handoff_errors = await validate_handoff(
+                chat_dir,
+                requirements_path=requirements_path,
+                manifest_path=manifest_path,
+            )
+            if handoff_errors:
+                err = (
+                    "Requirement handoff invalid. Complete req extraction first "
+                    "(01_requirements.md + 00_pipeline_manifest.json).\n"
+                    + "\n".join(f"- {e}" for e in handoff_errors)
+                )
+                error_event = _build_event(
+                    "tool_result",
+                    metadata={"phase": "tool_result", "status": "error", "error_code": "handoff_invalid"},
+                    status="error",
+                    content=err,
+                    error_code="handoff_invalid",
+                    tool_call_id=tool_call_id,
+                    data={"errors": handoff_errors},
+                )
+                await emit_trace_and_push(error_event)
+                return (tool_call_id, tool_name, err, "error", "handoff_invalid", {"errors": handoff_errors})
+
         await emit_trace_and_push(
             build_status_event("Deep planning pipeline running...", "deep_plan_running")
         )
@@ -785,7 +987,28 @@ async def _execute_tool_call(
             emit_trace_and_push=emit_trace_and_push,
             build_event=_build_event,
         )
-        status, content, data = await runner.run(action=str(action), payload=payload)
+        try:
+            status, content, data = await runner.run(action=str(action), payload=payload)
+        except asyncio.CancelledError:
+            if orchestrator.is_pipeline_abort_requested(str(chat_id)):
+                content = "Deep plan aborted by user."
+                data = {"error_code": "pipeline_aborted"}
+                status = "error"
+            else:
+                raise
+            result_status = "error"
+            error_code = (data or {}).get("error_code", "pipeline_aborted")
+            result_event = _build_event(
+                "tool_result",
+                metadata={"phase": "tool_result", "status": result_status, "error_code": error_code},
+                status=result_status,
+                content=content,
+                error_code=error_code,
+                tool_call_id=tool_call_id,
+                data=data,
+            )
+            await emit_trace_and_push(result_event)
+            raise
         result_status = "success" if status == "success" else "error"
         error_code = None if status == "success" else (data or {}).get("error_code", "pipeline_error")
         result_event = _build_event(
@@ -919,9 +1142,16 @@ async def _execute_tool_call(
 
         agent_id = uuid4().hex
 
+        raw_timeout = tool_args.get("timeout", 600)
+        try:
+            spawn_timeout = int(raw_timeout)
+        except (TypeError, ValueError):
+            spawn_timeout = 600
+        spawn_timeout = min(max(spawn_timeout, 30), 900)
+
         tool_event = _build_event(
             "tool_call",
-            metadata={"phase": "tool_requested"},
+            metadata={"phase": "tool_requested", "extension_execute": False},
             tool_call_id=tool_call_id,
             tool_name=tool_name,
             args=tool_args,
@@ -932,41 +1162,132 @@ async def _execute_tool_call(
         await emit_trace_and_push(tool_event)
 
         logger.info("Spawning subagent %s for task: %s worktree: %s", agent_id, task_type, worktree_path)
-        await emit_trace_and_push(build_status_event(f"Spawning subagent for '{task_type}'...", "spawning_subagent"))
+        spawning_status = build_status_event(
+            f"Starting subagent ({task_type})…",
+            "subagent_started",
+        )
+        spawning_meta = dict(spawning_status.get("metadata") or {})
+        spawning_meta.update(
+            {
+                "subagent_trace": True,
+                "subagent_spawn_tool_call_id": tool_call_id,
+                "subagent_id": agent_id,
+            }
+        )
+        if task_type:
+            spawning_meta["subagent_task_type"] = str(task_type)
+        spawning_status["metadata"] = spawning_meta
+        await emit_trace_and_push(spawning_status)
 
+        async def subagent_trace_emit(event: dict[str, Any]) -> None:
+            """Route nested subagent activity to the parent message trace."""
+            event_type = event.get("type")
+            metadata = dict(event.get("metadata") or {})
+            if event_type not in ("hil_question", "hil_resolved"):
+                # Nested runs suppress streamed tokens; surface model-wait status so the
+                # panel does not freeze on the last explore row for minutes.
+                if event_type == "status" and metadata.get("phase") in {
+                    "calling_model",
+                    "resuming_after_tool",
+                    "preparing_context",
+                }:
+                    metadata["phase"] = "subagent_progress"
+                    if not event.get("content"):
+                        event = {**event, "content": "Generating…"}
+                metadata["subagent_trace"] = True
+                metadata["subagent_id"] = agent_id
+                metadata["subagent_spawn_tool_call_id"] = tool_call_id
+                if task_type:
+                    metadata["subagent_task_type"] = str(task_type)
+            parent_event = {
+                **event,
+                "chat_id": str(chat_id),
+                "message_id": request_message_id,
+                "session_id": synthetic_session_id,
+                "metadata": metadata,
+            }
+            await emit_trace_and_push(parent_event)
+
+        async def emit_spawn_failure_trace(content: str, error_code: str) -> None:
+            fail_event = _build_event(
+                "error",
+                content=content,
+                metadata={
+                    "phase": error_code,
+                    "subagent_trace": True,
+                    "subagent_spawn_tool_call_id": tool_call_id,
+                    "subagent_id": agent_id,
+                    **({"subagent_task_type": str(task_type)} if task_type else {}),
+                },
+                session_id=synthetic_session_id,
+                chat_id=str(chat_id),
+                message_id=request_message_id,
+            )
+            await emit_trace_and_push(fail_event)
+
+        subagent_session_id = f"sess_{agent_id}"
         try:
             current_depth = context.get("depth", 0)
             if current_depth >= 5:
                 raise Exception("Maximum subagent depth of 5 reached.")
 
+            inherited_categories = list(active_categories_holder[0] or [])
             subagent_context: dict[str, Any] = {
                 "user_id": user_id,
-                "synthetic_session_id": f"sess_{agent_id}",
+                "synthetic_session_id": subagent_session_id,
                 "request_message_id": f"msg_{uuid4().hex[:12]}",
                 "ide_context_enabled": False,
                 "workspace_skeleton": req_workspace_skeleton,
-                "active_tool_categories": active_categories_holder[0],
+                "active_tool_categories": inherited_categories,
                 "task_type": task_type,
                 "parent_id": str(chat_id),
                 "depth": current_depth + 1,
+                "ephemeral_run": True,
+                "external_trace_emit": subagent_trace_emit,
             }
             if worktree_path:
                 subagent_context["worktree_path"] = worktree_path
 
-            subagent_result = await _run_agent_loop_impl(
-                orchestrator,
-                agent_id,
-                prompt,
-                subagent_context,
+            subagent_result = await asyncio.wait_for(
+                _run_agent_loop_impl(
+                    orchestrator,
+                    agent_id,
+                    str(prompt or ""),
+                    subagent_context,
+                ),
+                timeout=spawn_timeout,
             )
 
             logger.info("Subagent %s completed.", agent_id)
             success_event = _build_event("tool_result", metadata={"phase": "tool_result", "status": "success"}, status="success", content=f"Subagent finished. Result: {subagent_result}", tool_call_id=tool_call_id)
             await emit_trace_and_push(success_event)
             return (tool_call_id, tool_name, subagent_result, "success", None, None)
+        except asyncio.TimeoutError:
+            await orchestrator._notify_extension_abort_session_tools(subagent_session_id)
+            result_content = (
+                f"Subagent timed out after {spawn_timeout}s "
+                f"(task_type={task_type!r}). Partial work may exist; do not silently rewrite — "
+                f"re-spawn with a higher timeout or a narrower prompt."
+            )
+            logger.error("Subagent %s timed out after %ss", agent_id, spawn_timeout)
+            await emit_spawn_failure_trace(result_content, "subagent_timeout")
+            error_event = _build_event(
+                "tool_result",
+                metadata={"phase": "tool_result", "status": "error", "error_code": "subagent_timeout"},
+                status="error",
+                content=result_content,
+                error_code="subagent_timeout",
+                tool_call_id=tool_call_id,
+            )
+            await emit_trace_and_push(error_event)
+            return (tool_call_id, tool_name, result_content, "error", "subagent_timeout", None)
+        except asyncio.CancelledError:
+            await orchestrator._notify_extension_abort_session_tools(subagent_session_id)
+            raise
         except Exception as e:
             logger.error("Subagent %s failed: %s", agent_id, e, exc_info=True)
             result_content = f"Subagent crashed with exception: {str(e)}"
+            await emit_spawn_failure_trace(result_content, "subagent_error")
             error_event = _build_event("tool_result", metadata={"phase": "tool_result", "status": "error", "error_code": "subagent_error"}, status="error", content=result_content, error_code="subagent_error", tool_call_id=tool_call_id)
             await emit_trace_and_push(error_event)
             return (tool_call_id, tool_name, result_content, "error", "subagent_error", None)
@@ -985,15 +1306,24 @@ async def _execute_tool_call(
         chat_id=str(chat_id),
         message_id=request_message_id,
     )
-    await emit_trace_and_push(tool_event)
-    await emit_trace_and_push(
-        build_status_event(
-            f"Waiting for {tool_name} result from the extension...",
-            "awaiting_tool_result",
+    # Register the result queue before emitting tool_call so fast extension tools
+    # (e.g. list_dir) cannot return before the waiter exists.
+    tool_result_queue = orchestrator._begin_tool_result_wait(tool_call_id)
+    try:
+        await emit_trace_and_push(tool_event)
+        await emit_trace_and_push(
+            build_status_event(
+                f"Waiting for {tool_name} result from the extension...",
+                "awaiting_tool_result",
+            )
         )
-    )
-
-    tool_result = await orchestrator._wait_for_tool_result(tool_call_id)
+        tool_result = await orchestrator._finish_tool_result_wait(
+            tool_call_id,
+            tool_result_queue,
+        )
+    except Exception:
+        orchestrator.active_tool_queues.pop(tool_call_id, None)
+        raise
 
     if tool_result is None:
         timeout_content = f"Timed out waiting for tool result: {tool_name}"
@@ -1048,7 +1378,10 @@ async def _run_agent_loop_impl(
     synthetic_session_id = context.get("synthetic_session_id", f"sess_{chat_id}")
     request_message_id = context.get("request_message_id", f"msg_{uuid4().hex[:12]}")
     req_ide_context_enabled = context.get("ide_context_enabled", True)
-    
+    ephemeral_run = bool(context.get("ephemeral_run"))
+    deep_plan_stage_id = context.get("deep_plan_stage_id")
+    deep_plan_pipeline_mode = bool(context.get("deep_plan_pipeline_mode"))
+    external_trace_emit = context.get("external_trace_emit")
     req_request_context_raw = context.get("request_context", None)
     req_request_context = req_request_context_raw
     
@@ -1057,7 +1390,7 @@ async def _run_agent_loop_impl(
     await apply_session_start_flags(
         orchestrator,
         chat_id,
-        deep_plan_requested=bool(context.get("deep_plan_requested")),
+        deep_plan_requested=bool(context.get("deep_plan_requested")) and not ephemeral_run,
     )
 
     session_state = await read_session_state(orchestrator, chat_id)
@@ -1077,8 +1410,13 @@ async def _run_agent_loop_impl(
         if isinstance(state.get("working_memory"), dict):
             working_memory = {**working_memory, **state["working_memory"]}
 
-    await orchestrator.file_store.append_message(chat_id, "user", message, message_id=request_message_id)
-    history_raw = await orchestrator.file_store.read_messages(chat_id)
+    if not ephemeral_run:
+        await orchestrator.file_store.append_message(
+            chat_id, "user", message, message_id=request_message_id
+        )
+        history_raw = await orchestrator.file_store.read_messages(chat_id)
+    else:
+        history_raw = []
 
     llm_messages = []
     for m in history_raw:
@@ -1100,10 +1438,39 @@ async def _run_agent_loop_impl(
         system_context_messages.append({"role": "system", "content": tool_memory_message})
         
     task_type = context.get("task_type")
-    if task_type:
+    if task_type and deep_plan_pipeline_mode:
         system_context_messages.append({
-            "role": "system", 
-            "content": f"Task Category: {task_type}\nYou are running as a specialized subagent focusing on this specific task type. Focus ONLY on this task and return your final comprehensive result to the parent orchestrator when complete."
+            "role": "system",
+            "content": (
+                f"Task: {task_type}\n"
+                "You are Vertex orchestrating the deep plan pipeline. "
+                "Use run_planning_stage tool calls only."
+            ),
+        })
+    elif task_type:
+        inherited = existing_active_categories or []
+        inherit_note = (
+            f"Already loaded tool categories (do NOT call load_tool_context for these): {', '.join(inherited)}.\n"
+            if inherited
+            else ""
+        )
+        system_context_messages.append({
+            "role": "system",
+            "content": (
+                f"Task Category: {task_type}\n"
+                "You are running as a specialized subagent focusing on this specific task type. "
+                "Focus ONLY on this task. Use tools to produce the deliverable (read and write as needed). "
+                "Return your final comprehensive result to the parent orchestrator when complete.\n"
+                f"{inherit_note}"
+                "Do not narrate plans without calling tools. Prefer writing the deliverable over long prose."
+            ),
+        })
+
+    stage_system_preamble = context.get("stage_system_preamble")
+    if isinstance(stage_system_preamble, str) and stage_system_preamble.strip():
+        system_context_messages.append({
+            "role": "system",
+            "content": stage_system_preamble.strip(),
         })
 
     worktree_path = context.get("worktree_path")
@@ -1117,17 +1484,24 @@ async def _run_agent_loop_impl(
             ),
         })
 
-    deep_plan_gate_open = resolve_deep_plan_gate(
-        working_memory,
-        this_turn_deep_plan_requested=bool(context.get("deep_plan_requested")),
+    deep_plan_gate_open = (
+        not ephemeral_run
+        and not deep_plan_stage_id
+        and not deep_plan_pipeline_mode
+        and resolve_deep_plan_gate(
+            working_memory,
+            this_turn_deep_plan_requested=bool(context.get("deep_plan_requested")),
+        )
     )
     if deep_plan_gate_open:
         system_context_messages.append({
             "role": "system",
             "content": (
-                "DEEP PLAN GATE OPEN: `deep_plan_tool` is already in tools[] with its usage instructions. "
-                "Call `deep_plan_tool` (action start) now. Do NOT `load_tool_context` for plan_tool or "
-                "workspace_ops to start deep planning — that is the standard plan path, not deep plan."
+                "DEEP PLAN GATE OPEN (requirement phase): You remain Vertex. Req-extraction instructions "
+                "are in your system context. Explore the repo (load workspace_ops, hil_tool, web_search). "
+                "Write plan_pipeline/01_requirements.md and plan_pipeline/00_pipeline_manifest.json "
+                "before calling deep_plan_tool(start). Do NOT call deep_plan_tool until both files exist. "
+                "Do NOT use plan_tool for this path."
             ),
         })
 
@@ -1136,6 +1510,9 @@ async def _run_agent_loop_impl(
             *system_context_messages,
             *llm_messages,
         ]
+
+    if ephemeral_run and (message or "").strip():
+        llm_messages.append({"role": "user", "content": message})
 
     if tool_memory_message:
         mutation_count = len(existing_tool_memory.get("completed_mutations", [])) if isinstance(existing_tool_memory, dict) else 0
@@ -1166,7 +1543,8 @@ async def _run_agent_loop_impl(
         await orchestrator.stdio.write_event(chat_id, event)
         
     async def emit_trace_and_push(event: dict[str, Any]) -> None:
-        trace_events.append(event)
+        if not external_trace_emit:
+            trace_events.append(event)
         _log_trace_event(
             user_id,
             chat_id,
@@ -1174,7 +1552,10 @@ async def _run_agent_loop_impl(
             request_message_id,
             event,
         )
-        await push_event(event)
+        if external_trace_emit:
+            await external_trace_emit(event)
+        else:
+            await push_event(event)
 
     def build_status_event(content: str, phase: str) -> dict[str, Any]:
         return _build_event(
@@ -1193,11 +1574,75 @@ async def _run_agent_loop_impl(
     active_tool_guidance_holder: list[str | None] = [active_tool_guidance]
     active_categories_holder: list[list[str]] = [existing_active_categories]
     deep_plan_available_holder: list[bool] = [
-        resolve_deep_plan_gate(
+        False
+        if ephemeral_run or deep_plan_stage_id or deep_plan_pipeline_mode
+        else resolve_deep_plan_gate(
             working_memory,
             this_turn_deep_plan_requested=bool(context.get("deep_plan_requested")),
         )
     ]
+    deep_plan_pipeline_mode_holder: list[bool] = [deep_plan_pipeline_mode]
+
+    if bool(context.get("deep_plan_requested")) and not ephemeral_run and not deep_plan_stage_id:
+        title_guess = (message or "").strip()[:120] or "Deep plan"
+        await emit_trace_and_push(
+            _build_event(
+                "deep_plan_mode_active",
+                metadata={
+                    "trigger": "user_slash",
+                    "phase": "requirement_extraction",
+                    "stage_label": "Requirement extraction",
+                },
+                chat_id=str(chat_id),
+                message_id=request_message_id,
+            )
+        )
+        await emit_trace_and_push(
+            _build_event(
+                "deep_plan_started",
+                metadata={
+                    "trigger": "user_slash",
+                    "phase": "requirement_extraction",
+                    "stage_id": "requirement_extraction",
+                    "title": title_guess,
+                },
+                chat_id=str(chat_id),
+                message_id=request_message_id,
+            )
+        )
+        await emit_trace_and_push(
+            _build_event(
+                "deep_plan_stage_status",
+                metadata={
+                    "stage_id": "requirement_extraction",
+                    "status": "running",
+                    "label": "Requirement extraction",
+                },
+                chat_id=str(chat_id),
+                message_id=request_message_id,
+            )
+        )
+    elif (
+        not ephemeral_run
+        and not deep_plan_stage_id
+        and is_deep_plan_available(working_memory)
+        and read_deep_plan_phase(working_memory) == "req"
+    ):
+        ui_trigger = (
+            "vertex_hil" if working_memory.get(DEEP_PLAN_CONFIRMED_KEY) else "user_slash"
+        )
+        await emit_trace_and_push(
+            _build_event(
+                "deep_plan_mode_active",
+                metadata={
+                    "trigger": ui_trigger,
+                    "phase": "requirement_extraction",
+                    "stage_label": "Requirement extraction",
+                },
+                chat_id=str(chat_id),
+                message_id=request_message_id,
+            )
+        )
 
     profiler = TokenProfiler(request_message_id)
     profiler.log_constant("dev_persona", DEVELOPER_ASSISTANT_PERSONA)
@@ -1215,6 +1660,58 @@ async def _run_agent_loop_impl(
 
         while True:
             llm_round += 1
+
+            if deep_plan_pipeline_mode and orchestrator.is_pipeline_abort_requested(str(chat_id)):
+                run_failed = True
+                await emit_trace_and_push(
+                    _build_event(
+                        "status",
+                        content="Deep plan pipeline aborted by user.",
+                        metadata={"phase": "deep_plan_aborted"},
+                        session_id=synthetic_session_id,
+                        chat_id=str(chat_id),
+                        message_id=request_message_id,
+                    )
+                )
+                raise asyncio.CancelledError()
+
+            if deep_plan_stage_id and orchestrator.is_pipeline_abort_requested(str(chat_id)):
+                run_failed = True
+                await emit_trace_and_push(
+                    _build_event(
+                        "status",
+                        content="Deep plan pipeline aborted by user.",
+                        metadata={"phase": "deep_plan_aborted", "stage_id": deep_plan_stage_id},
+                        session_id=synthetic_session_id,
+                        chat_id=str(chat_id),
+                        message_id=request_message_id,
+                    )
+                )
+                raise asyncio.CancelledError()
+
+            if deep_plan_pipeline_mode:
+                from app.services.deep_plan.constants import MAX_DEEP_PLAN_PIPELINE_LLM_ROUNDS
+
+                max_pipeline_rounds = int(
+                    context.get("max_pipeline_llm_rounds", MAX_DEEP_PLAN_PIPELINE_LLM_ROUNDS)
+                )
+                if llm_round > max_pipeline_rounds:
+                    run_failed = True
+                    await emit_trace_and_push(
+                        _build_event(
+                            "error",
+                            content=(
+                                f"Deep plan pipeline orchestration exceeded {max_pipeline_rounds} "
+                                "LLM rounds. Stop retrying and report the last tool error."
+                            ),
+                            metadata={"phase": "pipeline_round_limit", "error_code": "pipeline_round_limit"},
+                            session_id=synthetic_session_id,
+                            chat_id=str(chat_id),
+                            message_id=request_message_id,
+                        )
+                    )
+                    break
+
             for completion in orchestrator.drain_job_completions(chat_id):
                 llm_messages.append(_build_job_completion_message(completion))
 
@@ -1261,6 +1758,7 @@ async def _run_agent_loop_impl(
                     active_tool_guidance=active_tool_guidance_holder[0],
                     active_categories=active_categories_holder[0],
                     deep_plan_available=deep_plan_available_holder[0],
+                    deep_plan_pipeline_mode=deep_plan_pipeline_mode_holder[0],
                 )
             except RateLimitError:
                 logger.warning(
@@ -1286,6 +1784,7 @@ async def _run_agent_loop_impl(
                     active_tool_guidance=active_tool_guidance_holder[0],
                     active_categories=active_categories_holder[0],
                     deep_plan_available=deep_plan_available_holder[0],
+                    deep_plan_pipeline_mode=deep_plan_pipeline_mode_holder[0],
                 )
 
             # ── Phase 1: drain the full LLM stream ────────────────────────────────
@@ -1314,7 +1813,14 @@ async def _run_agent_loop_impl(
 
                         assistant_turn_content += token
                         full_response += token
-                        await push_event(_build_event("token", content=token, metadata={"phase": "assistant_output"}))
+                        if not external_trace_emit:
+                            await push_event(
+                                _build_event(
+                                    "token",
+                                    content=token,
+                                    metadata={"phase": "assistant_output"},
+                                )
+                            )
                         continue
 
                     if event_type == "thinking":
@@ -1430,18 +1936,39 @@ async def _run_agent_loop_impl(
 
                 load_calls = [c for c in collected_tool_calls if _is_load_tool_context_call(c)]
                 hil_calls = [c for c in collected_tool_calls if _is_hil_tool_call(c)]
+                planning_stage_calls = [
+                    c for c in collected_tool_calls if _is_run_planning_stage_call(c)
+                ]
                 deep_plan_calls = [c for c in collected_tool_calls if _is_deep_plan_tool_call(c)]
                 other_calls = [
                     c
                     for c in collected_tool_calls
                     if not _is_load_tool_context_call(c)
                     and not _is_hil_tool_call(c)
+                    and not _is_run_planning_stage_call(c)
                     and not _is_deep_plan_tool_call(c)
                 ]
 
                 results_by_id: dict[str, Any] = {}
                 for call in load_calls:
                     results_by_id[call["tool_call_id"]] = await _invoke_tool_call(call)
+
+                if planning_stage_calls:
+                    from app.services.deep_plan.constants import PARALLEL_SPAWN_STAGGER_SECONDS
+
+                    stagger_tasks: list[asyncio.Task] = []
+                    for index, call in enumerate(planning_stage_calls):
+                        if index > 0:
+                            await asyncio.sleep(PARALLEL_SPAWN_STAGGER_SECONDS)
+                        stagger_tasks.append(
+                            asyncio.create_task(_invoke_tool_call(call))
+                        )
+                    stagger_results = await asyncio.gather(
+                        *stagger_tasks,
+                        return_exceptions=True,
+                    )
+                    for call, raw_result in zip(planning_stage_calls, stagger_results):
+                        results_by_id[call["tool_call_id"]] = raw_result
 
                 if other_calls:
                     other_results = await asyncio.gather(
@@ -1543,6 +2070,19 @@ async def _run_agent_loop_impl(
             else:
                 profiler.log_turn(llm_round, "assistant_answer", assistant_turn_content)
                 profiler.log_turn(llm_round, "assistant_reasoning", assistant_reasoning_content)
+                # Nested runs suppress streaming tokens; emit the final answer into the
+                # external trace so AgentTracePanel / worker panels show the conclusion.
+                if external_trace_emit and assistant_turn_content.strip():
+                    await emit_trace_and_push(
+                        _build_event(
+                            "output",
+                            content=assistant_turn_content.strip(),
+                            metadata={"appendMode": "block", "phase": "assistant_output"},
+                            session_id=synthetic_session_id,
+                            chat_id=str(chat_id),
+                            message_id=request_message_id,
+                        )
+                    )
                 await emit_trace_and_push(build_status_event("Final answer ready.", "completed"))
 
             pending_completions = orchestrator.drain_job_completions(chat_id)
@@ -1553,18 +2093,34 @@ async def _run_agent_loop_impl(
 
             break
     except asyncio.CancelledError:
+        nested_run = ephemeral_run or deep_plan_pipeline_mode or bool(deep_plan_stage_id)
+        if nested_run:
+            raise
         run_failed = True
         logger.info("Agent loop cancelled for chat %s", chat_id)
-        await emit_trace_and_push(
-            _build_event(
-                "status",
-                content="User cancelled the operation.",
-                metadata={"phase": "cancelled", "cancelledBy": "user"},
-                session_id=synthetic_session_id,
-                chat_id=str(chat_id),
-                message_id=request_message_id,
+        if orchestrator.is_pipeline_abort_requested(str(chat_id)):
+            await emit_trace_and_push(
+                _build_event(
+                    "status",
+                    content="Deep plan aborted by user.",
+                    metadata={"phase": "deep_plan_aborted"},
+                    session_id=synthetic_session_id,
+                    chat_id=str(chat_id),
+                    message_id=request_message_id,
+                )
             )
-        )
+            orchestrator.clear_pipeline_abort(str(chat_id))
+        else:
+            await emit_trace_and_push(
+                _build_event(
+                    "status",
+                    content="User cancelled the operation.",
+                    metadata={"phase": "cancelled", "cancelledBy": "user"},
+                    session_id=synthetic_session_id,
+                    chat_id=str(chat_id),
+                    message_id=request_message_id,
+                )
+            )
         # Do NOT re-raise so we fall through and persist the partial response/trace to DB
     except Exception as exc:
         run_failed = True
@@ -1605,14 +2161,15 @@ async def _run_agent_loop_impl(
             )
         )
 
-    await orchestrator.file_store.append_message(
-        chat_id,
-        "assistant",
-        full_response,
-        events=trace_events,
-        message_id=f"msg_{uuid4().hex[:12]}",
-        turn_duration_ms=_compute_turn_duration_ms(trace_events),
-    )
+    if not ephemeral_run:
+        await orchestrator.file_store.append_message(
+            chat_id,
+            "assistant",
+            full_response,
+            events=trace_events,
+            message_id=f"msg_{uuid4().hex[:12]}",
+            turn_duration_ms=_compute_turn_duration_ms(trace_events),
+        )
 
     logger.info(
         "final response completed user_id=%s chat_id=%s session_id=%s message_id=%s failed=%s trace_events=%s response_chars=%s response_preview=%s",
@@ -1626,47 +2183,54 @@ async def _run_agent_loop_impl(
         _preview(full_response) if full_response else "",
     )
 
-    try:
-        state_str = await orchestrator.nats.kv_get("SESSIONS", f"session.{chat_id}")
-        if not state_str:
-            logger.warning(
-                "tool memory persistence skipped session missing user_id=%s chat_id=%s session_id=%s message_id=%s",
-                user_id,
-                chat_id,
-                synthetic_session_id,
-                request_message_id,
-            )
-        else:
-            state = json.loads(state_str)
-            if "working_memory" not in state: state["working_memory"] = {}
-            previous_tool_memory = state["working_memory"].get("tool_memory")
-            updated_tool_memory = build_tool_memory_from_trace_events(previous_tool_memory, trace_events)
-            state["working_memory"]["tool_memory"] = updated_tool_memory
-            await orchestrator.nats.kv_set("SESSIONS", f"session.{chat_id}", json.dumps(state))
-            await orchestrator.file_store.write_session(chat_id, state)
+    if not ephemeral_run:
+        try:
+            state_str = await orchestrator.nats.kv_get("SESSIONS", f"session.{chat_id}")
+            if not state_str:
+                logger.warning(
+                    "tool memory persistence skipped session missing user_id=%s chat_id=%s session_id=%s message_id=%s",
+                    user_id,
+                    chat_id,
+                    synthetic_session_id,
+                    request_message_id,
+                )
+            else:
+                state = json.loads(state_str)
+                if "working_memory" not in state:
+                    state["working_memory"] = {}
+                previous_tool_memory = state["working_memory"].get("tool_memory")
+                updated_tool_memory = build_tool_memory_from_trace_events(
+                    previous_tool_memory, trace_events
+                )
+                state["working_memory"]["tool_memory"] = updated_tool_memory
+                await orchestrator.nats.kv_set(
+                    "SESSIONS", f"session.{chat_id}", json.dumps(state)
+                )
+                await orchestrator.file_store.write_session(chat_id, state)
 
-            logger.info(
-                "tool memory persisted user_id=%s chat_id=%s session_id=%s message_id=%s mutation_count=%s",
+                logger.info(
+                    "tool memory persisted user_id=%s chat_id=%s session_id=%s message_id=%s mutation_count=%s",
+                    user_id,
+                    chat_id,
+                    synthetic_session_id,
+                    request_message_id,
+                    len(updated_tool_memory.get("completed_mutations", [])),
+                )
+        except Exception:
+            logger.exception(
+                "tool memory persistence failed user_id=%s chat_id=%s session_id=%s message_id=%s",
                 user_id,
                 chat_id,
                 synthetic_session_id,
                 request_message_id,
-                len(updated_tool_memory.get("completed_mutations", [])),
             )
-    except Exception:
-        logger.exception(
-            "tool memory persistence failed user_id=%s chat_id=%s session_id=%s message_id=%s",
-            user_id,
-            chat_id,
-            synthetic_session_id,
-            request_message_id,
-        )
 
     profiler.dump(str(orchestrator.file_store.chats_path / chat_id / "logs"))
-    try:
-        await push_event({"type": "done", "messageId": request_message_id})
-    except Exception:
-        logger.exception("Failed to push done event")
+    if not ephemeral_run:
+        try:
+            await push_event({"type": "done", "messageId": request_message_id})
+        except Exception:
+            logger.exception("Failed to push done event")
 
     return full_response
 

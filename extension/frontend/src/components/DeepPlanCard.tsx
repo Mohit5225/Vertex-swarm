@@ -1,7 +1,8 @@
 import React from 'react'
-import { Layers, Play, X } from 'lucide-react'
+import { FolderOpen, Layers, Play, X } from 'lucide-react'
 import { getVsCodeApi } from '../lib/vscode'
 import { useChatStore } from '../store/chatStore'
+import { useDeepPlanStore } from '../store/deepPlanStore'
 
 interface Props {
   pipelineId: string
@@ -15,6 +16,7 @@ const DeepPlanCard: React.FC<Props> = ({ pipelineId, title, status }) => {
   const { isStreaming } = useChatStore()
 
   const handleApprove = () => {
+    useDeepPlanStore.getState().deactivate()
     getVsCodeApi()?.postMessage({
       type: 'planning-approve',
       payload: { pipeline_id: pipelineId },
@@ -23,10 +25,15 @@ const DeepPlanCard: React.FC<Props> = ({ pipelineId, title, status }) => {
 
   const handleReject = () => {
     const feedback = window.prompt('Optional: why are you rejecting this deep plan?') ?? ''
+    useDeepPlanStore.getState().deactivate()
     getVsCodeApi()?.postMessage({
       type: 'planning-reject',
       payload: { pipeline_id: pipelineId, rejection_feedback: feedback },
     })
+  }
+
+  const handleOpenFolder = () => {
+    getVsCodeApi()?.postMessage({ type: 'open-deep-plan-folder' })
   }
 
   return (
@@ -41,7 +48,7 @@ const DeepPlanCard: React.FC<Props> = ({ pipelineId, title, status }) => {
             {isPast
               ? 'Deep plan reviewed'
               : isReady
-                ? 'Pipeline complete — approve to continue (Phase 1 stub)'
+                ? 'Pipeline ready — review plan_pipeline/ and approve to continue'
                 : 'Deep planning pipeline running…'}
           </p>
         </div>
@@ -51,9 +58,18 @@ const DeepPlanCard: React.FC<Props> = ({ pipelineId, title, status }) => {
         <div className="bg-white/[0.01] px-4 py-3">
           <p className="mb-4 text-sm text-[#9fb0cd]">
             Review <code className="text-[#c5d4f0]">plan_pipeline/index.md</code> under this chat.
-            Approve unblocks the agent; reject returns feedback for a revise call.
+            Approve unblocks the agent. Reject returns feedback (revise flow coming later).
           </p>
           <div className="flex justify-end gap-2">
+            <button
+              type="button"
+              onClick={handleOpenFolder}
+              disabled={isStreaming}
+              className="flex items-center gap-2 rounded-lg border border-white/10 bg-white/5 px-4 py-2 text-sm font-medium text-white transition hover:bg-white/10 disabled:opacity-50"
+            >
+              <FolderOpen size={14} />
+              Open plan folder
+            </button>
             <button
               type="button"
               onClick={handleReject}

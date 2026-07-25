@@ -1,4 +1,5 @@
 import { type SessionEvent } from '../store/chatStore'
+import { labelForDeepPlanStage } from './deepPlanJobTimeline'
 import {
   getEventAction,
   getEventDebugRequest,
@@ -79,6 +80,7 @@ const HIDDEN_STATUS_PHASES = new Set([
   'resuming_after_tool',
   'assistant_output',
   'completed',
+  'spawning_subagent',
 ])
 
 /** Phases that should trigger an ephemeral toast notification in the UI. */
@@ -239,6 +241,36 @@ const summarizeToolExecution = ({
         : `Searched web for "${query}"`
     }
     return state === 'running' ? 'Running web search' : 'Completed web search'
+  }
+
+  if (toolName === 'run_planning_stage') {
+    const stageId = stringValue(
+      payload?.stage_id,
+      data?.stage_id,
+      args?.stage_id,
+    )
+    const stageLabel = stageId ? labelForDeepPlanStage(stageId) : 'Planning stage'
+    return state === 'running'
+      ? `Running ${stageLabel}…`
+      : `Completed ${stageLabel}`
+  }
+
+  if (toolName === 'deep_plan_tool') {
+    const toolAction = stringValue(payload?.action, args?.action)
+    if (toolAction === 'start') {
+      return state === 'running'
+        ? 'Starting deep plan pipeline…'
+        : 'Deep plan pipeline started'
+    }
+    return state === 'running' ? 'Running deep plan…' : 'Deep plan'
+  }
+
+  if (toolName === 'spawn_subagent') {
+    const taskType = stringValue(payload?.task_type, args?.task_type)
+    const taskLabel = taskType
+      ? taskType.replace(/_/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase())
+      : 'Subagent'
+    return state === 'running' ? `Running ${taskLabel}…` : `Completed ${taskLabel}`
   }
 
   switch (action) {

@@ -1,6 +1,7 @@
 import { create } from "zustand";
 import { getVsCodeApi } from "../lib/vscode";
 import { useChatStore } from "./chatStore";
+import { useDeepPlanStore, findDeepPlanReadyMessageId } from "./deepPlanStore";
 import { normalizeSessionEvent, compactSessionEvents } from "../lib/sessionEvents";
 
 export interface VertexConfig {
@@ -109,6 +110,7 @@ const handleExtensionMessage = (event: MessageEvent) => {
       clearRestoreTimers();
       useChatStore.getState().clearMessages();
       useChatStore.getState().setChatList([], null);
+      useDeepPlanStore.getState().deactivate();
       useConfigStore.setState({
         isAuthenticated: false,
         user: null,
@@ -136,6 +138,7 @@ const handleExtensionMessage = (event: MessageEvent) => {
       clearRestoreTimers();
       useChatStore.getState().clearMessages();
       useChatStore.getState().setChatList([], null);
+      useDeepPlanStore.getState().deactivate();
       useConfigStore.setState({
         hasConfig: false,
         config: null,
@@ -151,9 +154,27 @@ const handleExtensionMessage = (event: MessageEvent) => {
         break;
       }
 
+      const eventType = message.payload?.type;
+      const metadata = message.payload?.metadata ?? {};
+
+      if (eventType === "deep_plan_mode_active" || eventType === "deep_plan_started") {
+        useDeepPlanStore.getState().applyModeEvent(metadata);
+        if (typeof metadata.pipeline_id === "string") {
+          useDeepPlanStore.getState().setPipelineId(metadata.pipeline_id);
+        }
+      } else if (eventType === "deep_plan_stage_status") {
+        useDeepPlanStore.getState().applyStageStatus(metadata);
+      } else if (eventType === "deep_plan_ready") {
+        useDeepPlanStore.getState().setPhase("awaiting_approval", "Awaiting approval");
+      }
+
       useChatStore.getState().addEvent(normalizeSessionEvent(message.payload));
       break;
     }
+
+    case "file-changes-enrichment":
+      useChatStore.getState().enrichToolResultFileChanges(message.payload);
+      break;
 
     case "stream-complete":
       useChatStore.getState().finishStreaming();
@@ -178,18 +199,27 @@ const handleExtensionMessage = (event: MessageEvent) => {
       break;
     }
 
-    case "chat-opened":
+    case "chat-opened": {
+      const payload = message.payload as {
+        chatId: string;
+        ideContextEnabled?: boolean;
+        deepPlanPipeline?: Record<string, unknown> | null;
+        deepPlanPhase?: string | null;
+        deepPlanRequested?: boolean;
+        deepPlanConfirmed?: boolean;
+        messages: Array<{
+          messageId: string;
+          role: string;
+          content: string;
+          createdAt: string;
+          turn_duration_ms?: number;
+          events?: Array<Record<string, unknown>>;
+        }>;
+      };
       useChatStore.getState().replaceMessages(
-        message.payload.chatId,
-        message.payload.messages.map(
-          (message: {
-            messageId: string;
-            role: string;
-            content: string;
-            createdAt: string;
-            turn_duration_ms?: number;
-            events?: Array<Record<string, unknown>>;
-          }) => ({
+        payload.chatId,
+        payload.messages.map(
+          (message) => ({
             id: message.messageId,
             type:
               message.role === "assistant"
@@ -214,9 +244,38 @@ const handleExtensionMessage = (event: MessageEvent) => {
             timestamp: Date.parse(message.createdAt) || Date.now(),
           }),
         ),
-        Boolean(message.payload.ideContextEnabled),
+        Boolean(payload.ideContextEnabled),
       );
+      useDeepPlanStore.getState().hydrateFromPipeline(payload.deepPlanPipeline);
+      if (
+        !useDeepPlanStore.getState().active &&
+        payload.deepPlanPhase === "req" &&
+        (payload.deepPlanRequested || payload.deepPlanConfirmed)
+      ) {
+        useDeepPlanStore
+          .getState()
+          .activate(
+            payload.deepPlanConfirmed ? "vertex_hil" : "user_slash",
+            "requirement_extraction",
+          );
+      }
+      const pipelineId =
+        payload.deepPlanPipeline &&
+        typeof payload.deepPlanPipeline.pipeline_id === "string"
+          ? payload.deepPlanPipeline.pipeline_id
+          : null;
+      const readyMessageId = findDeepPlanReadyMessageId(
+        payload.messages,
+        pipelineId,
+      );
+      if (
+        readyMessageId &&
+        payload.deepPlanPipeline?.status === "awaiting_approval"
+      ) {
+        useChatStore.getState().setDeepPlanReadyForMessageId(readyMessageId);
+      }
       break;
+    }
 
     case "message-id-assigned":
       useChatStore
@@ -250,7 +309,22 @@ const handleExtensionMessage = (event: MessageEvent) => {
       useChatStore
         .getState()
         .setDeepPlanReadyForMessageId(useChatStore.getState().activeMessageId);
+      useDeepPlanStore.getState().setPhase("awaiting_approval", "Awaiting approval");
       break;
+
+    case "deep-plan-mode": {
+      const p = message.payload ?? {};
+      if (p.active) {
+        useDeepPlanStore.getState().applyModeEvent({
+          trigger: p.trigger,
+          phase: p.phase,
+          stage_label: p.stage_label,
+        });
+      } else {
+        useDeepPlanStore.getState().deactivate();
+      }
+      break;
+    }
 
     case "error":
       clearRestoreTimers();

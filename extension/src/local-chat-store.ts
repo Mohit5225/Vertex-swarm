@@ -113,6 +113,19 @@ export class LocalChatStore {
     }
   }
 
+  public async loadSession(chatId: string): Promise<Record<string, unknown> | null> {
+    const sessionPath = path.join(this.chatsDir, chatId, 'session.json');
+    try {
+      const content = await fs.readFile(sessionPath, 'utf8');
+      const parsed = JSON.parse(content);
+      return typeof parsed === 'object' && parsed !== null
+        ? (parsed as Record<string, unknown>)
+        : null;
+    } catch {
+      return null;
+    }
+  }
+
   public async getIdeContextEnabled(chatId: string): Promise<boolean> {
     const metaPath = path.join(this.chatsDir, chatId, 'meta.json');
     try {

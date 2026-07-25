@@ -11,13 +11,18 @@ import {
   getThoughtDurationMs,
   segmentIsAlwaysVisible,
   segmentIsLive,
+  summarizeLiveActivity,
   summarizeTurnRollup,
   turnHasLiveWork,
 } from '../lib/agentTurnTimeline'
 import { type SessionEvent } from '../store/chatStore'
+import CollapsibleWorkRow from './CollapsibleWorkRow'
+import DeepPlanJobList from './DeepPlanJobList'
 import { FileEditRow } from './FileEditRow'
 import TerminalToolCard from './TerminalToolCard'
 import HilQuestionCard from './HilQuestionCard'
+import DeepPlanEntryGate from './DeepPlanEntryGate'
+import SpawnSubagentRow from './SpawnSubagentRow'
 import ToolCallDebugPanel from './ToolCallDebugPanel'
 
 interface Props {
@@ -26,6 +31,9 @@ interface Props {
   messageStartedAt?: number
   turnDurationMs?: number
   isLive: boolean
+  messageId?: string
+  /** When true, never collapse trace segments — used by AgentTracePanel. */
+  alwaysExpandTrace?: boolean
 }
 
 const normalizeAssistantContent = (content: string) => content.replace(/\r\n/g, '\n')
@@ -41,39 +49,14 @@ const renderAssistantText = (content: string) => (
 const THOUGHT_PANEL_CLASS =
   'max-h-[min(42vh,14rem)] overflow-y-auto overscroll-contain rounded-md border border-white/[0.06] bg-black/20 px-3 py-2 text-[13px] leading-6 text-[var(--vs-text-secondary)] [scrollbar-width:thin] [scrollbar-color:rgba(143,163,196,0.45)_transparent]'
 
-const WorkReceipt: React.FC<{
-  label: string
-  isLive?: boolean
-  expanded: boolean
-  onToggle: () => void
-  children?: React.ReactNode
-}> = ({ label, isLive, expanded, onToggle, children }) => (
-  <div className="py-0.5">
-    <button
-      type="button"
-      onClick={onToggle}
-      className="flex w-full items-center gap-2 rounded-md px-1 py-1 text-left transition hover:bg-white/[0.03]"
-    >
-      {isLive ? (
-        <Loader2 className="h-3 w-3 shrink-0 animate-spin text-[var(--vs-accent)]" />
-      ) : null}
-      <span className="text-[12px] font-medium text-[var(--vs-text-tertiary)]">{label}</span>
-      {children ? (
-        <span className="ml-auto inline-flex h-4 w-4 items-center justify-center text-[var(--vs-text-tertiary)]">
-          <ChevronDown className={`h-3.5 w-3.5 transition ${expanded ? 'rotate-180' : ''}`} />
-        </span>
-      ) : null}
-    </button>
-    {children && expanded ? <div className="mt-1 pl-5">{children}</div> : null}
-  </div>
-)
-
 const AgentTurnView: React.FC<Props> = ({
   events,
   content,
   messageStartedAt,
   turnDurationMs: persistedTurnDurationMs,
   isLive,
+  messageId,
+  alwaysExpandTrace = false,
 }) => {
   const timeline = useMemo(() => {
     const built = buildAgentTurnTimeline(
@@ -87,17 +70,21 @@ const AgentTurnView: React.FC<Props> = ({
   }, [content, events, isLive, messageStartedAt, persistedTurnDurationMs])
 
   const [expanded, setExpanded] = useState<Record<string, boolean>>({})
-  const [traceExpanded, setTraceExpanded] = useState(isLive)
+  const [traceExpanded, setTraceExpanded] = useState(isLive || alwaysExpandTrace)
   const wasLiveRef = useRef(isLive)
 
   useEffect(() => {
+    if (alwaysExpandTrace) {
+      setTraceExpanded(true)
+      return
+    }
     if (isLive) {
       setTraceExpanded(true)
     } else if (wasLiveRef.current) {
       setTraceExpanded(false)
     }
     wasLiveRef.current = isLive
-  }, [isLive])
+  }, [isLive, alwaysExpandTrace])
 
   const hasToolWork = timeline.hasToolWork
   const hasVisibleNarrative = useMemo(
@@ -118,9 +105,14 @@ const AgentTurnView: React.FC<Props> = ({
     () => (!isWorking ? summarizeTurnRollup(timeline.segments) : null),
     [isWorking, timeline.segments]
   )
+  const liveActivity = isWorking
+    ? summarizeLiveActivity(timeline.segments)
+    : null
   const turnLabel = isWorking
-    ? 'Working…'
-    : `Worked for ${formatDuration(turnDurationMs)}`
+    ? (liveActivity ?? 'Working…')
+    : alwaysExpandTrace
+      ? `Subagent ran ${formatDuration(turnDurationMs)}`
+      : `Worked for ${formatDuration(turnDurationMs)}`
 
   const toggle = (id: string) => {
     setExpanded((current) => ({ ...current, [id]: !current[id] }))
@@ -175,6 +167,7 @@ const AgentTurnView: React.FC<Props> = ({
 
         if (
           !traceExpanded &&
+          !alwaysExpandTrace &&
           !segmentIsAlwaysVisible(segment) &&
           !segmentIsLive(segment, isLive)
         ) {
@@ -190,7 +183,7 @@ const AgentTurnView: React.FC<Props> = ({
           const label = formatThoughtSummary(durationMs, segment.isLive)
           const isExpanded = expanded[segment.id] ?? false
           return (
-            <WorkReceipt
+            <CollapsibleWorkRow
               key={segment.id}
               label={label}
               isLive={segment.isLive}
@@ -200,7 +193,7 @@ const AgentTurnView: React.FC<Props> = ({
               <div className={`${THOUGHT_PANEL_CLASS} whitespace-pre-wrap`}>
                 {segment.text}
               </div>
-            </WorkReceipt>
+            </CollapsibleWorkRow>
           )
         }
 
@@ -215,7 +208,7 @@ const AgentTurnView: React.FC<Props> = ({
           )
           const isExpanded = expanded[segment.id] ?? false
           return (
-            <WorkReceipt
+            <CollapsibleWorkRow
               key={segment.id}
               label={label}
               isLive={segment.isLive}
@@ -226,7 +219,7 @@ const AgentTurnView: React.FC<Props> = ({
                 {segment.nodes.map((node) => {
                   const nodeExpanded = expanded[`${segment.id}:${node.id}`] ?? false
                   return (
-                    <WorkReceipt
+                    <CollapsibleWorkRow
                       key={node.id}
                       label={node.summary}
                       isLive={node.state === 'running'}
@@ -234,11 +227,11 @@ const AgentTurnView: React.FC<Props> = ({
                       onToggle={() => toggle(`${segment.id}:${node.id}`)}
                     >
                       <ToolCallDebugPanel node={node} />
-                    </WorkReceipt>
+                    </CollapsibleWorkRow>
                   )
                 })}
               </div>
-            </WorkReceipt>
+            </CollapsibleWorkRow>
           )
         }
 
@@ -254,9 +247,14 @@ const AgentTurnView: React.FC<Props> = ({
         }
 
         if (segment.kind === 'hil') {
+          const isPlanningGate = segment.card.context === 'planning_gate'
           return (
             <div key={segment.id} className="relative z-10">
-              <HilQuestionCard card={segment.card} />
+              {isPlanningGate ? (
+                <DeepPlanEntryGate card={segment.card} />
+              ) : (
+                <HilQuestionCard card={segment.card} />
+              )}
             </div>
           )
         }
@@ -284,9 +282,21 @@ const AgentTurnView: React.FC<Props> = ({
         }
 
         if (segment.kind === 'tool') {
+          if (segment.node.toolName === 'spawn_subagent' && messageId) {
+            return (
+              <SpawnSubagentRow
+                key={segment.id}
+                node={segment.node}
+                messageId={messageId}
+                events={events}
+                isTurnLive={isLive}
+              />
+            )
+          }
+
           const isExpanded = expanded[segment.id] ?? false
           return (
-            <WorkReceipt
+            <CollapsibleWorkRow
               key={segment.id}
               label={segment.node.summary}
               isLive={segment.node.state === 'running'}
@@ -294,7 +304,19 @@ const AgentTurnView: React.FC<Props> = ({
               onToggle={() => toggle(segment.id)}
             >
               <ToolCallDebugPanel node={segment.node} />
-            </WorkReceipt>
+            </CollapsibleWorkRow>
+          )
+        }
+
+        if (segment.kind === 'deep_plan_jobs') {
+          return (
+            <DeepPlanJobList
+              key={segment.id}
+              jobs={segment.jobs}
+              pipelineError={segment.pipelineError}
+              isLive={segment.isLive}
+              messageId={messageId}
+            />
           )
         }
 

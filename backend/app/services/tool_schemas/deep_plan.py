@@ -5,12 +5,11 @@ DEEP_PLAN_TOOL_SPEC: dict[str, Any] = {
     "function": {
         "name": "deep_plan_tool",
         "description": (
-            "Starts the multi-stage deep planning pipeline (sub-agents research requirements, "
-            "architecture, frontend, audits, gaps). Only available when the user typed /deep-plan "
-            "or confirmed via hil_tool on an architectural shift. Do NOT use for small patches — "
-            "use plan_tool instead. BLOCKS until the pipeline finishes and the user approves or "
-            "rejects the plan. CRITICAL: All action-specific arguments MUST be nested INSIDE "
-            "`payload`, not top-level."
+            "Hands off to the deep planning pipeline AFTER Vertex has written "
+            "plan_pipeline/01_requirements.md and plan_pipeline/00_pipeline_manifest.json. "
+            "Do NOT call on the first /deep-plan turn — extract requirements first. "
+            "BLOCKS until specialist planners, verification, and user approval complete. "
+            "CRITICAL: All action-specific arguments MUST be nested INSIDE `payload`, not top-level."
         ),
         "parameters": {
             "type": "object",
@@ -19,9 +18,8 @@ DEEP_PLAN_TOOL_SPEC: dict[str, Any] = {
                     "type": "string",
                     "enum": ["start", "revise"],
                     "description": (
-                        "'start' begins a new deep planning pipeline. "
-                        "'revise' re-runs after user rejected a prior pipeline — requires "
-                        "payload.pipeline_id and payload.rejection_feedback."
+                        "'start' begins the pipeline after req artifacts exist. "
+                        "'revise' re-runs after user rejected a prior pipeline."
                     ),
                 },
                 "request_id": {
@@ -39,11 +37,25 @@ DEEP_PLAN_TOOL_SPEC: dict[str, Any] = {
                             "type": "string",
                             "description": "Short human title, e.g. 'Neon to Supabase migration'.",
                         },
+                        "requirements_path": {
+                            "type": "string",
+                            "description": (
+                                "Relative path under chat dir to requirements markdown. "
+                                "Default: plan_pipeline/01_requirements.md"
+                            ),
+                        },
+                        "manifest_path": {
+                            "type": "string",
+                            "description": (
+                                "Relative path under chat dir to pipeline manifest JSON. "
+                                "Default: plan_pipeline/00_pipeline_manifest.json"
+                            ),
+                        },
                         "scope_summary": {
                             "type": "string",
                             "description": (
-                                "Your understanding of what the user wants — 2–6 sentences. "
-                                "Facts the user already stated only."
+                                "Optional fallback summary. Canonical requirements are in "
+                                "requirements_path (01_requirements.md)."
                             ),
                         },
                         "trigger": {

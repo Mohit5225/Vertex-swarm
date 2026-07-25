@@ -1,4 +1,6 @@
 import * as vscode from 'vscode';
+import * as path from 'path';
+import * as os from 'os';
 import { ConfigManager } from './config-manager';
 import { VertexProcessManager } from './process-manager';
 import { FileSystemService } from './tools/file-system-service';
@@ -21,6 +23,7 @@ import type {
   ChatSummaryData,
   ChatMessageData,
   ToolCallPayload,
+  ToolResult,
 } from './types/index';
 
 
@@ -67,6 +70,7 @@ export class VertexSwarmChatRuntime {
   private readonly snapshotManager: DiskSnapshotManager;
   private readonly toolExecutor: ToolExecutor;
   private readonly processedToolCallIds = new Set<string>();
+  private readonly abortedToolCallIds = new Set<string>();
   private readonly inFlightToolCalls = new Map<string, ToolCallPayload>();
 
   private processManager: VertexProcessManager;
@@ -208,6 +212,22 @@ export class VertexSwarmChatRuntime {
         break;
       }
 
+      case 'open-deep-plan-folder': {
+        if (!this.currentChatId) {
+          break;
+        }
+        const planDir = path.join(
+          os.homedir(),
+          '.vertex-swarm',
+          'chats',
+          this.currentChatId,
+          'plan_pipeline',
+        );
+        const indexUri = vscode.Uri.file(path.join(planDir, 'index.md'));
+        void vscode.commands.executeCommand('revealInExplorer', indexUri);
+        break;
+      }
+
       case 'hil-respond': {
         const payload = message.payload as { hil_session_id?: string; answers?: unknown[] };
         if (!payload?.hil_session_id || !Array.isArray(payload.answers)) {
@@ -259,6 +279,27 @@ export class VertexSwarmChatRuntime {
         break;
       }
 
+      case 'exit-deep-plan-mode': {
+        if (!this.currentChatId) {
+          break;
+        }
+        if (!this.processManager.rpcClient) {
+          this.post({
+            type: 'deep-plan-mode',
+            payload: { active: false },
+          });
+          break;
+        }
+        this.processManager.rpcClient.sendNotification('session/abort_deep_plan', {
+          chat_id: this.currentChatId,
+        });
+        this.post({
+          type: 'deep-plan-mode',
+          payload: { active: false },
+        });
+        break;
+      }
+
       case 'load-chat-list': {
         this.log('webview requested chat list');
         await this.sendChatList();
@@ -291,16 +332,21 @@ export class VertexSwarmChatRuntime {
 
           if (!token) {
             this.post({ type: 'auth-required' });
+            this.post({ type: 'stream-complete' });
             return;
           }
 
           const ideContextEnabled = Boolean(payload.ideContextEnabled);
-          const { message: streamMessage, deepPlanRequested } =
-            VertexSwarmChatRuntime.parseDeepPlanCommand(payload.message);
+          const parsed = VertexSwarmChatRuntime.parseDeepPlanCommand(payload.message);
+          const deepPlanRequested =
+            Boolean((payload as { deepPlanRequested?: boolean }).deepPlanRequested) ||
+            parsed.deepPlanRequested;
+          const streamMessage = parsed.message;
           const chatId = this.currentChatId ?? await this.createChat(ideContextEnabled);
 
           if (this.streamCancellationRequested) {
             this.log(`Stream cancelled before creation finished`);
+            this.post({ type: 'stream-complete' });
             return;
           }
 
@@ -322,6 +368,7 @@ export class VertexSwarmChatRuntime {
 
           if (this.streamCancellationRequested) {
             this.log(`Stream cancelled while fetching skeleton`);
+            this.post({ type: 'stream-complete' });
             return;
           }
 
@@ -360,6 +407,18 @@ export class VertexSwarmChatRuntime {
             } : undefined,
             activeTerminals: this.terminalService.getActiveTerminalContexts(),
           });
+
+          if (deepPlanRequested) {
+            this.post({
+              type: 'deep-plan-mode',
+              payload: {
+                active: true,
+                trigger: 'user_slash',
+                phase: 'requirement_extraction',
+                stage_label: 'Requirement extraction',
+              },
+            });
+          }
 
           this.processManager.rpcClient.sendNotification('session/start', {
             chat_id: chatId,
@@ -420,16 +479,18 @@ export class VertexSwarmChatRuntime {
       case 'cancel-stream': {
         this.streamCancellationRequested = true;
         const payload = message.payload as StreamCancelPayload;
-        this.log(`cancel stream requested session_id=${payload.sessionId}`);
-        if (payload.sessionId) {
-          await this.terminalService.cancelJobsForChat(payload.sessionId);
-          this.cancelInFlightTools(payload.sessionId);
+        const chatId = payload.sessionId || this.currentChatId;
+        this.log(`cancel stream requested session_id=${chatId ?? 'unknown'}`);
+        if (chatId) {
+          await this.terminalService.cancelJobsForChat(chatId);
+          this.cancelInFlightTools(chatId);
           if (this.processManager.rpcClient) {
             this.processManager.rpcClient.sendNotification('session/cancel', {
-              chat_id: payload.sessionId
+              chat_id: chatId,
             });
           }
         }
+        this.post({ type: 'stream-complete' });
         break;
       }
 
@@ -754,6 +815,11 @@ export class VertexSwarmChatRuntime {
     const rpcClient = this.processManager.rpcClient;
     if (rpcClient && rpcClient !== this.lastRegisteredRpcClient) {
       this.lastRegisteredRpcClient = rpcClient;
+      rpcClient.on('notification', (method: string, params: any) => {
+        if (method === 'tool/abort' && typeof params?.session_id === 'string') {
+          this.abortInFlightToolsBySession(params.session_id);
+        }
+      });
       rpcClient.on('stream/event', (params: any) => {
         const isCurrentChat = params.chat_id === this.currentChatId;
 
@@ -837,6 +903,15 @@ export class VertexSwarmChatRuntime {
   private async openChat(chatId: string): Promise<void> {
     const messages = await this.chatStore.loadMessages(chatId);
     const ideContextEnabled = await this.chatStore.getIdeContextEnabled(chatId);
+    const session = await this.chatStore.loadSession(chatId);
+    const workingMemory =
+      session && typeof session.working_memory === 'object' && session.working_memory !== null
+        ? (session.working_memory as Record<string, unknown>)
+        : null;
+    const deepPlanPipeline = workingMemory?.deep_plan_pipeline ?? null;
+    const deepPlanPhase = workingMemory?.deep_plan_phase ?? null;
+    const deepPlanRequested = Boolean(workingMemory?.deep_plan_requested);
+    const deepPlanConfirmed = Boolean(workingMemory?.deep_plan_confirmed);
 
     this.currentChatId = chatId;
     this.log(`opened chat chat_id=${chatId} messages=${messages.length}`);
@@ -847,6 +922,10 @@ export class VertexSwarmChatRuntime {
         chatId,
         ideContextEnabled,
         messages,
+        deepPlanPipeline,
+        deepPlanPhase,
+        deepPlanRequested,
+        deepPlanConfirmed,
       },
     });
 
@@ -922,6 +1001,13 @@ export class VertexSwarmChatRuntime {
 
       if (this.streamCancellationRequested) {
         this.log(`skipping tool result for cancelled stream tool_call_id=${payload.tool_call_id}`);
+        this.toolExecutor.cancelChangeCapture(payload.tool_call_id);
+        this.abortedToolCallIds.add(payload.tool_call_id);
+        return;
+      }
+
+      if (this.abortedToolCallIds.has(payload.tool_call_id)) {
+        this.log(`skipping tool result for aborted tool_call_id=${payload.tool_call_id}`);
         return;
       }
 
@@ -934,7 +1020,7 @@ export class VertexSwarmChatRuntime {
           message_id: payload.message_id,
           status: result.status,
           content: result.content,
-          data: result.data || {},
+          data: this.buildRpcToolResultData(result.data),
           execution_time_ms: executionTime,
           action: result.action,
           request_id: result.request_id,
@@ -943,12 +1029,67 @@ export class VertexSwarmChatRuntime {
           conflict: result.conflict
         });
       }
+
+      void this.deferFileChangeEnrichment(payload);
     } catch (error) {
       this.processedToolCallIds.delete(payload.tool_call_id);
+      this.toolExecutor.cancelChangeCapture(payload.tool_call_id);
       const errorMessage = error instanceof Error ? error.message : String(error);
       this.post({ type: 'error', payload: `Tool execution failed: ${errorMessage}` });
     } finally {
       this.inFlightToolCalls.delete(payload.tool_call_id);
+    }
+  }
+
+  private buildRpcToolResultData(data: ToolResult['data']): Record<string, unknown> {
+    if (!data || typeof data !== 'object' || Array.isArray(data)) {
+      return {};
+    }
+
+    const record = data as Record<string, unknown>;
+    const { file_changes: _ignored, ...rest } = record;
+    return rest;
+  }
+
+  private async deferFileChangeEnrichment(payload: ToolCallPayload): Promise<void> {
+    if (this.abortedToolCallIds.has(payload.tool_call_id)) {
+      return;
+    }
+
+    const fileChanges = await this.toolExecutor.finishChangeCapture(
+      payload.tool_call_id,
+      {
+        tool_call_id: payload.tool_call_id,
+        session_id: payload.session_id,
+        chat_id: payload.chat_id,
+        message_id: payload.message_id,
+      },
+    );
+
+    if (!fileChanges?.length) {
+      return;
+    }
+
+    this.post({
+      type: 'file-changes-enrichment',
+      payload: {
+        tool_call_id: payload.tool_call_id,
+        message_id: payload.message_id,
+        file_changes: fileChanges,
+        snapshot_id: payload.message_id,
+        snapshot_session_id: payload.session_id,
+      },
+    });
+  }
+
+  private markToolCallAborted(toolCallId: string): void {
+    this.abortedToolCallIds.add(toolCallId);
+    this.toolExecutor.cancelChangeCapture(toolCallId);
+    if (this.abortedToolCallIds.size > VertexSwarmChatRuntime.MAX_PROCESSED_TOOL_CALL_IDS) {
+      const first = this.abortedToolCallIds.values().next().value;
+      if (typeof first === 'string') {
+        this.abortedToolCallIds.delete(first);
+      }
     }
   }
 
@@ -975,6 +1116,36 @@ export class VertexSwarmChatRuntime {
 
       this.inFlightToolCalls.delete(toolCallId);
       this.processedToolCallIds.delete(toolCallId);
+      this.markToolCallAborted(toolCallId);
+    }
+  }
+
+  private abortInFlightToolsBySession(sessionId: string): void {
+    for (const [toolCallId, payload] of this.inFlightToolCalls.entries()) {
+      if (payload.session_id !== sessionId) {
+        continue;
+      }
+
+      this.log(`aborting in-flight tool for session_id=${sessionId} tool_call_id=${toolCallId}`);
+
+      if (this.processManager.rpcClient) {
+        this.processManager.rpcClient.sendNotification('tool/result', {
+          tool_name: payload.tool_name,
+          tool_call_id: payload.tool_call_id,
+          session_id: payload.session_id,
+          chat_id: payload.chat_id,
+          message_id: payload.message_id,
+          status: 'error',
+          content: 'Tool execution aborted (parent session ended or timed out).',
+          data: {},
+          execution_time_ms: 0,
+          error_code: 'aborted',
+        });
+      }
+
+      this.inFlightToolCalls.delete(toolCallId);
+      this.processedToolCallIds.delete(toolCallId);
+      this.markToolCallAborted(toolCallId);
     }
   }
 

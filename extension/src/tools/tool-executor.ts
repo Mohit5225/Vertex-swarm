@@ -4,11 +4,22 @@ import type { TerminalService } from './terminal-service';
 import * as vscode from 'vscode';
 import type { ISnapshotManager } from '../snapshot/types';
 import { ChangeRecorder } from '../changes/change-recorder';
+import type { FileChange } from '../changes/change-types';
 import { extractMutationPaths } from '../changes/extract-mutation-paths';
 import { isApplyMode, isMutationAction } from '../changes/mutation-actions';
 
 export class ToolExecutor {
   private readonly changeRecorder = new ChangeRecorder();
+  private readonly pendingChangeCapture = new Map<
+    string,
+    {
+      action: string;
+      payload: Record<string, unknown>;
+      fileUris: vscode.Uri[];
+      beforeStates: Map<string, import('../changes/file-content-state').FileContentState>;
+      requestId?: string;
+    }
+  >();
 
   constructor(
     private readonly fileSystemService: FileSystemService,
@@ -121,32 +132,15 @@ export class ToolExecutor {
 
         toolResult = await this.fileSystemService.workspace_ops(resolvedArgs, context);
 
-        // Change ledger — summary UI only; mutations in apply mode.
+        // Defer diff/snapshot ledger — ack RPC immediately after disk apply.
         if (toolResult.status === 'success' && isMutation && isApply && fileUris.length > 0) {
-          try {
-            const snapshotDir = this.snapshotManager.getSnapshotDir({
-              sessionId: context.session_id,
-              messageId: context.message_id,
-            });
-
-            const fileChanges = await this.changeRecorder.buildChanges({
-              action,
-              payload,
-              fileUris,
-              beforeStates,
-              snapshotDir,
-              requestId: this.optionalStringArg(resolvedArgs.request_id),
-            });
-
-            toolResult.data = {
-              ...(typeof toolResult.data === 'object' && toolResult.data !== null ? toolResult.data : {}),
-              file_changes: fileChanges,
-              snapshot_id: context.message_id,
-              snapshot_session_id: context.session_id,
-            };
-          } catch (error) {
-            this.log(`Failed to record file changes: ${error}`);
-          }
+          this.pendingChangeCapture.set(context.tool_call_id, {
+            action,
+            payload,
+            fileUris,
+            beforeStates,
+            requestId: this.optionalStringArg(resolvedArgs.request_id),
+          });
         }
       }
     } catch (error) {
@@ -167,6 +161,41 @@ export class ToolExecutor {
       `tool finish name=${toolResult.tool_name} tool_call_id=${toolResult.tool_call_id} status=${toolResult.status} execution_time_ms=${toolResult.execution_time_ms}`
     );
     return toolResult;
+  }
+
+  async finishChangeCapture(
+    toolCallId: string,
+    context: ToolContext,
+  ): Promise<FileChange[] | null> {
+    const pending = this.pendingChangeCapture.get(toolCallId);
+    if (!pending) {
+      return null;
+    }
+
+    this.pendingChangeCapture.delete(toolCallId);
+
+    try {
+      const snapshotDir = this.snapshotManager.getSnapshotDir({
+        sessionId: context.session_id,
+        messageId: context.message_id,
+      });
+
+      return await this.changeRecorder.buildChanges({
+        action: pending.action,
+        payload: pending.payload,
+        fileUris: pending.fileUris,
+        beforeStates: pending.beforeStates,
+        snapshotDir,
+        requestId: pending.requestId,
+      });
+    } catch (error) {
+      this.log(`Failed to record file changes: ${error}`);
+      return null;
+    }
+  }
+
+  cancelChangeCapture(toolCallId: string): void {
+    this.pendingChangeCapture.delete(toolCallId);
   }
 
   private normalizePayload(args: Record<string, any>) {

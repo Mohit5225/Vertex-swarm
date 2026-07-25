@@ -93,6 +93,7 @@ export const cardFromHilQuestionEvent = (event: SessionEvent): HilCardState | nu
   return {
     hilSessionId,
     agentLabel: typeof metadata.agent_label === 'string' ? metadata.agent_label : 'Agent',
+    context: typeof metadata.context === 'string' ? metadata.context : undefined,
     questions,
     status: 'pending',
   }

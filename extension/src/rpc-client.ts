@@ -126,14 +126,31 @@ export class RpcClient extends EventEmitter implements vscode.Disposable {
   }
 
   private send(payload: any): void {
-    const bodyStr = JSON.stringify(payload);
-    const bodyBuffer = Buffer.from(bodyStr, 'utf8');
-    const headerStr = `Content-Length: ${bodyBuffer.length}\r\n\r\n`;
-    
-    if (this.child.stdin && !this.child.killed) {
-      this.child.stdin.write(headerStr, 'utf8');
-      this.child.stdin.write(bodyBuffer);
+    if (!this.child.stdin || this.child.killed) {
+      return;
     }
+
+    const bodyBuffer = Buffer.from(JSON.stringify(payload), 'utf8');
+    const headerBuffer = Buffer.from(`Content-Length: ${bodyBuffer.length}\r\n\r\n`, 'utf8');
+    const chunks: Buffer[] = [headerBuffer, bodyBuffer];
+
+    const writeNext = (): void => {
+      if (!this.child.stdin || this.child.killed) {
+        return;
+      }
+
+      while (chunks.length > 0) {
+        const chunk = chunks[0];
+        const ok = this.child.stdin.write(chunk);
+        if (!ok) {
+          this.child.stdin.once('drain', writeNext);
+          return;
+        }
+        chunks.shift();
+      }
+    };
+
+    writeNext();
   }
 
   public dispose() {

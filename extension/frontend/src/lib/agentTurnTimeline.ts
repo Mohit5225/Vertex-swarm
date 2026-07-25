@@ -19,6 +19,13 @@ import {
   cardFromHilQuestionEvent,
 } from './hilCardState'
 import { type HilCardState } from './hilTypes'
+import {
+  buildDeepPlanJobsFromEvents,
+  deepPlanJobsSegmentIsLive,
+  DEEP_PLAN_TOOL_NAMES,
+  extractDeepPlanToolFailure,
+  type DeepPlanJobRow,
+} from './deepPlanJobTimeline'
 
 const HIDDEN_STATUS_PHASES = new Set([
   'preparing_context',
@@ -31,6 +38,7 @@ const HIDDEN_STATUS_PHASES = new Set([
   'awaiting_hil',
   'assistant_output',
   'completed',
+  'spawning_subagent',
 ])
 
 const EXPLORE_ACTIONS = new Set([
@@ -95,6 +103,14 @@ export type TurnSegment =
       text: string
       tone: 'info' | 'warning' | 'error'
     }
+  | {
+      kind: 'deep_plan_jobs'
+      id: string
+      pipelineId: string | null
+      jobs: DeepPlanJobRow[]
+      pipelineError?: string | null
+      isLive?: boolean
+    }
 
 export interface AgentTurnTimeline {
   segments: TurnSegment[]
@@ -110,6 +126,7 @@ const TOOL_WORK_SEGMENT_KINDS = new Set<TurnSegment['kind']>([
   'terminal',
   'tool',
   'context',
+  'deep_plan_jobs',
 ])
 
 export const segmentIsToolWork = (segment: TurnSegment) =>
@@ -275,6 +292,46 @@ export const formatExploreSummary = (
   return parts.join(', ')
 }
 
+const injectDeepPlanJobsSegment = (
+  segments: TurnSegment[],
+  events: SessionEvent[],
+  isTurnLive: boolean,
+): TurnSegment[] => {
+  const { pipelineId, jobs } = buildDeepPlanJobsFromEvents(events)
+  const pipelineError = extractDeepPlanToolFailure(events)
+  if (jobs.length === 0 && !pipelineError) {
+    return segments
+  }
+
+  const filtered = segments.filter((segment) => {
+    if (segment.kind !== 'tool') {
+      return true
+    }
+    const toolName = segment.node.toolName
+    return !toolName || !DEEP_PLAN_TOOL_NAMES.has(toolName)
+  })
+
+  const jobSegment: TurnSegment = {
+    kind: 'deep_plan_jobs',
+    id: 'deep-plan-jobs',
+    pipelineId,
+    jobs,
+    pipelineError,
+    isLive: deepPlanJobsSegmentIsLive(jobs, isTurnLive),
+  }
+
+  const firstWorkIdx = filtered.findIndex((segment) => segmentIsToolWork(segment))
+  if (firstWorkIdx === -1) {
+    return [...filtered, jobSegment]
+  }
+
+  return [
+    ...filtered.slice(0, firstWorkIdx),
+    jobSegment,
+    ...filtered.slice(firstWorkIdx),
+  ]
+}
+
 export const formatThoughtSummary = (durationMs: number, isLive = false) => {
   if (isLive) {
     return 'Thinking…'
@@ -285,49 +342,6 @@ export const formatThoughtSummary = (durationMs: number, isLive = false) => {
   }
 
   return `Thought for ${formatDuration(durationMs)}`
-}
-
-/** Status updates streamed via the model reasoning channel should read as narrative. */
-export const isUserFacingProse = (text: string) => {
-  const trimmed = text.trim()
-  if (!trimmed) {
-    return false
-  }
-
-  if (trimmed.length > 2200) {
-    return false
-  }
-
-  const preview = trimmed.slice(0, 160)
-  const userFacingOpeners = [
-    /^let me\b/i,
-    /^i'?ll\b/i,
-    /^i will\b/i,
-    /^now let me\b/i,
-    /^good[,.!\s]/i,
-    /^next[,.\s]/i,
-    /^first[,.\s]/i,
-    /^the issue\b/i,
-    /^the problem\b/i,
-    /^i see\b/i,
-    /^i found\b/i,
-    /^here'?s\b/i,
-    /^this (is|looks|should)\b/i,
-    /^looking at\b/i,
-    /^i need to (read|check|fix|update|edit|create|open|run|start|verify)\b/i,
-    /^we (need|should)\b/i,
-  ]
-
-  if (userFacingOpeners.some((pattern) => pattern.test(preview) || pattern.test(trimmed))) {
-    return true
-  }
-
-  const bulletHeavy = (trimmed.match(/^\s*[-*•\d.]+\s+/gm) || []).length >= 4
-  if (bulletHeavy) {
-    return false
-  }
-
-  return false
 }
 
 const isNarrativeJunkFragment = (text: string) => {
@@ -410,16 +424,6 @@ const reconcileTimelineWithContent = (
     }
 
     if (normalizedNarrativeFromInput.includes(normalizeForComparison(thought))) {
-      continue
-    }
-
-    if (isTurnLive && isUserFacingProse(thought)) {
-      withoutDuplicateThoughts.push({
-        kind: 'narrative',
-        id: segment.id,
-        text: thought,
-        tone: 'default',
-      })
       continue
     }
 
@@ -547,6 +551,7 @@ export const buildAgentTurnTimeline = (
   const segmentNodes = new Map<string, ToolExecutionNode>()
   const hilCardBySession = new Map<string, HilCardState>()
   const skippedHilToolCallIds = new Set<string>()
+  const skippedDeepPlanToolCallIds = new Set<string>()
 
   let exploreBuffer: ToolExecutionNode[] = []
   let activeExploreSegment: Extract<TurnSegment, { kind: 'explore' }> | null = null
@@ -724,6 +729,11 @@ export const buildAgentTurnTimeline = (
   }
 
   for (const event of events) {
+    // Ephemeral worker / subagent traces render in nested UI, not the main timeline.
+    if (event.metadata?.deep_plan_worker || event.metadata?.subagent_trace) {
+      continue
+    }
+
     if (event.type === 'output') {
       const text = normalizeEventText(event.content)
       if (!text.trim()) {
@@ -747,12 +757,6 @@ export const buildAgentTurnTimeline = (
     if (event.type === 'thinking') {
       const text = normalizeEventText(event.content)
       if (!text.trim()) {
-        continue
-      }
-
-      if (isUserFacingProse(text) && isTurnLive) {
-        flushWorkBuffers()
-        appendNarrative(segments, text, 'default', event.id)
         continue
       }
 
@@ -794,6 +798,12 @@ export const buildAgentTurnTimeline = (
         }
         continue
       }
+      if (node.toolName && DEEP_PLAN_TOOL_NAMES.has(node.toolName)) {
+        if (node.toolCallId) {
+          skippedDeepPlanToolCallIds.add(node.toolCallId)
+        }
+        continue
+      }
       if (node.toolCallId) {
         openToolNodes.set(node.toolCallId, node)
       }
@@ -805,6 +815,10 @@ export const buildAgentTurnTimeline = (
       const toolCallId = getEventToolCallId(event)
       if (toolCallId && skippedHilToolCallIds.has(toolCallId)) {
         skippedHilToolCallIds.delete(toolCallId)
+        continue
+      }
+      if (toolCallId && skippedDeepPlanToolCallIds.has(toolCallId)) {
+        skippedDeepPlanToolCallIds.delete(toolCallId)
         continue
       }
 
@@ -939,6 +953,7 @@ export const buildAgentTurnTimeline = (
   }
 
   finalizedSegments = reconcileTimelineWithContent(finalizedSegments, content, isTurnLive)
+  finalizedSegments = injectDeepPlanJobsSegment(finalizedSegments, events, isTurnLive)
 
   const hasToolWork = finalizedSegments.some((segment) => segmentIsToolWork(segment))
   const timing = computeTurnTiming(events, messageStartedAt, persistedDurationMs)
@@ -967,6 +982,10 @@ export const segmentIsLive = (segment: TurnSegment, isTurnLive: boolean) => {
 
   if (segment.kind === 'hil') {
     return segment.card.status === 'pending'
+  }
+
+  if (segment.kind === 'deep_plan_jobs') {
+    return Boolean(segment.isLive)
   }
 
   return false
@@ -1020,6 +1039,17 @@ export const finalizeAgentTurnTimeline = (
       }
     }
 
+    if (segment.kind === 'deep_plan_jobs') {
+      return {
+        ...segment,
+        isLive: false,
+        jobs: segment.jobs.map((job) => ({
+          ...job,
+          workerNodes: (job.workerNodes ?? []).map(sanitizeHistoricalNode),
+        })),
+      }
+    }
+
     return segment
   })
 
@@ -1042,6 +1072,51 @@ export const getNodeDurationMs = (node: ToolExecutionNode) => {
   }
 
   return undefined
+}
+
+/** Human label for the most recent in-progress segment (trace panel / spawn rows). */
+export const summarizeLiveActivity = (segments: TurnSegment[]): string | null => {
+  for (let index = segments.length - 1; index >= 0; index -= 1) {
+    const segment = segments[index]
+
+    if (segment.kind === 'explore') {
+      const runningNode = segment.nodes.find((node) => node.state === 'running')
+      if (runningNode) {
+        return runningNode.summary
+      }
+      if (segment.isLive) {
+        return formatExploreSummary(
+          {
+            filesRead: segment.filesRead,
+            searches: segment.searches,
+            lists: segment.lists,
+          },
+          true,
+        )
+      }
+      continue
+    }
+
+    if (
+      segment.kind === 'tool' ||
+      segment.kind === 'edit' ||
+      segment.kind === 'terminal'
+    ) {
+      if (segment.node.state === 'running') {
+        return segment.node.summary
+      }
+    }
+
+    if (segment.kind === 'thought' && segment.isLive) {
+      return 'Thinking…'
+    }
+
+    if (segment.kind === 'context') {
+      return segment.label
+    }
+  }
+
+  return null
 }
 
 export const summarizeTurnRollup = (segments: TurnSegment[]) => {
@@ -1081,4 +1156,6 @@ export const segmentIsAlwaysVisible = (segment: TurnSegment) =>
   segment.kind === 'hil' ||
   segment.kind === 'edit' ||
   segment.kind === 'terminal' ||
-  segment.kind === 'system'
+  segment.kind === 'system' ||
+  segment.kind === 'deep_plan_jobs' ||
+  segment.kind === 'explore'

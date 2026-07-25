@@ -8,7 +8,8 @@ export interface SessionEvent {
   type: 'thinking' | 'code' | 'output' | 'error' | 'status' | 'tool_call' | 'tool_result'
       | 'plan_permission_request' | 'plan_chunk' | 'plan_ready' | 'todo_init' | 'todo_update' | 'todo_clear'
       | 'hil_question' | 'hil_resolved'
-      | 'deep_plan_started' | 'deep_plan_stage_status' | 'deep_plan_ready' | 'deep_plan_permission_request';
+      | 'deep_plan_started' | 'deep_plan_stage_status' | 'deep_plan_ready' | 'deep_plan_permission_request'
+      | 'deep_plan_artifact_saved' | 'deep_plan_mode_active';
   content: string;
   timestamp: number;
   metadata?: Record<string, unknown>;
@@ -102,12 +103,31 @@ export type ExtensionToWebviewMessage =
   | { type: 'plan-ready'; payload: Record<string, never> }
   | { type: 'deep-plan-ready'; payload: Record<string, never> }
   | {
+      type: 'deep-plan-mode'
+      payload: {
+        active: boolean
+        trigger?: 'user_slash' | 'vertex_hil'
+        phase?: string
+        stage_label?: string
+      }
+    }
+  | {
       type: 'terminal-output'
       payload: {
         jobId: string
         content: string
         totalChars?: number
         status?: string
+      }
+    }
+  | {
+      type: 'file-changes-enrichment'
+      payload: {
+        tool_call_id: string
+        message_id: string
+        file_changes: unknown[]
+        snapshot_id?: string
+        snapshot_session_id?: string
       }
     };
 
@@ -133,8 +153,10 @@ export type WebviewToExtensionMessage =
   | { type: 'get-config' }
   | { type: 'set-config'; payload: { snapshotRetentionDays: number } }
   | { type: 'open-plan' }
+  | { type: 'open-deep-plan-folder' }
   | { type: 'planning-approve'; payload: { pipeline_id: string } }
   | { type: 'planning-reject'; payload: { pipeline_id: string; rejection_feedback?: string } }
+  | { type: 'exit-deep-plan-mode'; payload: Record<string, never> }
   | { type: 'truncate-messages'; payload: { chatId: string; messageId: string; messageText: string } }
   | { type: 'save-config'; payload: { llmBaseUrl?: string, llmModel?: string, llmKey?: string, exaKey?: string } };
 
@@ -146,6 +168,8 @@ export interface StreamStartPayload {
   ideContextEnabled: boolean;
   tempId?: string;
   requestContext?: RequestContextPayload;
+  /** True when composer is in deep plan mode (slash /deep-plan or active mode). */
+  deepPlanRequested?: boolean;
 }
 
 export interface StreamCancelPayload {

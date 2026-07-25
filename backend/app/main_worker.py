@@ -113,26 +113,81 @@ class WorkerNode:
             logger.warning("Rejected privileged worker action: %s", exc.message)
             return False
 
-    async def handle_session_start(self, params: Dict[str, Any]):
-        if not self.orchestrator:
+    @staticmethod
+    def _is_background_wakeup(message: str) -> bool:
+        return str(message or "").strip().startswith("[System Notification:")
+
+    async def _emit_session_error(self, chat_id: str, content: str) -> None:
+        if not self.orchestrator or not self.orchestrator.stdio:
             return
-        if not self.has_valid_entitlement():
+        await self.orchestrator.stdio.write_event(
+            chat_id,
+            {
+                "id": f"evt-worker-{chat_id}",
+                "type": "error",
+                "content": content,
+                "metadata": {"phase": "session_rejected"},
+            },
+        )
+        await self.orchestrator.stdio.write_event(
+            chat_id,
+            {"type": "done"},
+        )
+
+    async def _cancel_active_session(self, chat_id: str) -> None:
+        self.pending_user_turns.pop(chat_id, None)
+        if self.orchestrator:
+            self.orchestrator.clear_job_completions(chat_id)
+
+        task = self.active_sessions.get(chat_id)
+        if task is None:
             return
 
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+        except Exception:
+            logger.exception("Active session %s failed while waiting for cancel", chat_id)
+
+    async def handle_session_start(self, params: Dict[str, Any]):
         chat_id = params.get("chat_id")
         message = params.get("message")
+
+        if not self.orchestrator:
+            if chat_id:
+                await self._emit_session_error(chat_id, "Agent worker is not initialized.")
+            return
+        if not self.has_valid_entitlement():
+            if chat_id:
+                await self._emit_session_error(
+                    chat_id,
+                    "Session expired or invalid. Sign in again and retry.",
+                )
+            return
+
         if not chat_id or not message:
+            if chat_id:
+                await self._emit_session_error(chat_id, "Invalid session start request.")
             return
-            
+
         if chat_id in self.active_sessions:
-            queue = self.pending_user_turns.setdefault(chat_id, [])
-            queue.append(params)
+            if self._is_background_wakeup(message):
+                queue = self.pending_user_turns.setdefault(chat_id, [])
+                queue.append(params)
+                logger.info(
+                    "Session %s is already running; queued background wakeup (depth=%s)",
+                    chat_id,
+                    len(queue),
+                )
+                return
+
             logger.info(
-                "Session %s is already running; queued user turn (depth=%s)",
+                "Session %s is already running; preempting for new user turn",
                 chat_id,
-                len(queue),
             )
-            return
+            await self._cancel_active_session(chat_id)
 
         async def run_session():
             try:
@@ -164,13 +219,8 @@ class WorkerNode:
         if not chat_id:
             return
 
-        self.pending_user_turns.pop(chat_id, None)
-        if self.orchestrator:
-            self.orchestrator.clear_job_completions(chat_id)
-
-        if chat_id in self.active_sessions:
-            self.active_sessions[chat_id].cancel()
-            logger.info(f"Cancelled session {chat_id}.")
+        logger.info("Cancelled session %s.", chat_id)
+        await self._cancel_active_session(chat_id)
 
     async def handle_tool_result(self, params: Dict[str, Any]):
         if not self.orchestrator:
@@ -240,6 +290,26 @@ class WorkerNode:
         )
         if not ok:
             logger.warning("session/planning_reject rejected: %s", message)
+
+    async def handle_abort_deep_plan(self, params: Dict[str, Any]):
+        if not self.orchestrator:
+            return
+        if not self.has_valid_entitlement():
+            return
+
+        chat_id = params.get("chat_id")
+        if not chat_id:
+            logger.warning("session/abort_deep_plan missing chat_id")
+            return
+
+        ok, message, hard_cancel = await self.orchestrator.handle_abort_deep_plan(str(chat_id))
+        if not ok:
+            logger.warning("session/abort_deep_plan rejected: %s", message)
+            return
+
+        if hard_cancel:
+            logger.info("Hard-cancelled session %s for deep plan pipeline abort.", chat_id)
+            await self._cancel_active_session(chat_id)
 
     async def handle_update_keys(self, params: Dict[str, Any]):
         if not self.orchestrator:
@@ -335,6 +405,8 @@ class WorkerNode:
                     await self.handle_planning_approve(params)
                 elif method == "session/planning_reject":
                     await self.handle_planning_reject(params)
+                elif method == "session/abort_deep_plan":
+                    await self.handle_abort_deep_plan(params)
                 elif method == "tool/result":
                     await self.handle_tool_result(params)
                 elif method == "config/update_keys":

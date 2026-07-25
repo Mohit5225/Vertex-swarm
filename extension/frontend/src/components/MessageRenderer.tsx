@@ -141,6 +141,7 @@ const MessageRenderer: React.FC<Props> = ({ message }) => {
                   messageStartedAt={message.timestamp}
                   turnDurationMs={message.turnDurationMs}
                   isLive={isStreamingMessage}
+                  messageId={message.id}
                 />
               ) : null}
 
