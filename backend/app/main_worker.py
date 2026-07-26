@@ -4,6 +4,7 @@ import logging
 import sys
 from pathlib import Path
 from typing import Dict, Any
+from uuid import uuid4
 
 from app.config import WorkerConfig
 from app.nats_client import NATSClient
@@ -19,7 +20,8 @@ class WorkerNode:
         self.config: WorkerConfig | None = None
         self.nats: NATSClient | None = None
         self.orchestrator: LLMOrchestrator | None = None
-        self.active_sessions: Dict[str, asyncio.Task] = {}
+        # chat_id → root run id. Task ownership lives exclusively in AgentRun.
+        self.active_session_runs: Dict[str, str] = {}
         self.pending_user_turns: Dict[str, list[Dict[str, Any]]] = {}
 
     async def handle_initialize(self, msg_id: int, params: Dict[str, Any]):
@@ -134,16 +136,26 @@ class WorkerNode:
             {"type": "done"},
         )
 
-    async def _cancel_active_session(self, chat_id: str) -> None:
+    async def _cancel_active_session(
+        self,
+        chat_id: str,
+        *,
+        reason: str = "user",
+    ) -> None:
         self.pending_user_turns.pop(chat_id, None)
         if self.orchestrator:
             self.orchestrator.clear_job_completions(chat_id)
+            run_id = self.active_session_runs.get(chat_id)
+            if run_id:
+                await self.orchestrator.cancel_agent_run(run_id, reason=reason)
+        else:
+            return
 
-        task = self.active_sessions.get(chat_id)
+        run = self.orchestrator.agent_runs.get(run_id or "")
+        task = run.task if run else None
         if task is None:
             return
 
-        task.cancel()
         try:
             await task
         except asyncio.CancelledError:
@@ -172,7 +184,7 @@ class WorkerNode:
                 await self._emit_session_error(chat_id, "Invalid session start request.")
             return
 
-        if chat_id in self.active_sessions:
+        if chat_id in self.active_session_runs:
             if self._is_background_wakeup(message):
                 queue = self.pending_user_turns.setdefault(chat_id, [])
                 queue.append(params)
@@ -187,7 +199,7 @@ class WorkerNode:
                 "Session %s is already running; preempting for new user turn",
                 chat_id,
             )
-            await self._cancel_active_session(chat_id)
+            await self._cancel_active_session(chat_id, reason="preempted")
 
         async def run_session():
             try:
@@ -197,11 +209,28 @@ class WorkerNode:
             except Exception:
                 logger.exception(f"Session {chat_id} failed.")
             finally:
-                self.active_sessions.pop(chat_id, None)
+                self.active_session_runs.pop(chat_id, None)
+                self.orchestrator.finish_agent_run(
+                    root_run_id,
+                    status=(
+                        "cancelled"
+                        if self.orchestrator.is_run_cancel_requested(root_run_id)
+                        else "completed"
+                    ),
+                )
                 await self._drain_pending_user_turn(chat_id)
 
+        root_run_id = f"run_{uuid4().hex}"
+        params = {**params, "agent_run_id": root_run_id}
         task = asyncio.create_task(run_session())
-        self.active_sessions[chat_id] = task
+        self.active_session_runs[chat_id] = root_run_id
+        root_run = self.orchestrator.create_agent_run(
+            chat_id=str(chat_id),
+            kind="root",
+            run_id=root_run_id,
+            synthetic_session_id=f"sess_{chat_id}",
+        )
+        self.orchestrator.bind_agent_run_task(root_run.run_id, task)
 
     async def _drain_pending_user_turn(self, chat_id: str) -> None:
         queue = self.pending_user_turns.get(chat_id, [])
@@ -219,8 +248,18 @@ class WorkerNode:
         if not chat_id:
             return
 
-        logger.info("Cancelled session %s.", chat_id)
-        await self._cancel_active_session(chat_id)
+        logger.info("Cancelled session %s (user).", chat_id)
+        await self._cancel_active_session(chat_id, reason="user")
+
+    async def handle_cancel_agent_run(self, params: Dict[str, Any]):
+        if not self.orchestrator:
+            return
+        run_id = params.get("run_id")
+        if not isinstance(run_id, str) or not run_id:
+            logger.warning("session/cancel_run missing run_id")
+            return
+        if not await self.orchestrator.cancel_agent_run(run_id, reason="user"):
+            logger.warning("session/cancel_run ignored for unknown or terminal run_id=%s", run_id)
 
     async def handle_tool_result(self, params: Dict[str, Any]):
         if not self.orchestrator:
@@ -239,6 +278,31 @@ class WorkerNode:
             await self.orchestrator.handle_tool_result(result)
         except Exception as e:
             logger.error(f"Failed to parse tool result: {e}")
+
+    async def handle_tool_result_enrichment(self, params: Dict[str, Any]):
+        if not self.orchestrator:
+            return
+        if not self.has_valid_entitlement():
+            return
+
+        tool_call_id = params.get("tool_call_id")
+        file_changes = params.get("file_changes")
+        if not tool_call_id or not isinstance(file_changes, list):
+            return
+
+        snapshot_id = params.get("snapshot_id")
+        snapshot_session_id = params.get("snapshot_session_id")
+        ok = self.orchestrator.handle_tool_result_enrichment(
+            tool_call_id,
+            file_changes,
+            snapshot_id=snapshot_id if isinstance(snapshot_id, str) else None,
+            snapshot_session_id=snapshot_session_id if isinstance(snapshot_session_id, str) else None,
+        )
+        if not ok:
+            logger.debug(
+                "tool/result_enrichment ignored for unknown tool_call_id=%s",
+                tool_call_id,
+            )
 
     async def handle_hil_respond(self, params: Dict[str, Any]):
         """Route HilQuestionCard answers into the blocked hil_tool coroutine."""
@@ -309,7 +373,7 @@ class WorkerNode:
 
         if hard_cancel:
             logger.info("Hard-cancelled session %s for deep plan pipeline abort.", chat_id)
-            await self._cancel_active_session(chat_id)
+            await self._cancel_active_session(chat_id, reason="deep_plan_aborted")
 
     async def handle_update_keys(self, params: Dict[str, Any]):
         if not self.orchestrator:
@@ -350,7 +414,7 @@ class WorkerNode:
         if not chat_id or not job_id:
             return
 
-        if chat_id in self.active_sessions:
+        if chat_id in self.active_session_runs:
             self.orchestrator.enqueue_job_completion(chat_id, params)
             logger.info(
                 "Queued job completion for active session chat_id=%s job_id=%s",
@@ -399,6 +463,8 @@ class WorkerNode:
                     await self.handle_session_start(params)
                 elif method == "session/cancel":
                     await self.handle_session_cancel(params)
+                elif method == "session/cancel_run":
+                    await self.handle_cancel_agent_run(params)
                 elif method == "session/hil_respond":
                     await self.handle_hil_respond(params)
                 elif method == "session/planning_approve":
@@ -409,6 +475,8 @@ class WorkerNode:
                     await self.handle_abort_deep_plan(params)
                 elif method == "tool/result":
                     await self.handle_tool_result(params)
+                elif method == "tool/result_enrichment":
+                    await self.handle_tool_result_enrichment(params)
                 elif method == "config/update_keys":
                     await self.handle_update_keys(params)
                 elif method == "background/event":
@@ -419,8 +487,8 @@ class WorkerNode:
                 logger.exception("Error processing message")
 
         # Cleanup
-        for task in self.active_sessions.values():
-            task.cancel()
+        for run_id in list(self.active_session_runs.values()):
+            await self.orchestrator.cancel_agent_run(run_id, reason="worker_shutdown")
         if self.nats:
             await self.nats.close()
 

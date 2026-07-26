@@ -1,5 +1,5 @@
 import React, { useMemo } from 'react'
-import { ExternalLink, Loader2 } from 'lucide-react'
+import { ExternalLink, Loader2, Square } from 'lucide-react'
 import { type ToolExecutionNode } from '../lib/agentRunBlocks'
 import {
   collectSubagentTraceEvents,
@@ -9,6 +9,7 @@ import {
 } from '../lib/subagentTrace'
 import { type SessionEvent } from '../store/chatStore'
 import { useAgentPanelStore } from '../store/agentPanelStore'
+import { getVsCodeApi } from '../lib/vscode'
 
 interface Props {
   node: ToolExecutionNode
@@ -44,6 +45,18 @@ const SpawnSubagentRow: React.FC<Props> = ({
     }
     return summarizeSubagentTraceActivity(events, spawnToolCallId)
   }, [events, isLive, spawnToolCallId])
+  const agentRunId = useMemo(() => {
+    if (!spawnToolCallId) {
+      return undefined
+    }
+    for (const event of collectSubagentTraceEvents(events, spawnToolCallId)) {
+      const runId = event.metadata?.agent_run_id
+      if (typeof runId === 'string' && runId) {
+        return runId
+      }
+    }
+    return undefined
+  }, [events, spawnToolCallId])
 
   const isPanelActive =
     panelOpen &&
@@ -87,6 +100,16 @@ const SpawnSubagentRow: React.FC<Props> = ({
             <ExternalLink className="h-3 w-3" />
             {isPanelActive ? 'Agent trace open' : 'Open agent trace'}
           </button>
+          {isLive && agentRunId ? (
+            <button
+              type="button"
+              onClick={() => getVsCodeApi()?.postMessage({ type: 'cancel-agent-run', payload: { runId: agentRunId } })}
+              className="inline-flex items-center gap-1 rounded-md border border-red-400/30 px-2 py-0.5 text-[11px] text-red-200 transition hover:bg-red-500/15"
+            >
+              <Square className="h-2.5 w-2.5 fill-current" />
+              Stop
+            </button>
+          ) : null}
         </div>
         <p className="text-[11px] leading-4 text-[var(--vs-text-tertiary)]">
           {isLive

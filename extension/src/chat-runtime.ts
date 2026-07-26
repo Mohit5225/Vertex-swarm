@@ -25,6 +25,7 @@ import type {
   ToolCallPayload,
   ToolResult,
 } from './types/index';
+import { debugLog } from './debug-log';
 
 
 export interface VertexSwarmChatRuntimeOptions {
@@ -79,6 +80,14 @@ export class VertexSwarmChatRuntime {
   private staticContext: { os: string; workspaceFolders: string[] } | null = null;
   private lastRegisteredRpcClient: any = null;
   private sessionMaintenanceInterval?: NodeJS.Timeout;
+  private streamStallTimer?: NodeJS.Timeout;
+  private streamStallChatId: string | null = null;
+  private lastStreamEventAt = 0;
+  private lastStallUiPostAt = 0;
+  /** Batch nested worker/subagent token streams so the webview is not flooded. */
+  private nestedTraceBuffer: SessionEvent | null = null;
+  private nestedTraceFlushTimer?: NodeJS.Timeout;
+  private static readonly NESTED_TRACE_FLUSH_MS = 120;
 
   constructor(options: VertexSwarmChatRuntimeOptions) {
     this.entitlementClient = options.entitlementClient;
@@ -116,7 +125,22 @@ export class VertexSwarmChatRuntime {
       this.snapshotManager,
       (message: string) => this.log(message)
     );
+    this.toolExecutor.setAbortChecker(
+      (toolCallId) =>
+        this.streamCancellationRequested || this.abortedToolCallIds.has(toolCallId)
+    );
     this.processManager = options.processManager;
+    this.processManager.onBackendDied((reason) => {
+      this.log(`Backend died under us: ${reason}`);
+      this.lastRegisteredRpcClient = null;
+      this.streamCancellationRequested = true;
+      this.clearStreamStallWatch();
+      this.post({
+        type: 'error',
+        payload: `Backend disconnected (${reason}). Send your message again to reconnect.`,
+      });
+      this.post({ type: 'stream-complete' });
+    });
 
     // Actively maintain session in the background (runs every 45 seconds)
     this.sessionMaintenanceInterval = setInterval(() => {
@@ -136,10 +160,12 @@ export class VertexSwarmChatRuntime {
       }
       // Refresh if it expires within the buffer
       if (check.exp * 1000 < Date.now() + VertexSwarmChatRuntime.TOKEN_REFRESH_BUFFER_MS) {
-        this.log('Background session maintenance: token expiring soon, refreshing...');
         const refreshed = await this.entitlementClient.refreshToken();
-        if (refreshed && this.processManager.rpcClient) {
-          this.processManager.rpcClient.sendNotification('config/update_keys', { entitlement_token: refreshed });
+        if (refreshed) {
+          this.log('Background session maintenance: token refreshed');
+          if (this.processManager.rpcClient) {
+            this.processManager.rpcClient.sendNotification('config/update_keys', { entitlement_token: refreshed });
+          }
         }
       }
     } catch (e) {
@@ -148,7 +174,107 @@ export class VertexSwarmChatRuntime {
   }
 
   private log(message: string) {
-    this.outputChannel.appendLine(`[${new Date().toISOString()}] [ChatRuntime] ${message}`);
+    debugLog('ChatRuntime', message);
+  }
+
+  private clearStreamStallWatch(): void {
+    if (this.streamStallTimer) {
+      clearInterval(this.streamStallTimer);
+      this.streamStallTimer = undefined;
+    }
+    this.streamStallChatId = null;
+    this.lastStreamEventAt = 0;
+    this.lastStallUiPostAt = 0;
+  }
+
+  private startStreamStallWatch(chatId: string): void {
+    this.clearStreamStallWatch();
+    this.streamStallChatId = chatId;
+    this.lastStreamEventAt = Date.now();
+    this.streamStallTimer = setInterval(() => {
+      if (!this.streamStallChatId) {
+        return;
+      }
+      const silentMs = Date.now() - this.lastStreamEventAt;
+      if (silentMs < 45_000) {
+        return;
+      }
+      const workerAlive = Boolean(this.processManager.rpcClient);
+      const seconds = Math.round(silentMs / 1000);
+      this.log(
+        `STALL: no stream events for ${seconds}s chat_id=${this.streamStallChatId} worker_rpc=${workerAlive ? 'up' : 'down'}`,
+      );
+      if (Date.now() - this.lastStallUiPostAt >= 60_000) {
+        this.lastStallUiPostAt = Date.now();
+        this.post({
+          type: 'event',
+          payload: {
+            type: 'status',
+            content: workerAlive
+              ? `Backend silent for ${seconds}s (worker still up — likely LLM hang). Open Vertex Swarm Logs.`
+              : `Backend silent for ${seconds}s (worker RPC down). Open Vertex Swarm Logs.`,
+            metadata: { phase: 'stall_watchdog' },
+          },
+        });
+      }
+    }, 15_000);
+  }
+
+  private markStreamActivity(chatId: string): void {
+    if (this.streamStallChatId === chatId) {
+      this.lastStreamEventAt = Date.now();
+    }
+  }
+
+  private flushNestedTraceBuffer(): void {
+    if (this.nestedTraceFlushTimer) {
+      clearTimeout(this.nestedTraceFlushTimer);
+      this.nestedTraceFlushTimer = undefined;
+    }
+    const buffered = this.nestedTraceBuffer;
+    this.nestedTraceBuffer = null;
+    if (buffered) {
+      this.post({ type: 'event', payload: buffered });
+    }
+  }
+
+  /** Post stream events to the webview, coalescing nested thinking/output floods. */
+  private postStreamEvent(event: SessionEvent): void {
+    const meta = event.metadata ?? {};
+    const isNested =
+      Boolean(meta.deep_plan_worker) || Boolean(meta.subagent_trace);
+    const canCoalesce =
+      isNested && (event.type === 'thinking' || event.type === 'output');
+
+    if (!canCoalesce) {
+      this.flushNestedTraceBuffer();
+      this.post({ type: 'event', payload: event });
+      return;
+    }
+
+    const buffered = this.nestedTraceBuffer;
+    if (buffered) {
+      const prevMeta = buffered.metadata ?? {};
+      const sameStream =
+        buffered.type === event.type &&
+        prevMeta.deep_plan_stage_id === meta.deep_plan_stage_id &&
+        prevMeta.subagent_spawn_tool_call_id === meta.subagent_spawn_tool_call_id;
+      if (sameStream) {
+        this.nestedTraceBuffer = {
+          ...buffered,
+          content: `${buffered.content || ''}${event.content || ''}`,
+          timestamp: event.timestamp || Date.now(),
+          metadata: { ...prevMeta, ...meta },
+        };
+        return;
+      }
+      this.flushNestedTraceBuffer();
+    }
+
+    this.nestedTraceBuffer = event;
+    this.nestedTraceFlushTimer = setTimeout(() => {
+      this.flushNestedTraceBuffer();
+    }, VertexSwarmChatRuntime.NESTED_TRACE_FLUSH_MS);
   }
 
   private post(message: object) {
@@ -351,7 +477,7 @@ export class VertexSwarmChatRuntime {
           }
 
           this.log(
-            `starting chat stream chat_id=${chatId ?? 'unknown'} ide_context_enabled=${ideContextEnabled}`
+            `starting chat stream chat_id=${chatId ?? 'unknown'} ide_context_enabled=${ideContextEnabled} deep_plan=${deepPlanRequested}`
           );
 
           if (!chatId) {
@@ -377,6 +503,8 @@ export class VertexSwarmChatRuntime {
             const success = await this.syncWebviewConfig();
             if (!success || !this.processManager.rpcClient) {
               // syncWebviewConfig already posts the appropriate auth-required or error UI
+              this.log('stream start aborted: backend unavailable after respawn attempt');
+              this.post({ type: 'stream-complete' });
               return;
             }
           }
@@ -428,6 +556,8 @@ export class VertexSwarmChatRuntime {
             request_context: requestContext,
             deep_plan_requested: deepPlanRequested,
           });
+          this.log(`session/start sent chat_id=${chatId} message_len=${streamMessage.length}`);
+          this.startStreamStallWatch(chatId);
 
           // Forward the real DB message_id so the webview can patch the temp local id
           // For local architecture, we might just assume tempId is sufficient for now
@@ -443,7 +573,7 @@ export class VertexSwarmChatRuntime {
           }
         } catch (error) {
           const errorMessage = error instanceof Error ? error.message : 'Unknown error';
-          console.error('Failed to start stream:', errorMessage);
+          this.log(`Failed to start stream: ${errorMessage}`);
           this.post({ type: 'error', payload: errorMessage });
         }
         break;
@@ -456,7 +586,7 @@ export class VertexSwarmChatRuntime {
           await this.openChat(payload.chatId);
         } catch (error) {
           const errorMessage = error instanceof Error ? error.message : 'Unknown error';
-          console.error('Failed to open chat:', errorMessage);
+          this.log(`Failed to open chat: ${errorMessage}`);
           this.post({ type: 'error', payload: errorMessage });
         }
         break;
@@ -470,7 +600,7 @@ export class VertexSwarmChatRuntime {
           await this.sendChatList();
         } catch (error) {
           const errorMessage = error instanceof Error ? error.message : 'Unknown error';
-          console.error('Failed to update IDE context state:', errorMessage);
+          this.log(`Failed to update IDE context state: ${errorMessage}`);
           this.post({ type: 'error', payload: errorMessage });
         }
         break;
@@ -485,12 +615,34 @@ export class VertexSwarmChatRuntime {
           await this.terminalService.cancelJobsForChat(chatId);
           this.cancelInFlightTools(chatId);
           if (this.processManager.rpcClient) {
+            if (payload.abortDeepPlan) {
+              this.log(`aborting deep plan pipeline chat_id=${chatId}`);
+              this.processManager.rpcClient.sendNotification('session/abort_deep_plan', {
+                chat_id: chatId,
+              });
+            }
             this.processManager.rpcClient.sendNotification('session/cancel', {
               chat_id: chatId,
             });
           }
         }
+        this.post({
+          type: 'deep-plan-mode',
+          payload: { active: false },
+        });
+        this.clearStreamStallWatch();
         this.post({ type: 'stream-complete' });
+        break;
+      }
+
+      case 'cancel-agent-run': {
+        const runId = message.payload.runId;
+        if (runId && this.processManager.rpcClient) {
+          this.log(`targeted agent cancellation requested run_id=${runId}`);
+          this.processManager.rpcClient.sendNotification('session/cancel_run', {
+            run_id: runId,
+          });
+        }
         break;
       }
 
@@ -718,7 +870,7 @@ export class VertexSwarmChatRuntime {
       }
 
       default: {
-        console.warn('VertexSwarm: unknown message type from webview');
+        this.log('unknown message type from webview');
       }
     }
   }
@@ -823,7 +975,21 @@ export class VertexSwarmChatRuntime {
       rpcClient.on('stream/event', (params: any) => {
         const isCurrentChat = params.chat_id === this.currentChatId;
 
+        if (isCurrentChat && this.streamCancellationRequested) {
+          this.log(
+            `dropped late stream event after cancellation chat_id=${params.chat_id ?? 'unknown'} type=${params.event?.type ?? 'unknown'}`
+          );
+          return;
+        }
+
+        if (!isCurrentChat) {
+          this.log(
+            `dropped stream event for chat_id=${params.chat_id ?? 'unknown'} (active=${this.currentChatId ?? 'none'}) type=${params.event?.type ?? 'unknown'}`
+          );
+        }
+
         if (isCurrentChat) {
+          this.markStreamActivity(params.chat_id);
           this.log(this.describeEvent(params.event));
           if (params.event.type === 'plan_chunk') {
             this.planDocumentProvider?.appendPlanChunk(params.chat_id, params.event.content);
@@ -839,10 +1005,15 @@ export class VertexSwarmChatRuntime {
             return;
           }
           if (params.event.type === 'done') {
+            this.flushNestedTraceBuffer();
+            this.clearStreamStallWatch();
             this.post({ type: 'stream-complete' });
             return;
           }
-          this.post({ type: 'event', payload: params.event });
+          if (params.event.type === 'error') {
+            this.log(`stream error: ${this.preview(params.event.content)}`);
+          }
+          this.postStreamEvent(params.event);
         }
 
         // Always execute tools, even for subagents running in the background
@@ -895,7 +1066,7 @@ export class VertexSwarmChatRuntime {
       });
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : 'Unknown error';
-      console.error('Failed to load chat list:', errorMessage);
+      this.log(`Failed to load chat list: ${errorMessage}`);
       this.post({ type: 'error', payload: errorMessage });
     }
   }
@@ -999,19 +1170,36 @@ export class VertexSwarmChatRuntime {
       const result = await this.toolExecutor.handle(payload);
       const executionTime = Date.now() - startTime;
 
-      if (this.streamCancellationRequested) {
-        this.log(`skipping tool result for cancelled stream tool_call_id=${payload.tool_call_id}`);
-        this.toolExecutor.cancelChangeCapture(payload.tool_call_id);
-        this.abortedToolCallIds.add(payload.tool_call_id);
-        return;
-      }
+      const wasCancelled =
+        this.streamCancellationRequested || this.abortedToolCallIds.has(payload.tool_call_id);
 
-      if (this.abortedToolCallIds.has(payload.tool_call_id)) {
-        this.log(`skipping tool result for aborted tool_call_id=${payload.tool_call_id}`);
+      if (wasCancelled) {
+        this.log(
+          `tool finished after cancel/abort tool_call_id=${payload.tool_call_id}; sending cancelled result`
+        );
+        this.toolExecutor.cancelChangeCapture(payload.tool_call_id);
+        this.markToolCallAborted(payload.tool_call_id);
+        if (this.processManager.rpcClient) {
+          this.processManager.rpcClient.sendNotification('tool/result', {
+            tool_name: payload.tool_name,
+            tool_call_id: payload.tool_call_id,
+            session_id: payload.session_id,
+            chat_id: payload.chat_id,
+            message_id: payload.message_id,
+            status: 'error',
+            content: 'Tool execution cancelled.',
+            data: {},
+            execution_time_ms: executionTime,
+            error_code: 'cancelled',
+          });
+        }
         return;
       }
 
       if (this.processManager.rpcClient) {
+        this.log(
+          `tool finish name=${payload.tool_name} tool_call_id=${payload.tool_call_id} status=${result.status} execution_time_ms=${executionTime}`
+        );
         this.processManager.rpcClient.sendNotification('tool/result', {
           tool_name: payload.tool_name,
           tool_call_id: payload.tool_call_id,
@@ -1028,6 +1216,10 @@ export class VertexSwarmChatRuntime {
           error_code: result.error_code,
           conflict: result.conflict
         });
+      } else {
+        this.log(
+          `tool result dropped — no rpc client tool_call_id=${payload.tool_call_id}`
+        );
       }
 
       void this.deferFileChangeEnrichment(payload);
@@ -1068,6 +1260,18 @@ export class VertexSwarmChatRuntime {
 
     if (!fileChanges?.length) {
       return;
+    }
+
+    if (this.processManager.rpcClient) {
+      this.processManager.rpcClient.sendNotification('tool/result_enrichment', {
+        tool_call_id: payload.tool_call_id,
+        chat_id: payload.chat_id,
+        session_id: payload.session_id,
+        message_id: payload.message_id,
+        file_changes: fileChanges,
+        snapshot_id: payload.message_id,
+        snapshot_session_id: payload.session_id,
+      });
     }
 
     this.post({
@@ -1173,6 +1377,14 @@ export class VertexSwarmChatRuntime {
         return `event tool_result tool_name=${this.metadataString(metadata, 'tool_name') || this.metadataString(metadata, 'toolName') || 'unknown'} status=${String(metadata.status ?? 'unknown')}`;
       case 'status':
         return `event status ${this.preview(event.content)}`;
+      case 'deep_plan_started':
+        return `event deep_plan_started pipeline_id=${this.metadataString(metadata, 'pipeline_id') || 'unknown'}`;
+      case 'deep_plan_stage_status':
+        return `event deep_plan_stage_status stage=${this.metadataString(metadata, 'stage_id') || 'unknown'} status=${this.metadataString(metadata, 'status') || 'unknown'} ${this.preview(event.content)}`;
+      case 'deep_plan_mode_active':
+        return `event deep_plan_mode_active phase=${this.metadataString(metadata, 'phase') || 'unknown'}`;
+      case 'deep_plan_artifact_saved':
+        return `event deep_plan_artifact_saved path=${this.metadataString(metadata, 'path') || 'unknown'}`;
       case 'error':
         return `event error ${this.preview(event.content)}`;
       case 'output':

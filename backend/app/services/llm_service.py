@@ -217,12 +217,19 @@ def _build_system_prompt(
     return "\n\n".join(parts)
 
 
+# Connect/read timeouts so a hung provider cannot freeze the agent loop forever.
+_LLM_REQUEST_TIMEOUT_SECONDS = 180.0
+# If no stream chunk arrives for this long, abort the round.
+_LLM_STREAM_IDLE_TIMEOUT_SECONDS = 120.0
+
+
 def _get_client(base_url: str, api_key: str) -> AsyncOpenAI:
     normalized_base_url = _normalize_base_url(base_url)
     return AsyncOpenAI(
         base_url=normalized_base_url,
         api_key=api_key,
-        max_retries=3,
+        max_retries=2,
+        timeout=_LLM_REQUEST_TIMEOUT_SECONDS,
     )
 
 
@@ -618,8 +625,28 @@ async def stream_chat_events(
     total_text_chars = 0
     stream_started_at = time.monotonic()
 
+    async def _next_chunk_with_idle_timeout():
+        return await asyncio.wait_for(
+            stream.__anext__(),
+            timeout=_LLM_STREAM_IDLE_TIMEOUT_SECONDS,
+        )
+
     try:
-        async for chunk in stream:
+        while True:
+            try:
+                chunk = await _next_chunk_with_idle_timeout()
+            except StopAsyncIteration:
+                break
+            except asyncio.TimeoutError as idle_exc:
+                logger.error(
+                    "LLM stream idle timeout after %ss with no chunks (received %d chunks so far)",
+                    _LLM_STREAM_IDLE_TIMEOUT_SECONDS,
+                    chunk_count,
+                )
+                raise TimeoutError(
+                    f"LLM stream stalled: no data for {_LLM_STREAM_IDLE_TIMEOUT_SECONDS:.0f}s"
+                ) from idle_exc
+
             chunk_count += 1
             if not chunk.choices:
                 logger.debug("Skipping streamed chunk without choices: %s", chunk)
@@ -665,6 +692,9 @@ async def stream_chat_events(
                     total_text_chars += len(fragment)
                     text_fragment_count += 1
                     yield {"type": "token", "content": fragment}
+    except asyncio.CancelledError:
+        logger.info("LLM stream cancelled after %d chunks", chunk_count)
+        raise
     except Exception as stream_exc:
         logger.error(
             "LLM stream iteration failed after %d chunks: %s",
@@ -673,6 +703,15 @@ async def stream_chat_events(
             exc_info=True,
         )
         raise
+    finally:
+        close = getattr(stream, "close", None)
+        if callable(close):
+            try:
+                result = close()
+                if asyncio.iscoroutine(result):
+                    await result
+            except Exception:
+                pass
 
     logger.info(
         "LLM stream summary chunks=%d text_fragments=%d thinking_fragments=%d tool_call_fragments=%d total_text_chars=%d elapsed_seconds=%.3f saw_structured_tool_call=%s",

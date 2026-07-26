@@ -20,6 +20,8 @@ export interface ToolContext {
   session_id: string;
   chat_id: string;
   message_id: string;
+  /** When true, in-flight workspace_ops must stop and discard partial work. */
+  should_abort?: () => boolean;
 }
 
 export interface RequestContextSelection {
@@ -141,6 +143,7 @@ export type WebviewToExtensionMessage =
   | { type: 'open-chat'; payload: OpenChatPayload }
   | { type: 'set-ide-context'; payload: SetIdeContextPayload }
   | { type: 'cancel-stream'; payload: StreamCancelPayload }
+  | { type: 'cancel-agent-run'; payload: { runId: string } }
   | { type: 'tool_call'; payload: ToolCallPayload }
   | { type: 'show-terminal'; payload: { terminalName: string } }
   | { type: 'get-terminal-output'; payload: { jobId: string } }
@@ -174,6 +177,7 @@ export interface StreamStartPayload {
 
 export interface StreamCancelPayload {
   sessionId: string;
+  abortDeepPlan?: boolean;
 }
 
 export interface ChatSummaryData {

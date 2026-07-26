@@ -44,6 +44,8 @@ class DeepPlanOrchestrator:
         session_id: str,
         emit_trace_and_push: Any,
         build_event: Any,
+        workspace_roots: list[str] | None = None,
+        parent_run_id: str | None = None,
     ) -> None:
         self._parent = parent
         self._chat_id = chat_id
@@ -51,6 +53,9 @@ class DeepPlanOrchestrator:
         self._session_id = session_id
         self._emit = emit_trace_and_push
         self._build_event = build_event
+        self._workspace_roots = workspace_roots or []
+        self._parent_run_id = parent_run_id
+        self._pipeline_run_id: str | None = None
 
     @property
     def chat_dir(self):
@@ -113,9 +118,29 @@ class DeepPlanOrchestrator:
             )
         )
 
-    async def emit_worker_trace(self, stage_id: str, event: dict[str, Any]) -> None:
+    async def emit_worker_trace(
+        self,
+        stage_id: str,
+        event: dict[str, Any],
+        *,
+        spawn_tool_call_id: str | None = None,
+    ) -> None:
         """Route ephemeral worker tool traces to the handoff message."""
+        event_type = event.get("type")
         metadata = dict(event.get("metadata") or {})
+        if event_type not in ("hil_question", "hil_resolved"):
+            if event_type == "status" and metadata.get("phase") in {
+                "calling_model",
+                "resuming_after_tool",
+                "preparing_context",
+            }:
+                metadata["phase"] = "subagent_progress"
+                if not event.get("content"):
+                    event = {**event, "content": "Generating…"}
+            metadata["subagent_trace"] = True
+            if spawn_tool_call_id:
+                metadata["subagent_spawn_tool_call_id"] = spawn_tool_call_id
+            metadata["subagent_task_type"] = f"deep_plan:{stage_id}"
         metadata["deep_plan_stage_id"] = stage_id
         metadata["deep_plan_worker"] = True
         tagged = {
@@ -154,6 +179,7 @@ class DeepPlanOrchestrator:
             self.chat_dir,
             requirements_path=requirements_path,
             manifest_path=manifest_path,
+            workspace_roots=self._workspace_roots,
         )
         if errors or manifest is None:
             return (
@@ -210,12 +236,9 @@ class DeepPlanOrchestrator:
                 requirements_path=requirements_path,
             )
         except asyncio.CancelledError:
-            if self._parent.is_pipeline_abort_requested(self._chat_id):
-                await clear_deep_plan_pipeline(self._parent, self._chat_id)
-            self._parent.clear_pipeline_abort(self._chat_id)
+            await clear_deep_plan_pipeline(self._parent, self._chat_id)
             raise
         if not planner_ok:
-            self._parent.clear_pipeline_abort(self._chat_id)
             session_state = await read_session_state(self._parent, self._chat_id)
             pipeline_record = read_pipeline_record(session_state.get("working_memory", {}))
             failed_stage = None
@@ -223,7 +246,6 @@ class DeepPlanOrchestrator:
             if isinstance(pipeline_record, dict):
                 if str(pipeline_record.get("status")) == STATUS_ABORTED:
                     await clear_deep_plan_pipeline(self._parent, self._chat_id)
-                    self._parent.clear_pipeline_abort(self._chat_id)
                     return (
                         "error",
                         "Deep plan aborted by user.",
@@ -248,8 +270,6 @@ class DeepPlanOrchestrator:
                     "reason": failure_reason,
                 },
             )
-
-        self._parent.clear_pipeline_abort(self._chat_id)
 
         index_rel = await harness.run_assembly(
             pipeline_id=pipeline_id,

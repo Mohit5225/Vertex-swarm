@@ -64,6 +64,7 @@ const InputArea: React.FC<Props> = ({
   const deepPlanPipelineId = useDeepPlanStore((s) => s.pipelineId)
   const activateDeepPlan = useDeepPlanStore((s) => s.activate)
   const deactivateDeepPlan = useDeepPlanStore((s) => s.deactivate)
+  const releaseComposerLock = useDeepPlanStore((s) => s.releaseComposerLock)
   const messages = useChatStore((s) => s.messages)
   const isStreaming = useChatStore((s) => s.isStreaming)
 
@@ -214,12 +215,14 @@ const InputArea: React.FC<Props> = ({
 
     setError(null)
     finishStreaming()
+    releaseComposerLock()
 
     try {
       getVsCodeApi()?.postMessage({
         type: 'cancel-stream',
         payload: {
           sessionId: currentChatId || '',
+          abortDeepPlan: deepPlanPhase === 'pipeline_running',
         },
       })
     } catch (error) {
@@ -400,7 +403,7 @@ const InputArea: React.FC<Props> = ({
                 ? 'Describe the change…'
                 : 'Describe the task, files, constraints, and desired outcome.'
             }
-            disabled={disabled || deepPlanPhase === 'pipeline_running'}
+            disabled={disabled}
             className="min-h-[72px] min-w-[120px] flex-1 resize-none bg-transparent text-[15px] leading-7 text-[var(--vs-text-primary)] placeholder:text-[var(--vs-text-tertiary)] focus:outline-none disabled:cursor-not-allowed disabled:opacity-60 max-[360px]:min-h-[60px]"
             rows={1}
           />

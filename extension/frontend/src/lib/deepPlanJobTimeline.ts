@@ -5,7 +5,7 @@ import {
   createToolNodeFromResult,
   type ToolExecutionNode,
 } from './agentRunBlocks'
-import { getEventToolCallId, getEventStatus } from './sessionEvents'
+import { getEventToolCallId, getEventStatus, normalizeEventText } from './sessionEvents'
 
 export type DeepPlanJobStatus = 'running' | 'completed' | 'skipped' | 'failed'
 
@@ -17,6 +17,8 @@ export interface DeepPlanJobRow {
   artifactPath?: string
   updatedAt?: number
   workerNodes?: ToolExecutionNode[]
+  workerPreview?: string
+  workerTraceCount?: number
 }
 
 /** Mirrors backend `STAGE_LABELS` in harness.py — fallback when event omits label. */
@@ -53,6 +55,12 @@ export const labelForDeepPlanStage = (
   }
   return DEFAULT_DEEP_PLAN_STAGE_LABELS[stageId] ?? formatStageId(stageId)
 }
+
+const countWorkerTraceEvents = (events: SessionEvent[], stageId: string): number =>
+  events.filter((event) => {
+    const meta = event.metadata ?? {}
+    return Boolean(meta.deep_plan_worker) && meta.deep_plan_stage_id === stageId
+  }).length
 
 export const buildWorkerToolNodesForStage = (
   events: SessionEvent[],
@@ -94,6 +102,23 @@ export const buildWorkerToolNodesForStage = (
   return nodes
 }
 
+const appendWorkerPreview = (
+  jobMap: Map<string, DeepPlanJobRow>,
+  stageId: string,
+  chunk: string,
+) => {
+  const previous = jobMap.get(stageId)
+  if (!previous) {
+    return
+  }
+
+  const combined = `${previous.workerPreview ?? ''}${chunk}`
+  jobMap.set(stageId, {
+    ...previous,
+    workerPreview: combined.slice(-4000),
+  })
+}
+
 export const buildDeepPlanJobsFromEvents = (
   events: SessionEvent[],
 ): { pipelineId: string | null; jobs: DeepPlanJobRow[] } => {
@@ -132,8 +157,21 @@ export const buildDeepPlanJobsFromEvents = (
         status: statusRaw,
         reason,
         artifactPath: previous?.artifactPath,
+        workerPreview: previous?.workerPreview,
         updatedAt: event.timestamp,
       })
+      continue
+    }
+
+    if (
+      (event.type === 'output' || event.type === 'thinking') &&
+      meta.deep_plan_worker &&
+      typeof meta.deep_plan_stage_id === 'string'
+    ) {
+      const text = normalizeEventText(event.content)
+      if (text.trim()) {
+        appendWorkerPreview(jobMap, meta.deep_plan_stage_id, text)
+      }
       continue
     }
 
@@ -174,6 +212,7 @@ export const buildDeepPlanJobsFromEvents = (
     .map((job) => ({
       ...job,
       workerNodes: buildWorkerToolNodesForStage(events, job.stageId),
+      workerTraceCount: countWorkerTraceEvents(events, job.stageId),
     }))
 
   return { pipelineId, jobs }
@@ -187,6 +226,9 @@ const isDeepPlanJobStatus = (value: string): value is DeepPlanJobStatus =>
 
 export const formatDeepPlanJobRowLabel = (job: DeepPlanJobRow, isLive = false): string => {
   if (job.status === 'running' && isLive) {
+    if (job.label.includes('generating') || job.label.includes('—')) {
+      return job.label
+    }
     return `${job.label}…`
   }
   if (job.status === 'skipped') {
@@ -210,6 +252,9 @@ export const formatDeepPlanJobsSummary = (
   const running = jobs.find((job) => job.status === 'running')
 
   if (isLive && running) {
+    if (running.label.includes('generating') || running.label.includes('—')) {
+      return running.label
+    }
     return `${running.label}…`
   }
 
@@ -249,6 +294,7 @@ export const findDeepPlanHandoffEvents = (
   messages: Array<{ type: string; events?: SessionEvent[] }>,
   pipelineId?: string | null,
 ): SessionEvent[] | null => {
+  let fallback: SessionEvent[] | null = null
   for (let index = messages.length - 1; index >= 0; index -= 1) {
     const message = messages[index]
     if (message.type !== 'agent') {
@@ -258,18 +304,19 @@ export const findDeepPlanHandoffEvents = (
     if (!events.some(isDeepPlanHandoffEvent)) {
       continue
     }
-    if (pipelineId) {
-      const matchesPipeline = events.some((event) => {
-        const pid = event.metadata?.pipeline_id
-        return typeof pid === 'string' && pid === pipelineId
-      })
-      if (!matchesPipeline) {
-        continue
-      }
+    if (!pipelineId) {
+      return events
     }
-    return events
+    fallback = fallback ?? events
+    const matchesPipeline = events.some((event) => {
+      const pid = event.metadata?.pipeline_id
+      return typeof pid === 'string' && pid === pipelineId
+    })
+    if (matchesPipeline) {
+      return events
+    }
   }
-  return null
+  return fallback
 }
 
 /** Error text when `deep_plan_tool` returns before any stage row exists. */

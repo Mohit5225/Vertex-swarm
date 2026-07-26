@@ -26,6 +26,7 @@ const OFF_STATE: DeepPlanUiState = {
 interface DeepPlanStore extends DeepPlanUiState {
   activate: (trigger: DeepPlanTrigger, phase?: Exclude<DeepPlanPhase, 'off'>) => void
   deactivate: () => void
+  releaseComposerLock: () => void
   setPhase: (phase: Exclude<DeepPlanPhase, 'off'>, stageLabel?: string) => void
   setPipelineId: (pipelineId: string | null) => void
   applyModeEvent: (metadata: Record<string, unknown>) => void
@@ -99,6 +100,14 @@ export const useDeepPlanStore = create<DeepPlanStore>((set, get) => ({
     set({ ...OFF_STATE })
   },
 
+  /** Unlock composer after user stop / stream end while pipeline flag is stale. */
+  releaseComposerLock: () => {
+    const { phase } = get()
+    if (phase === 'pipeline_running' || phase === 'requirement_extraction') {
+      set({ ...OFF_STATE })
+    }
+  },
+
   setPhase: (phase, stageLabel) => {
     set((state) => ({
       active: true,
@@ -158,6 +167,7 @@ export const useDeepPlanStore = create<DeepPlanStore>((set, get) => ({
     }
 
     if (status === 'failed' && stageId) {
+      const reason = typeof metadata.reason === 'string' ? metadata.reason : ''
       if (stageId === 'requirement_extraction') {
         set({
           active: true,
@@ -166,8 +176,16 @@ export const useDeepPlanStore = create<DeepPlanStore>((set, get) => ({
         })
         return
       }
-      // Pipeline hard-stop — unlock composer (reject/failure is chat-driven, not blocked).
-      set({ ...OFF_STATE })
+      const failedLabel = reason
+        ? `${label || stageId} failed: ${reason}`
+        : label
+          ? `${label} failed`
+          : `${stageId} failed`
+      set({
+        active: true,
+        phase: 'pipeline_running',
+        stageLabel: failedLabel,
+      })
       return
     }
 

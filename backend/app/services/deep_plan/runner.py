@@ -2,15 +2,18 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 import re
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, TYPE_CHECKING
 from uuid import uuid4
 
 from .artifacts import read_text_file, resolve_artifact_path
+from .harness import STAGE_LABELS
 from .stage_registry import StageDefinition, get_stage, load_stage_prompt
 
 if TYPE_CHECKING:
@@ -22,6 +25,35 @@ _MIN_SYSTEM_PLAN_CHARS = 400
 _INTEGRATION_HEADING_RE = re.compile(
     r"(?im)^##\s+integration\s*/\s*cross-surface\s*$"
 )
+# Top-level markdown title only (not ## subsections).
+_TOP_LEVEL_MD_HEADING_RE = re.compile(r"(?m)^# (?!#)")
+_INTERNAL_NOTE_PREFIX = "[Internal system note"
+
+
+async def _stage_heartbeat_loop(
+    orchestrator: "DeepPlanOrchestrator",
+    *,
+    pipeline_id: str,
+    stage_id: str,
+    label: str,
+    started_at: float,
+    progress_counter: list[int],
+) -> None:
+    """Push running ticks so the job row updates during long LLM generations."""
+    try:
+        while True:
+            await asyncio.sleep(5)
+            elapsed = int(time.monotonic() - started_at)
+            chars = progress_counter[0] if progress_counter else 0
+            chars_text = f"{chars / 1000:.1f}k" if chars >= 1000 else str(chars)
+            await orchestrator.emit_stage(
+                pipeline_id,
+                stage_id,
+                "running",
+                label=f"{label} — generating ({elapsed}s, {chars_text} chars)",
+            )
+    except asyncio.CancelledError:
+        raise
 
 
 @dataclass
@@ -48,24 +80,36 @@ def extract_integration_section(requirements_md: str) -> str:
 def extract_markdown_artifact(text: str) -> str:
     """Strip optional fenced code block wrapper from model output."""
     body = (text or "").strip()
-    if not body.startswith("```"):
+    if body.startswith("```"):
+        lines = body.splitlines()
+        if lines and lines[0].startswith("```"):
+            lines = lines[1:]
+        if lines and lines[-1].strip() == "```":
+            lines = lines[:-1]
+        body = "\n".join(lines).strip()
+    if body.startswith("#") and not body.startswith("##"):
         return body
-    lines = body.splitlines()
-    if lines and lines[0].startswith("```"):
-        lines = lines[1:]
-    if lines and lines[-1].strip() == "```":
-        lines = lines[:-1]
-    return "\n".join(lines).strip()
+    heading = _TOP_LEVEL_MD_HEADING_RE.search(body)
+    if heading:
+        return body[heading.start() :].strip()
+    return body
+
+
+def resolve_ephemeral_agent_response(last_final_answer: str, full_response: str) -> str:
+    """Pick the artifact body for ephemeral workers (stages, subagents)."""
+    candidate = (last_final_answer or "").strip()
+    if candidate and not candidate.startswith(_INTERNAL_NOTE_PREFIX):
+        return candidate
+    extracted = extract_markdown_artifact(full_response)
+    if extracted.startswith("#") and not extracted.startswith("##"):
+        return extracted
+    return candidate
 
 
 def validate_system_plan_content(content: str) -> tuple[bool, str | None]:
     text = content.strip()
     if len(text) < _MIN_SYSTEM_PLAN_CHARS:
         return False, f"system plan too short ({len(text)} chars; min {_MIN_SYSTEM_PLAN_CHARS})"
-    if not text.startswith("#"):
-        return False, "system plan must start with a top-level markdown heading (# )"
-    if "## " not in text:
-        return False, "system plan must include at least one ## section"
     return True, None
 
 
@@ -79,8 +123,6 @@ def validate_stage_content(stage_id: str, content: str) -> tuple[bool, str | Non
     text = content.strip()
     if len(text) < _MIN_GENERIC_PLAN_CHARS:
         return False, f"{stage_id} output too short ({len(text)} chars; min {_MIN_GENERIC_PLAN_CHARS})"
-    if not text.startswith("#"):
-        return False, f"{stage_id} output must start with a top-level markdown heading (# )"
     return True, None
 
 
@@ -154,6 +196,7 @@ async def run_stage(
     manifest: dict[str, Any],
     requirements_path: str,
     prior_artifacts: dict[str, str] | None = None,
+    spawn_tool_call_id: str | None = None,
 ) -> StageRunResult:
     stage = get_stage(stage_id)
     if stage is None:
@@ -208,9 +251,28 @@ async def run_stage(
     }
 
     async def worker_trace_emit(event: dict[str, Any]) -> None:
-        await orchestrator.emit_worker_trace(stage_id, event)
+        await orchestrator.emit_worker_trace(
+            stage_id,
+            event,
+            spawn_tool_call_id=spawn_tool_call_id,
+        )
 
     context["external_trace_emit"] = worker_trace_emit
+    # Cumulative across all LLM rounds in this stage (monotonic for heartbeat).
+    progress_counter: list[int] = [0]
+    context["stage_progress_counter"] = progress_counter
+    stage_label = STAGE_LABELS.get(stage_id, stage_id.replace("_", " ").title())
+    heartbeat_started_at = time.monotonic()
+    heartbeat = asyncio.create_task(
+        _stage_heartbeat_loop(
+            orchestrator,
+            pipeline_id=pipeline_id,
+            stage_id=stage_id,
+            label=stage_label,
+            started_at=heartbeat_started_at,
+            progress_counter=progress_counter,
+        )
+    )
 
     system_preamble = (
         f"{prompt_prose}\n\n---\n\n"
@@ -227,14 +289,34 @@ async def run_stage(
         stage_chat_id,
     )
 
+    nested_session_id = str(context["synthetic_session_id"])
+    stage_run = parent.create_agent_run(
+        chat_id=stage_chat_id,
+        kind="deep_plan_stage",
+        parent_run_id=orchestrator._parent_run_id,
+        synthetic_session_id=nested_session_id,
+    )
+    context["agent_run_id"] = stage_run.run_id
     try:
-        raw_response = await _run_agent_loop_impl(
-            parent,
-            stage_chat_id,
-            user_message,
-            context,
+        stage_task = asyncio.create_task(
+            _run_agent_loop_impl(
+                parent,
+                stage_chat_id,
+                user_message,
+                context,
+            )
         )
+        parent.bind_agent_run_task(stage_run.run_id, stage_task)
+        raw_response = await stage_task
     except asyncio.CancelledError:
+        if parent.is_run_cancel_requested(stage_run.run_id):
+            parent.finish_agent_run(stage_run.run_id, status="cancelled")
+            return StageRunResult(
+                ok=False,
+                stage_id=stage_id,
+                output_rel=stage.output_rel,
+                error="stage cancelled by user",
+            )
         raise
     except Exception as exc:
         logger.exception(
@@ -248,6 +330,11 @@ async def run_stage(
             output_rel=stage.output_rel,
             error=str(exc),
         )
+    finally:
+        parent.finish_agent_run(stage_run.run_id)
+        heartbeat.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await heartbeat
 
     content = extract_markdown_artifact(raw_response)
 

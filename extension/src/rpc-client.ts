@@ -1,12 +1,14 @@
 import * as vscode from 'vscode';
 import * as cp from 'child_process';
 import { EventEmitter } from 'events';
+import { debugLog } from './debug-log';
 
 export class RpcClient extends EventEmitter implements vscode.Disposable {
   private child: cp.ChildProcess;
   private buffer: Buffer = Buffer.alloc(0);
   private nextMessageId = 1;
   private pendingRequests: Map<number, { resolve: (val: any) => void; reject: (err: any) => void }> = new Map();
+  private writeChain: Promise<void> = Promise.resolve();
 
   constructor(child: cp.ChildProcess) {
     super();
@@ -73,7 +75,7 @@ export class RpcClient extends EventEmitter implements vscode.Disposable {
         const message = JSON.parse(bodyRaw);
         this.handleMessage(message);
       } catch (err) {
-        console.error('Failed to parse JSON-RPC message:', err);
+        debugLog('RpcClient', `Failed to parse JSON-RPC message: ${err}`);
       }
     }
   }
@@ -117,6 +119,11 @@ export class RpcClient extends EventEmitter implements vscode.Disposable {
   }
 
   public sendNotification(method: string, params: any = {}): void {
+    if (!this.child.stdin || this.child.killed) {
+      debugLog('RpcClient', `Dropped notification ${method}: worker stdin is unavailable`);
+      return;
+    }
+
     const payload = {
       jsonrpc: '2.0',
       method,
@@ -132,25 +139,36 @@ export class RpcClient extends EventEmitter implements vscode.Disposable {
 
     const bodyBuffer = Buffer.from(JSON.stringify(payload), 'utf8');
     const headerBuffer = Buffer.from(`Content-Length: ${bodyBuffer.length}\r\n\r\n`, 'utf8');
-    const chunks: Buffer[] = [headerBuffer, bodyBuffer];
+    const message = Buffer.concat([headerBuffer, bodyBuffer]);
 
-    const writeNext = (): void => {
+    // Serialize writes so concurrent tool/result + cancel/config notifications
+    // cannot interleave Content-Length frames (that caused MemoryError in the worker).
+    this.writeChain = this.writeChain.then(
+      () => this.writeAll(message),
+      () => this.writeAll(message),
+    );
+  }
+
+  private writeAll(buffer: Buffer): Promise<void> {
+    return new Promise((resolve) => {
       if (!this.child.stdin || this.child.killed) {
+        resolve();
         return;
       }
 
-      while (chunks.length > 0) {
-        const chunk = chunks[0];
-        const ok = this.child.stdin.write(chunk);
-        if (!ok) {
-          this.child.stdin.once('drain', writeNext);
-          return;
+      const ok = this.child.stdin.write(buffer, (err) => {
+        if (err) {
+          debugLog('RpcClient', `stdin write error: ${err.message}`);
         }
-        chunks.shift();
-      }
-    };
+        resolve();
+      });
 
-    writeNext();
+      if (!ok && this.child.stdin) {
+        this.child.stdin.once('drain', () => {
+          // drain means the previous write buffer flushed; callback above still resolves
+        });
+      }
+    });
   }
 
   public dispose() {

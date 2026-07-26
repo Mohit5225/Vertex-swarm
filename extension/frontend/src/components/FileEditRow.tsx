@@ -89,7 +89,9 @@ interface Props {
 /** Single file-edit receipt row — used by AgentTurnView edit segments. */
 export const FileEditRow: React.FC<Props> = ({ node, expanded, onToggle }) => {
   const Icon = actionIcon(node.action)
-  const rawChanges = extractFileChangesFromData((node.resultDebug as { data?: unknown })?.data)
+  const rawChanges = extractFileChangesFromData(
+    (node.resultDebug as { data?: Record<string, unknown> })?.data
+  )
   const diffs = rawChanges.map(normalizeFileChange)
   const additions = diffs.reduce((sum, diff) => sum + diff.additions, 0)
   const deletions = diffs.reduce((sum, diff) => sum + diff.deletions, 0)

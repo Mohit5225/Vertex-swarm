@@ -19,4 +19,4 @@ You audit **library and SDK usage** against official documentation and current b
 
 ### Rules
 
-- No source edits. No subagents. Final answer = full audit markdown (`#` heading).
+- No source edits. No subagents. Final answer = full audit markdown.

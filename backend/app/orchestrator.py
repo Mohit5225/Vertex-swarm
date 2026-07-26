@@ -1,5 +1,7 @@
 import json
 import logging
+import time
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Optional
 from uuid import uuid4
@@ -33,7 +35,11 @@ from app.services.deep_plan import (
     set_deep_plan_confirmed,
 )
 from app.services.deep_plan.gates import DEEP_PLAN_CONFIRMED_KEY
-from app.services.deep_plan.artifacts import normalize_rel_path, validate_handoff
+from app.services.deep_plan.artifacts import (
+    normalize_rel_path,
+    validate_handoff,
+    workspace_roots_from_context,
+)
 from app.services.deep_plan.constants import MANIFEST_REL, REQUIREMENTS_REL
 from app.services.websearch import search_web
 from app.utils.token_profiler import TokenProfiler
@@ -42,6 +48,39 @@ logger = logging.getLogger(__name__)
 
 # How long hil_tool waits for session/hil_respond before failing the tool call.
 _HIL_RESPONSE_TIMEOUT_SECONDS = 86_400
+
+# Batch nested worker tokens before pushing to the UI trace (avoids RPC per token).
+_TRACE_OUTPUT_FLUSH_CHARS = 512
+_TRACE_OUTPUT_FLUSH_SECONDS = 0.25
+
+
+@dataclass
+class AgentRun:
+    """The single cancellation authority for one executable agent unit."""
+
+    run_id: str
+    chat_id: str
+    kind: str
+    parent_run_id: str | None = None
+    synthetic_session_id: str | None = None
+    task: asyncio.Task | None = None
+    status: str = "running"
+    cancel_reason: str | None = None
+    finished_at: float | None = None
+
+
+def _api_error_details(exc: APIError) -> dict[str, Any]:
+    """Normalize OpenAI APIError fields for logging (runtime + type-checker safe)."""
+    request = getattr(exc, "request", None)
+    headers = getattr(request, "headers", None) if request is not None else None
+    body = getattr(exc, "body", None)
+    return {
+        "message": getattr(exc, "message", None) or str(exc),
+        "type": getattr(exc, "type", None),
+        "code": getattr(exc, "code", None),
+        "body": json.dumps(body) if body else None,
+        "request_headers": headers,
+    }
 
 
 class _PendingHilSession:
@@ -74,23 +113,111 @@ class LLMOrchestrator:
         self.stdio = StdioTransport()
         self.active_tool_queues: dict[str, asyncio.Queue] = {}
         self.job_completion_queues: dict[str, list[dict[str, Any]]] = {}
+        # tool_call_id → live tool_result event dict (for deferred file_changes enrichment)
+        self.tool_result_event_refs: dict[str, dict[str, Any]] = {}
         # hil_session_id → blocked ask; only one pending HIL per chat at a time (v1).
         self.pending_hil_sessions: dict[str, _PendingHilSession] = {}
         # pipeline_id → approval queue for deep_plan_tool
         self.pending_deep_plan_approvals: dict[str, asyncio.Queue] = {}
         # chat_id → active deep plan pipeline context for run_planning_stage
         self.active_pipeline_by_chat: dict[str, dict[str, Any]] = {}
-        # chat_id set when user aborts during pipeline_running (cooperative cancel)
-        self.pipeline_abort_by_chat: set[str] = set()
+        self.pipeline_run_by_chat: dict[str, str] = {}
+        # Canonical execution ownership and cancellation authority.
+        self.agent_runs: dict[str, AgentRun] = {}
 
-    def request_pipeline_abort(self, chat_id: str) -> None:
-        self.pipeline_abort_by_chat.add(str(chat_id))
+    def create_agent_run(
+        self,
+        *,
+        chat_id: str,
+        kind: str,
+        parent_run_id: str | None = None,
+        synthetic_session_id: str | None = None,
+        run_id: str | None = None,
+    ) -> AgentRun:
+        self._prune_finished_runs()
+        run = AgentRun(
+            run_id=run_id or f"run_{uuid4().hex}",
+            chat_id=str(chat_id),
+            kind=kind,
+            parent_run_id=parent_run_id,
+            synthetic_session_id=synthetic_session_id,
+        )
+        self.agent_runs[run.run_id] = run
+        return run
 
-    def is_pipeline_abort_requested(self, chat_id: str) -> bool:
-        return str(chat_id) in self.pipeline_abort_by_chat
+    def bind_agent_run_task(self, run_id: str, task: asyncio.Task) -> None:
+        run = self.agent_runs.get(run_id)
+        if run is not None:
+            run.task = task
 
-    def clear_pipeline_abort(self, chat_id: str) -> None:
-        self.pipeline_abort_by_chat.discard(str(chat_id))
+    def finish_agent_run(self, run_id: str, *, status: str = "completed") -> None:
+        run = self.agent_runs.get(run_id)
+        if run is not None and run.status in {"running", "cancel_requested"}:
+            run.status = status
+            run.finished_at = time.monotonic()
+
+    def _prune_finished_runs(self, retention_seconds: float = 3600) -> None:
+        """Bound in-memory run history without orphaning a live descendant."""
+        cutoff = time.monotonic() - retention_seconds
+        removable = {
+            run_id
+            for run_id, run in self.agent_runs.items()
+            if run.finished_at is not None and run.finished_at < cutoff
+        }
+        for run_id in removable:
+            if any(
+                candidate.parent_run_id == run_id and candidate.run_id not in removable
+                for candidate in self.agent_runs.values()
+            ):
+                continue
+            self.agent_runs.pop(run_id, None)
+
+    def is_run_cancel_requested(self, run_id: str | None) -> bool:
+        run = self.agent_runs.get(run_id or "")
+        return bool(run and run.status == "cancel_requested")
+
+    def run_cancel_reason(self, run_id: str | None) -> str | None:
+        run = self.agent_runs.get(run_id or "")
+        return run.cancel_reason if run else None
+
+    async def cancel_agent_run(self, run_id: str, *, reason: str = "user") -> bool:
+        """Cancel exactly one run and its descendants, without cancelling siblings."""
+        run = self.agent_runs.get(run_id)
+        if run is None or run.status not in {"running", "cancel_requested"}:
+            return False
+
+        targets = [
+            candidate
+            for candidate in self.agent_runs.values()
+            if candidate.run_id == run_id or self._is_descendant_run(candidate, run_id)
+        ]
+        for target in targets:
+            target.status = "cancel_requested"
+            target.cancel_reason = reason
+            await self.abort_nested_sessions_for_run(target.run_id)
+        for target in targets:
+            if target.task is not None and not target.task.done():
+                target.task.cancel()
+        return True
+
+    def _is_descendant_run(self, run: AgentRun, ancestor_run_id: str) -> bool:
+        parent_id = run.parent_run_id
+        while parent_id:
+            if parent_id == ancestor_run_id:
+                return True
+            parent = self.agent_runs.get(parent_id)
+            parent_id = parent.parent_run_id if parent else None
+        return False
+
+    async def abort_nested_sessions_for_run(self, run_id: str) -> None:
+        """Abort extension tools owned by this precise run only."""
+        run = self.agent_runs.get(run_id)
+        if run is None:
+            return
+        # Keep the existing extension tool abort contract while ownership is
+        # migrated from chat/session maps to runs.
+        if run.synthetic_session_id:
+            await self._notify_extension_abort_session_tools(run.synthetic_session_id)
 
     async def wait_for_deep_plan_approval(
         self,
@@ -195,9 +322,65 @@ class LLMOrchestrator:
     async def handle_tool_result(self, result: ToolResultSchema) -> None:
         tool_call_id = result.tool_call_id
         if tool_call_id in self.active_tool_queues:
+            logger.info(
+                "tool/result routed tool_call_id=%s status=%s",
+                tool_call_id,
+                result.status,
+            )
             await self.active_tool_queues[tool_call_id].put(result)
         else:
-            logger.warning(f"Received tool result for unknown tool_call_id: {tool_call_id}")
+            logger.warning(
+                "Received tool result for unknown tool_call_id: %s (active=%s)",
+                tool_call_id,
+                list(self.active_tool_queues.keys())[:20],
+            )
+
+    def register_tool_result_event(self, tool_call_id: str, event: dict[str, Any]) -> None:
+        self.tool_result_event_refs[tool_call_id] = event
+
+    def handle_tool_result_enrichment(
+        self,
+        tool_call_id: str,
+        file_changes: list[Any],
+        *,
+        snapshot_id: str | None = None,
+        snapshot_session_id: str | None = None,
+    ) -> bool:
+        """Patch a previously emitted tool_result so file_changes persist on reload."""
+        event = self.tool_result_event_refs.get(tool_call_id)
+        if event is None:
+            return False
+
+        data = event.get("data")
+        if not isinstance(data, dict):
+            data = {}
+            event["data"] = data
+        data["file_changes"] = file_changes
+        if snapshot_id:
+            data["snapshot_id"] = snapshot_id
+        if snapshot_session_id:
+            data["snapshot_session_id"] = snapshot_session_id
+
+        metadata = event.get("metadata")
+        if isinstance(metadata, dict):
+            meta_data = metadata.get("data")
+            if not isinstance(meta_data, dict):
+                meta_data = {}
+                metadata["data"] = meta_data
+            meta_data["file_changes"] = file_changes
+            if snapshot_id:
+                meta_data["snapshot_id"] = snapshot_id
+            if snapshot_session_id:
+                meta_data["snapshot_session_id"] = snapshot_session_id
+
+        return True
+
+    def clear_tool_result_event_refs(self, tool_call_ids: list[str] | None = None) -> None:
+        if tool_call_ids is None:
+            self.tool_result_event_refs.clear()
+            return
+        for tool_call_id in tool_call_ids:
+            self.tool_result_event_refs.pop(tool_call_id, None)
 
     async def handle_hil_respond(
         self,
@@ -858,6 +1041,7 @@ async def _execute_tool_call(
             pipeline_id=str(tool_args.get("pipeline_id") or ""),
             manifest=pipeline_ctx["manifest"],
             requirements_path=pipeline_ctx["requirements_path"],
+            spawn_tool_call_id=tool_call_id,
         )
         is_error = result_status == "error"
         success_event = _build_event(
@@ -948,11 +1132,26 @@ async def _execute_tool_call(
                 return (tool_call_id, tool_name, err, "error", "handoff_invalid", None)
 
             chat_dir = orchestrator.file_store.chats_path / str(chat_id)
-            _, _, handoff_errors = await validate_handoff(
-                chat_dir,
-                requirements_path=requirements_path,
-                manifest_path=manifest_path,
-            )
+            workspace_roots = workspace_roots_from_context(context)
+            try:
+                _, _, handoff_errors = await validate_handoff(
+                    chat_dir,
+                    requirements_path=requirements_path,
+                    manifest_path=manifest_path,
+                    workspace_roots=workspace_roots,
+                )
+            except ValueError as exc:
+                err = str(exc)
+                error_event = _build_event(
+                    "tool_result",
+                    metadata={"phase": "tool_result", "status": "error", "error_code": "handoff_invalid"},
+                    status="error",
+                    content=err,
+                    error_code="handoff_invalid",
+                    tool_call_id=tool_call_id,
+                )
+                await emit_trace_and_push(error_event)
+                return (tool_call_id, tool_name, err, "error", "handoff_invalid", None)
             if handoff_errors:
                 err = (
                     "Requirement handoff invalid. Complete req extraction first "
@@ -986,11 +1185,24 @@ async def _execute_tool_call(
             session_id=synthetic_session_id,
             emit_trace_and_push=emit_trace_and_push,
             build_event=_build_event,
+            workspace_roots=workspace_roots_from_context(context),
+            parent_run_id=str(context.get("agent_run_id")) if context.get("agent_run_id") else None,
         )
+        pipeline_run = orchestrator.create_agent_run(
+            chat_id=str(chat_id),
+            kind="deep_plan_pipeline",
+            parent_run_id=str(context.get("agent_run_id")) if context.get("agent_run_id") else None,
+            synthetic_session_id=synthetic_session_id,
+        )
+        runner._pipeline_run_id = pipeline_run.run_id
+        orchestrator.pipeline_run_by_chat[str(chat_id)] = pipeline_run.run_id
         try:
-            status, content, data = await runner.run(action=str(action), payload=payload)
+            pipeline_task = asyncio.create_task(runner.run(action=str(action), payload=payload))
+            orchestrator.bind_agent_run_task(pipeline_run.run_id, pipeline_task)
+            status, content, data = await pipeline_task
+            orchestrator.finish_agent_run(pipeline_run.run_id)
         except asyncio.CancelledError:
-            if orchestrator.is_pipeline_abort_requested(str(chat_id)):
+            if orchestrator.is_run_cancel_requested(pipeline_run.run_id):
                 content = "Deep plan aborted by user."
                 data = {"error_code": "pipeline_aborted"}
                 status = "error"
@@ -1008,7 +1220,11 @@ async def _execute_tool_call(
                 data=data,
             )
             await emit_trace_and_push(result_event)
-            raise
+            orchestrator.finish_agent_run(pipeline_run.run_id, status="cancelled")
+            return (tool_call_id, tool_name, content, result_status, error_code, data)
+        finally:
+            if orchestrator.pipeline_run_by_chat.get(str(chat_id)) == pipeline_run.run_id:
+                orchestrator.pipeline_run_by_chat.pop(str(chat_id), None)
         result_status = "success" if status == "success" else "error"
         error_code = None if status == "success" else (data or {}).get("error_code", "pipeline_error")
         result_event = _build_event(
@@ -1102,8 +1318,26 @@ async def _execute_tool_call(
 
     # ── web_search ────────────────────────────────────────────────────────
     if tool_name == "web_search":
-        query = tool_args.get("query")
-        num_results = tool_args.get("num_results", 5)
+        raw_query = tool_args.get("query")
+        query = raw_query.strip() if isinstance(raw_query, str) else ""
+        if not query:
+            result_content = "Error: web_search requires a non-empty 'query' string."
+            error_event = _build_event(
+                "tool_result",
+                metadata={"phase": "tool_result", "status": "error", "error_code": "validation_error"},
+                status="error",
+                content=result_content,
+                error_code="validation_error",
+                tool_call_id=tool_call_id,
+            )
+            await emit_trace_and_push(error_event)
+            return (tool_call_id, tool_name, result_content, "error", "validation_error", None)
+
+        raw_num_results = tool_args.get("num_results", 5)
+        try:
+            num_results = int(raw_num_results)
+        except (TypeError, ValueError):
+            num_results = 5
 
         tool_event = _build_event(
             "tool_call",
@@ -1173,6 +1407,8 @@ async def _execute_tool_call(
                 "subagent_spawn_tool_call_id": tool_call_id,
                 "subagent_id": agent_id,
             }
+
+
         )
         if task_type:
             spawning_meta["subagent_task_type"] = str(task_type)
@@ -1196,16 +1432,38 @@ async def _execute_tool_call(
                         event = {**event, "content": "Generating…"}
                 metadata["subagent_trace"] = True
                 metadata["subagent_id"] = agent_id
-                metadata["subagent_spawn_tool_call_id"] = tool_call_id
-                if task_type:
+                # Keep an inner spawn's own id when a subagent spawns another subagent.
+                if not metadata.get("subagent_spawn_tool_call_id"):
+                    metadata["subagent_spawn_tool_call_id"] = tool_call_id
+                if task_type and not metadata.get("subagent_task_type"):
                     metadata["subagent_task_type"] = str(task_type)
+            # tool_call must keep the nested session_id (sess_{agent_id}) so extension
+            # inFlightToolCalls match tool/abort. Overwriting it with the parent session
+            # made spawn-timeout abort a no-op and left zombie tools on the host.
+            routed_session_id = (
+                event.get("session_id")
+                if event_type == "tool_call" and event.get("session_id")
+                else synthetic_session_id
+            )
+            if event_type == "tool_call" and routed_session_id:
+                metadata["session_id"] = routed_session_id
             parent_event = {
                 **event,
                 "chat_id": str(chat_id),
                 "message_id": request_message_id,
-                "session_id": synthetic_session_id,
+                "session_id": routed_session_id,
                 "metadata": metadata,
             }
+            # Parent gets a copied event dict — register that copy so deferred
+            # file_changes enrichment patches what actually gets persisted.
+            if event_type == "tool_result":
+                nested_tool_call_id = parent_event.get("tool_call_id") or metadata.get(
+                    "tool_call_id"
+                )
+                if isinstance(nested_tool_call_id, str) and nested_tool_call_id:
+                    orchestrator.register_tool_result_event(
+                        nested_tool_call_id, parent_event
+                    )
             await emit_trace_and_push(parent_event)
 
         async def emit_spawn_failure_trace(content: str, error_code: str) -> None:
@@ -1226,6 +1484,14 @@ async def _execute_tool_call(
             await emit_trace_and_push(fail_event)
 
         subagent_session_id = f"sess_{agent_id}"
+        vertex_chat_id = str(context.get("vertex_chat_id") or chat_id)
+        parent_run_id = context.get("agent_run_id")
+        subagent_run = orchestrator.create_agent_run(
+            chat_id=vertex_chat_id,
+            kind="subagent",
+            parent_run_id=str(parent_run_id) if parent_run_id else None,
+            synthetic_session_id=subagent_session_id,
+        )
         try:
             current_depth = context.get("depth", 0)
             if current_depth >= 5:
@@ -1241,24 +1507,31 @@ async def _execute_tool_call(
                 "active_tool_categories": inherited_categories,
                 "task_type": task_type,
                 "parent_id": str(chat_id),
+                "vertex_chat_id": vertex_chat_id,
                 "depth": current_depth + 1,
                 "ephemeral_run": True,
                 "external_trace_emit": subagent_trace_emit,
+                "agent_run_id": subagent_run.run_id,
             }
             if worktree_path:
                 subagent_context["worktree_path"] = worktree_path
 
-            subagent_result = await asyncio.wait_for(
+            subagent_task = asyncio.create_task(
                 _run_agent_loop_impl(
                     orchestrator,
                     agent_id,
                     str(prompt or ""),
                     subagent_context,
-                ),
+                )
+            )
+            orchestrator.bind_agent_run_task(subagent_run.run_id, subagent_task)
+            subagent_result = await asyncio.wait_for(
+                subagent_task,
                 timeout=spawn_timeout,
             )
 
             logger.info("Subagent %s completed.", agent_id)
+            orchestrator.finish_agent_run(subagent_run.run_id)
             success_event = _build_event("tool_result", metadata={"phase": "tool_result", "status": "success"}, status="success", content=f"Subagent finished. Result: {subagent_result}", tool_call_id=tool_call_id)
             await emit_trace_and_push(success_event)
             return (tool_call_id, tool_name, subagent_result, "success", None, None)
@@ -1283,14 +1556,31 @@ async def _execute_tool_call(
             return (tool_call_id, tool_name, result_content, "error", "subagent_timeout", None)
         except asyncio.CancelledError:
             await orchestrator._notify_extension_abort_session_tools(subagent_session_id)
+            if orchestrator.is_run_cancel_requested(subagent_run.run_id):
+                orchestrator.finish_agent_run(subagent_run.run_id, status="cancelled")
+                result_content = "Subagent cancelled by user."
+                await emit_spawn_failure_trace(result_content, "cancelled")
+                return (tool_call_id, tool_name, result_content, "error", "cancelled", None)
+            cancel_event = _build_event(
+                "tool_result",
+                metadata={"phase": "tool_result", "status": "error", "error_code": "cancelled"},
+                status="error",
+                content="Subagent cancelled by user.",
+                error_code="cancelled",
+                tool_call_id=tool_call_id,
+            )
+            await emit_trace_and_push(cancel_event)
             raise
         except Exception as e:
+            await orchestrator._notify_extension_abort_session_tools(subagent_session_id)
             logger.error("Subagent %s failed: %s", agent_id, e, exc_info=True)
             result_content = f"Subagent crashed with exception: {str(e)}"
             await emit_spawn_failure_trace(result_content, "subagent_error")
             error_event = _build_event("tool_result", metadata={"phase": "tool_result", "status": "error", "error_code": "subagent_error"}, status="error", content=result_content, error_code="subagent_error", tool_call_id=tool_call_id)
             await emit_trace_and_push(error_event)
             return (tool_call_id, tool_name, result_content, "error", "subagent_error", None)
+        finally:
+            orchestrator.finish_agent_run(subagent_run.run_id)
 
     # ── workspace_ops / terminal_ops (extension-side tools) ───────────────
     # Emit the tool_call event; the VS Code extension picks it up, executes
@@ -1350,6 +1640,7 @@ async def _execute_tool_call(
         },
         **tool_result.model_dump(),
     )
+    orchestrator.register_tool_result_event(tool_call_id, tool_result_event)
     await emit_trace_and_push(tool_result_event)
     await emit_trace_and_push(
         build_status_event(
@@ -1376,6 +1667,7 @@ async def _run_agent_loop_impl(
 ) -> str:
     user_id = context.get("user_id", "local_user")
     synthetic_session_id = context.get("synthetic_session_id", f"sess_{chat_id}")
+    run_id = context.get("agent_run_id")
     request_message_id = context.get("request_message_id", f"msg_{uuid4().hex[:12]}")
     req_ide_context_enabled = context.get("ide_context_enabled", True)
     ephemeral_run = bool(context.get("ephemeral_run"))
@@ -1533,16 +1825,23 @@ async def _run_agent_loop_impl(
     )
 
     full_response = ""
+    last_final_answer = ""
     trace_events: list[dict[str, Any]] = []
     run_failed = False
     llm_round = 0
     in_plan_mode = False
     plan_buffer = ""
+    stage_progress_counter = context.get("stage_progress_counter")
 
     async def push_event(event: dict[str, Any]) -> None:
         await orchestrator.stdio.write_event(chat_id, event)
         
     async def emit_trace_and_push(event: dict[str, Any]) -> None:
+        if run_id:
+            event = {
+                **event,
+                "metadata": {**dict(event.get("metadata") or {}), "agent_run_id": run_id},
+            }
         if not external_trace_emit:
             trace_events.append(event)
         _log_trace_event(
@@ -1661,7 +1960,7 @@ async def _run_agent_loop_impl(
         while True:
             llm_round += 1
 
-            if deep_plan_pipeline_mode and orchestrator.is_pipeline_abort_requested(str(chat_id)):
+            if deep_plan_pipeline_mode and orchestrator.is_run_cancel_requested(run_id):
                 run_failed = True
                 await emit_trace_and_push(
                     _build_event(
@@ -1675,7 +1974,7 @@ async def _run_agent_loop_impl(
                 )
                 raise asyncio.CancelledError()
 
-            if deep_plan_stage_id and orchestrator.is_pipeline_abort_requested(str(chat_id)):
+            if deep_plan_stage_id and orchestrator.is_run_cancel_requested(run_id):
                 run_failed = True
                 await emit_trace_and_push(
                     _build_event(
@@ -1719,6 +2018,38 @@ async def _run_agent_loop_impl(
             assistant_reasoning_content = ""
             tool_call_requested = False
             stream_aborted = False
+            streamed_output_to_trace = False
+            trace_output_buffer: list[str] = []
+            trace_output_last_flush = time.monotonic()
+
+            async def flush_trace_output(*, force: bool = False) -> None:
+                nonlocal streamed_output_to_trace, trace_output_last_flush
+                if not external_trace_emit or not trace_output_buffer:
+                    return
+                pending = "".join(trace_output_buffer)
+                now = time.monotonic()
+                if (
+                    not force
+                    and len(pending) < _TRACE_OUTPUT_FLUSH_CHARS
+                    and (now - trace_output_last_flush) < _TRACE_OUTPUT_FLUSH_SECONDS
+                ):
+                    return
+                trace_output_buffer.clear()
+                trace_output_last_flush = now
+                streamed_output_to_trace = True
+                await emit_trace_and_push(
+                    _build_event(
+                        "output",
+                        content=pending,
+                        metadata={
+                            "phase": "assistant_output",
+                            "appendMode": "token",
+                        },
+                        session_id=synthetic_session_id,
+                        chat_id=str(chat_id),
+                        message_id=request_message_id,
+                    )
+                )
 
             status_text = (
                 f"Calling model {orchestrator.config.llm_model}..."
@@ -1813,7 +2144,12 @@ async def _run_agent_loop_impl(
 
                         assistant_turn_content += token
                         full_response += token
-                        if not external_trace_emit:
+                        if isinstance(stage_progress_counter, list):
+                            stage_progress_counter[0] = stage_progress_counter[0] + len(token)
+                        if external_trace_emit:
+                            trace_output_buffer.append(token)
+                            await flush_trace_output()
+                        else:
                             await push_event(
                                 _build_event(
                                     "token",
@@ -1855,19 +2191,25 @@ async def _run_agent_loop_impl(
                 if stream_aborted:
                     break
 
+                await flush_trace_output(force=True)
+
+            except asyncio.CancelledError:
+                stream_aborted = True
+                raise
             except Exception as stream_exc:
                 error_details = str(stream_exc)
                 if isinstance(stream_exc, APIError):
+                    api_err = _api_error_details(stream_exc)
                     logger.error(
                         "LLM stream API error for chat %s: message=%s type=%s code=%s body=%s",
                         chat_id,
-                        stream_exc.message,
-                        stream_exc.type,
-                        stream_exc.code,
-                        json.dumps(stream_exc.body) if stream_exc.body else None,
+                        api_err["message"],
+                        api_err["type"],
+                        api_err["code"],
+                        api_err["body"],
                         exc_info=True,
                     )
-                    error_details = stream_exc.message or error_details
+                    error_details = api_err["message"] or error_details
                 else:
                     logger.error("LLM stream error for chat %s:\n%s", chat_id, stream_exc, exc_info=True)
                 if not orchestrator.config.llm_key.strip():
@@ -1884,6 +2226,13 @@ async def _run_agent_loop_impl(
                         message_id=request_message_id,
                     )
                 )
+            finally:
+                aclose = getattr(stream_iterator, "aclose", None)
+                if aclose is not None:
+                    try:
+                        await aclose()  # type: ignore[misc]
+                    except Exception:
+                        pass
 
             if stream_aborted:
                 break
@@ -2043,6 +2392,9 @@ async def _run_agent_loop_impl(
             if not assistant_turn_content.strip():
                 assistant_turn_content = "[Internal system note: the model returned an empty text response or only emitted state tags.]"
 
+            if not assistant_turn_content.startswith("[Internal system note"):
+                last_final_answer = assistant_turn_content
+
             llm_messages.append(
                 {
                     "role": "assistant",
@@ -2070,9 +2422,12 @@ async def _run_agent_loop_impl(
             else:
                 profiler.log_turn(llm_round, "assistant_answer", assistant_turn_content)
                 profiler.log_turn(llm_round, "assistant_reasoning", assistant_reasoning_content)
-                # Nested runs suppress streaming tokens; emit the final answer into the
-                # external trace so AgentTracePanel / worker panels show the conclusion.
-                if external_trace_emit and assistant_turn_content.strip():
+                # Nested runs stream tokens live; only emit a block fallback if nothing streamed.
+                if (
+                    external_trace_emit
+                    and assistant_turn_content.strip()
+                    and not streamed_output_to_trace
+                ):
                     await emit_trace_and_push(
                         _build_event(
                             "output",
@@ -2097,19 +2452,34 @@ async def _run_agent_loop_impl(
         if nested_run:
             raise
         run_failed = True
-        logger.info("Agent loop cancelled for chat %s", chat_id)
-        if orchestrator.is_pipeline_abort_requested(str(chat_id)):
+        cancel_reason = orchestrator.run_cancel_reason(run_id) or "user"
+        logger.info(
+            "Agent loop cancelled for chat %s reason=%s",
+            chat_id,
+            cancel_reason,
+        )
+        if deep_plan_pipeline_mode and orchestrator.is_run_cancel_requested(run_id):
             await emit_trace_and_push(
                 _build_event(
                     "status",
                     content="Deep plan aborted by user.",
-                    metadata={"phase": "deep_plan_aborted"},
+                    metadata={"phase": "deep_plan_aborted", "cancelledBy": "user"},
                     session_id=synthetic_session_id,
                     chat_id=str(chat_id),
                     message_id=request_message_id,
                 )
             )
-            orchestrator.clear_pipeline_abort(str(chat_id))
+        elif cancel_reason == "preempted":
+            await emit_trace_and_push(
+                _build_event(
+                    "status",
+                    content="Turn interrupted by a new message.",
+                    metadata={"phase": "cancelled", "cancelledBy": "preempted"},
+                    session_id=synthetic_session_id,
+                    chat_id=str(chat_id),
+                    message_id=request_message_id,
+                )
+            )
         else:
             await emit_trace_and_push(
                 _build_event(
@@ -2125,20 +2495,19 @@ async def _run_agent_loop_impl(
     except Exception as exc:
         run_failed = True
         error_details = str(exc)
-        
-        # Log provider error details for debugging
+
         if isinstance(exc, APIError):
+            api_err = _api_error_details(exc)
             logger.error(
-                "LLM stream API error for chat %s: message=%s type=%s code=%s body=%s provider_request_headers=%s",
+                "Agent loop API error for chat %s: message=%s type=%s code=%s body=%s provider_request_headers=%s",
                 chat_id,
-                exc.message,
-                exc.type,
-                exc.code,
-                json.dumps(exc.body) if exc.body else None,
-                exc.request.headers if exc.request else None,
+                api_err["message"],
+                api_err["type"],
+                api_err["code"],
+                api_err["body"],
+                api_err["request_headers"],
                 exc_info=True,
             )
-            # Log the request payload that was sent
             logger.error(
                 "Request payload for failed chat %s llm_round=%s: messages_count=%s last_message_role=%s workspace_skeleton_len=%s",
                 chat_id,
@@ -2147,14 +2516,15 @@ async def _run_agent_loop_impl(
                 llm_messages[-1].get("role") if llm_messages else None,
                 len(req_workspace_skeleton) if req_workspace_skeleton else 0,
             )
+            error_details = api_err["message"] or error_details
         else:
-            logger.error("LLM stream error for chat %s: %s", chat_id, error_details, exc_info=True)
-        
+            logger.error("Agent loop error for chat %s: %s", chat_id, error_details, exc_info=True)
+
         await emit_trace_and_push(
             _build_event(
                 "error",
-                content=f"LLM stream failed: {error_details}",
-                metadata={"phase": "stream_exception"},
+                content=f"Agent turn failed: {error_details}",
+                metadata={"phase": "agent_loop_exception"},
                 session_id=synthetic_session_id,
                 chat_id=str(chat_id),
                 message_id=request_message_id,
@@ -2170,6 +2540,7 @@ async def _run_agent_loop_impl(
             message_id=f"msg_{uuid4().hex[:12]}",
             turn_duration_ms=_compute_turn_duration_ms(trace_events),
         )
+        orchestrator.clear_tool_result_event_refs()
 
     logger.info(
         "final response completed user_id=%s chat_id=%s session_id=%s message_id=%s failed=%s trace_events=%s response_chars=%s response_preview=%s",
@@ -2232,5 +2603,8 @@ async def _run_agent_loop_impl(
         except Exception:
             logger.exception("Failed to push done event")
 
-    return full_response
+    if ephemeral_run:
+        from app.services.deep_plan.runner import resolve_ephemeral_agent_response
 
+        return resolve_ephemeral_agent_response(last_final_answer, full_response)
+    return full_response

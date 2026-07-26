@@ -78,6 +78,7 @@ async def run_vertex_pipeline_turn(
         "manifest_path": manifest_path,
         "requirements_path": requirements_path,
         "pipeline_id": pipeline_id,
+        "agent_run_id": deep_o._pipeline_run_id,
     }
 
     try:
@@ -100,10 +101,6 @@ async def run_vertex_pipeline_turn(
         )
     finally:
         parent.active_pipeline_by_chat.pop(deep_o._chat_id, None)
-
-    if parent.is_pipeline_abort_requested(deep_o._chat_id):
-        parent.clear_pipeline_abort(deep_o._chat_id)
-        return False, "Deep plan aborted by user."
 
     session_after = await read_session_state(deep_o._parent, deep_o._chat_id)
     pipeline_after = read_pipeline_record(session_after.get("working_memory", {}))

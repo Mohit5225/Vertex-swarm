@@ -1,8 +1,7 @@
 import * as vscode from 'vscode';
-import { execFile } from 'node:child_process';
+import { spawn, type ChildProcess } from 'node:child_process';
 import type { ToolContext, ToolResult } from '../types/index';
 import {
-  buildConflictResult as buildWorkspaceConflictResult,
   extractWorkspaceOpsRequest,
   normalizeWorkspaceOpsAction,
   parseWorkspaceOpsMode as parseWorkspaceOpsModeContract,
@@ -58,8 +57,6 @@ interface WorkspaceOpsRequest {
   requestId: string;
   mode: WorkspaceOpsMode;
   payload: Record<string, unknown>;
-  expectedHash?: string;
-  expectedVersion?: string;
 }
 
 interface CachedWorkspaceResult {
@@ -163,12 +160,46 @@ interface ExecFileCommandResult {
   stderr: string;
   error: ExecFileError | null;
   timedOut: boolean;
+  aborted: boolean;
 }
+
+const TOOL_ABORTED_MESSAGE = 'Tool execution aborted.';
 
 export class FileSystemService {
   private readonly workspaceRequestCache = new Map<string, CachedWorkspaceResult>();
   /** session_id -> normalized paths blocked until read_file/search_text */
   private readonly editRetryBlockedPaths = new Map<string, Set<string>>();
+
+  private shouldAbort(context: ToolContext): boolean {
+    return context.should_abort?.() ?? false;
+  }
+
+  private assertNotAborted(context: ToolContext): void {
+    if (this.shouldAbort(context)) {
+      throw new Error(TOOL_ABORTED_MESSAGE);
+    }
+  }
+
+  private isAbortError(error: unknown): boolean {
+    return error instanceof Error && error.message === TOOL_ABORTED_MESSAGE;
+  }
+
+  private killChildProcess(child: ChildProcess): void {
+    // Kill only this child — never taskkill /T (process-tree), which can take
+    // down siblings under the extension host on Windows.
+    try {
+      child.kill('SIGTERM');
+    } catch {
+      // already dead
+    }
+    if (process.platform !== 'win32' && child.pid) {
+      try {
+        process.kill(child.pid, 'SIGKILL');
+      } catch {
+        // ignore
+      }
+    }
+  }
 
   private async list_dir(dirPath: string, context: ToolContext): Promise<ToolResult> {
     const startMs = Date.now();
@@ -283,6 +314,7 @@ export class FileSystemService {
       const searchStart = Date.now();
 
       for (const fileUri of files) {
+        this.assertNotAborted(context);
         if (totalCollectedHits >= searchRequest.maxResults) {
           break;
         }
@@ -312,6 +344,9 @@ export class FileSystemService {
 
         const lines = decodedContent.split(/\r?\n/);
         for (let lineIndex = 0; lineIndex < lines.length; lineIndex += 1) {
+          if (this.shouldAbort(context)) {
+            throw new Error(TOOL_ABORTED_MESSAGE);
+          }
           if (Date.now() >= timeoutAt) {
             timedOut = true;
             break;
@@ -376,6 +411,9 @@ export class FileSystemService {
 
       return resultObj;
     } catch (error) {
+      if (this.isAbortError(error)) {
+        throw error;
+      }
       return this.errorResult(
         'grep_workspace',
         context,
@@ -430,14 +468,19 @@ export class FileSystemService {
           includePatterns,
           resolution,
           workspaceFolders[0].uri.fsPath,
-          timeoutAt
+          timeoutAt,
+          context
         )
       );
 
       const passResults = await Promise.allSettled(passPromises);
+      this.assertNotAborted(context);
 
       for (const passResult of passResults) {
         if (passResult.status === 'rejected') {
+          if (this.isAbortError(passResult.reason)) {
+            throw passResult.reason;
+          }
           const reason = passResult.reason instanceof Error
             ? passResult.reason.message
             : String(passResult.reason);
@@ -503,6 +546,9 @@ export class FileSystemService {
         result: resultObj,
       };
     } catch (error) {
+      if (this.isAbortError(error)) {
+        throw error;
+      }
       return {
         status: 'fallback',
         reason: `Ripgrep search failed: ${error instanceof Error ? error.message : String(error)}`,
@@ -517,9 +563,12 @@ export class FileSystemService {
     includePatterns: string[],
     resolution: RipgrepCommandResolution,
     workspaceRootPath: string,
-    timeoutAt: number
+    timeoutAt: number,
+    context: ToolContext
   ): Promise<{ metadata: SearchPassMetadata; hits: string[] }> {
     const passStart = Date.now();
+
+    this.assertNotAborted(context);
 
     // Check if already timed out
     if (Date.now() >= timeoutAt) {
@@ -546,11 +595,16 @@ export class FileSystemService {
       resolution.command,
       rgArgs,
       workspaceRootPath,
-      remainingTime
+      remainingTime,
+      () => this.shouldAbort(context)
     );
 
     const timeElapsed = Date.now() - passStart;
     const errorCode = this.execErrorCode(execResult.error);
+
+    if (execResult.aborted) {
+      throw new Error(TOOL_ABORTED_MESSAGE);
+    }
 
     if (execResult.timedOut) {
       return {
@@ -725,29 +779,103 @@ export class FileSystemService {
     command: string,
     args: string[],
     cwd: string,
-    timeoutMs: number
+    timeoutMs: number,
+    shouldAbort?: () => boolean
   ): Promise<ExecFileCommandResult> {
     return new Promise((resolve) => {
-      execFile(
-        command,
-        args,
-        {
-          cwd,
-          windowsHide: true,
-          timeout: timeoutMs,
-          maxBuffer: RG_MAX_BUFFER_BYTES,
-        },
-        (error, stdout, stderr) => {
-          const execError = (error as ExecFileError | null) ?? null;
-          const timedOut = Boolean(execError?.killed) && execError?.signal === 'SIGTERM';
-          resolve({
-            stdout: stdout ?? '',
-            stderr: stderr ?? '',
-            error: execError,
-            timedOut,
+      const child = spawn(command, args, {
+        cwd,
+        windowsHide: true,
+        stdio: ['ignore', 'pipe', 'pipe'],
+      });
+
+      let stdout = '';
+      let stderr = '';
+      let settled = false;
+
+      const finish = (result: ExecFileCommandResult) => {
+        if (settled) {
+          return;
+        }
+        settled = true;
+        clearInterval(abortPoll);
+        clearTimeout(timer);
+        resolve(result);
+      };
+
+      child.stdout?.on('data', (chunk: Buffer | string) => {
+        stdout += chunk.toString();
+        if (stdout.length > RG_MAX_BUFFER_BYTES) {
+          this.killChildProcess(child);
+          finish({
+            stdout,
+            stderr,
+            error: Object.assign(new Error('maxBuffer exceeded'), { code: 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER' }),
+            timedOut: false,
+            aborted: false,
           });
         }
-      );
+      });
+
+      child.stderr?.on('data', (chunk: Buffer | string) => {
+        stderr += chunk.toString();
+      });
+
+      const abortPoll = setInterval(() => {
+        if (shouldAbort?.()) {
+          this.killChildProcess(child);
+          finish({
+            stdout,
+            stderr,
+            error: Object.assign(new Error(TOOL_ABORTED_MESSAGE), { killed: true, code: 'ABORTED' }),
+            timedOut: false,
+            aborted: true,
+          });
+        }
+      }, 50);
+
+      const timer = setTimeout(() => {
+        this.killChildProcess(child);
+        finish({
+          stdout,
+          stderr,
+          error: Object.assign(new Error('timeout'), { killed: true, signal: 'SIGTERM' as const }),
+          timedOut: true,
+          aborted: false,
+        });
+      }, timeoutMs);
+
+      child.on('error', (error) => {
+        finish({
+          stdout,
+          stderr,
+          error: error as ExecFileError,
+          timedOut: false,
+          aborted: false,
+        });
+      });
+
+      child.on('close', (code, signal) => {
+        if (settled) {
+          return;
+        }
+
+        let error: ExecFileError | null = null;
+        if (code !== 0) {
+          error = Object.assign(new Error(`Process exited with code ${String(code)}`), {
+            code: code ?? undefined,
+            signal,
+          }) as ExecFileError;
+        }
+
+        finish({
+          stdout,
+          stderr,
+          error,
+          timedOut: false,
+          aborted: false,
+        });
+      });
     });
   }
 
@@ -842,7 +970,7 @@ export class FileSystemService {
     startLine: number,
     endLine: number,
     context: ToolContext
-  ): Promise<ToolResult & { current_hash?: string; total_lines?: number }> {
+  ): Promise<ToolResult & { total_lines?: number }> {
     const startMs = Date.now();
 
     try {
@@ -897,13 +1025,8 @@ export class FileSystemService {
       const sliceEnd = Math.min(endLine, fileLines.length);
       const content = fileLines.slice(sliceStart, sliceEnd).join('\n');
 
-      // Compute hash over the FULL file content so the LLM can use it as
-      // expected_hash in a subsequent edit_file call.
-      const currentHash = this.computeContentHash(fullContent);
-
       return {
         ...this.successResult('read_file_paginated', context, content, startMs),
-        current_hash: currentHash,
         total_lines: fileLines.length,
       };
     } catch (error) {
@@ -947,6 +1070,7 @@ export class FileSystemService {
       const files: any[] = [];
 
       for (const path of paths) {
+        this.assertNotAborted(context);
         if (typeof path !== 'string') continue;
         const fileUri = this.resolveWorkspacePath(path);
         try {
@@ -967,7 +1091,6 @@ export class FileSystemService {
           files.push({
             path,
             content,
-            current_hash: this.computeContentHash(content),
             total_lines: content.split(/\r?\n/).length,
             status: 'success'
           });
@@ -1000,6 +1123,7 @@ export class FileSystemService {
 
     try {
       const request = this.parseWorkspaceOpsRequest(rawArgs);
+      this.assertNotAborted(context);
       const cachedResult = this.getCachedWorkspaceResult(request.requestId, context);
       if (cachedResult) {
         return cachedResult;
@@ -1073,14 +1197,11 @@ export class FileSystemService {
               requestId: request.requestId,
               action: request.action,
               summary: `Read ${path} lines ${startLine}-${endLine}.`,
-              // current_hash MUST be included here so the LLM can pass it as
-              // expected_hash in a subsequent edit_file call.
               data: {
                 path,
                 startLine,
                 endLine,
                 total_lines: result.total_lines ?? null,
-                current_hash: result.current_hash ?? null,
               },
             })
           );
@@ -1136,6 +1257,9 @@ export class FileSystemService {
         }
       }
     } catch (error) {
+      if (this.isAbortError(error)) {
+        throw error;
+      }
       return this.errorResult(
         'workspace_ops',
         context,
@@ -1189,22 +1313,10 @@ export class FileSystemService {
       const fileUri = this.resolveWorkspacePath(path);
       const document = await vscode.workspace.openTextDocument(fileUri);
       const currentContent = document.getText();
-      const currentHash = this.computeContentHash(currentContent);
-
-      const concurrencyError = this.validateConcurrencyGuard(
-        request,
-        currentHash,
-        context,
-        startMs,
-        path
-      );
-      if (concurrencyError) {
-        this.markEditRetryBlocked(context.session_id, path);
-        return this.cacheWorkspaceResult(request.requestId, concurrencyError);
-      }
 
       const normalizedEdits: NormalizedTextEdit[] = [];
       for (let index = 0; index < rawEdits.length; index++) {
+        this.assertNotAborted(context);
         const edits = this.normalizeTextEdits(rawEdits[index], index, document);
         normalizedEdits.push(...edits);
       }
@@ -1222,7 +1334,6 @@ export class FileSystemService {
       }
 
       const nextContent = this.applyTextEdits(currentContent, normalizedEdits);
-      const nextHash = this.computeContentHash(nextContent);
       const summary = normalizedEdits.map((edit) => edit.summary);
 
       if (request.mode === 'preview') {
@@ -1238,8 +1349,6 @@ export class FileSystemService {
               summary: `Previewed ${normalizedEdits.length} edit(s) in ${path}.`,
               data: {
                 edit_count: normalizedEdits.length,
-                current_hash: currentHash,
-                next_hash: nextHash,
                 applied: false,
                 edits: summary,
               },
@@ -1258,6 +1367,7 @@ export class FileSystemService {
         normalizedEdits.map((entry) => vscode.TextEdit.replace(entry.range, entry.newText))
       );
 
+      this.assertNotAborted(context);
       const applied = await vscode.workspace.applyEdit(workspaceEdit);
       if (!applied) {
         this.markEditRetryBlocked(context.session_id, path);
@@ -1274,7 +1384,6 @@ export class FileSystemService {
 
       const refreshedDocument = await vscode.workspace.openTextDocument(fileUri);
       await refreshedDocument.save();
-      const appliedHash = this.computeContentHash(refreshedDocument.getText());
 
       return this.cacheWorkspaceResult(request.requestId, this.successResult(
         'workspace_ops',
@@ -1288,8 +1397,6 @@ export class FileSystemService {
             summary: `Applied ${normalizedEdits.length} edit(s) to ${path}.`,
             data: {
               edit_count: normalizedEdits.length,
-              current_hash: currentHash,
-              next_hash: appliedHash,
               applied: true,
               edits: summary,
             },
@@ -1301,6 +1408,9 @@ export class FileSystemService {
         startMs
       ));
     } catch (error) {
+      if (this.isAbortError(error)) {
+        throw error;
+      }
       if (editPath) {
         this.markEditRetryBlocked(context.session_id, editPath);
       }
@@ -1450,34 +1560,6 @@ export class FileSystemService {
           ));
         }
 
-        const currentVersion = exists && existingStat
-          ? await this.computePathVersion(fileUri, existingStat)
-          : undefined;
-
-        if (request.mode === 'apply' && exists) {
-          const concurrencyError = this.validateConcurrencyGuard(
-            request,
-            currentVersion ?? '',
-            context,
-            startMs,
-            file.path
-          );
-          if (concurrencyError) {
-            return this.cacheWorkspaceResult(request.requestId, concurrencyError);
-          }
-        } else if (currentVersion) {
-          const concurrencyError = this.validateConcurrencyGuard(
-            request,
-            currentVersion,
-            context,
-            startMs,
-            file.path
-          );
-          if (concurrencyError) {
-            return this.cacheWorkspaceResult(request.requestId, concurrencyError);
-          }
-        }
-
         const isFolder = file.content === undefined || file.content === null || file.path.endsWith('/') || file.path.endsWith('\\');
         
         if (!isFolder) {
@@ -1531,8 +1613,7 @@ export class FileSystemService {
             await this.ensureParentDirectory(fileUri);
             const contentBytes = new TextEncoder().encode(file.content ?? '');
             await vscode.workspace.fs.writeFile(fileUri, contentBytes);
-            const nextHash = this.computeContentHash(file.content ?? '');
-            resultsData.push({ path: file.path, type: 'file', next_hash: nextHash, applied: true });
+            resultsData.push({ path: file.path, type: 'file', applied: true });
         }
       }
 
@@ -1596,18 +1677,6 @@ export class FileSystemService {
           'ENOENT',
           startMs
         ));
-      }
-
-      const targetVersion = await this.computePathVersion(targetUri, targetStat);
-      const concurrencyError = this.validateConcurrencyGuard(
-        request,
-        targetVersion,
-        context,
-        startMs,
-        path
-      );
-      if (concurrencyError) {
-        return this.cacheWorkspaceResult(request.requestId, concurrencyError);
       }
 
       const isDirectory = targetStat.type === vscode.FileType.Directory;
@@ -1712,18 +1781,6 @@ export class FileSystemService {
         ));
       }
 
-      const sourceVersion = await this.computePathVersion(oldUri, oldStat);
-      const concurrencyError = this.validateConcurrencyGuard(
-        request,
-        sourceVersion,
-        context,
-        startMs,
-        oldPath
-      );
-      if (concurrencyError) {
-        return this.cacheWorkspaceResult(request.requestId, concurrencyError);
-      }
-
       if (request.mode === 'preview') {
         return this.cacheWorkspaceResult(request.requestId, this.successResult(
           'workspace_ops',
@@ -1794,8 +1851,6 @@ export class FileSystemService {
       requestId: request.requestId,
       mode: request.mode as WorkspaceOpsMode,
       payload: request.payload,
-      expectedHash: request.expectedHash,
-      expectedVersion: request.expectedVersion,
     };
   }
 
@@ -2064,88 +2119,6 @@ export class FileSystemService {
     return parseWorkspaceOpsModeContract(value) as WorkspaceOpsMode;
   }
 
-  private validateConcurrencyGuard(
-    request: WorkspaceOpsRequest,
-    currentVersion: string,
-    context: ToolContext,
-    startMs: number,
-    targetLabel: string
-  ): ToolResult | null {
-    const expectedHash = request.expectedHash?.trim();
-    const expectedVersion = request.expectedVersion?.trim();
-
-    if (expectedHash && expectedVersion && expectedHash !== expectedVersion) {
-      return buildWorkspaceConflictResult({
-        request,
-        context,
-        startMs,
-        errorCode: 'CONFLICTING_CONCURRENCY_GUARDS',
-        summary: `Conflicting concurrency guards for ${targetLabel}: expected_hash and expected_version do not match.`,
-        conflict: {
-          target: targetLabel,
-          expected_hash: expectedHash,
-          expected_version: expectedVersion,
-          current_version: currentVersion,
-        },
-      }) as ToolResult;
-    }
-
-    const expected = expectedHash ?? expectedVersion;
-    if (!expected) {
-      if (request.mode === 'apply') {
-        return buildWorkspaceConflictResult({
-          request,
-          context,
-          startMs,
-          errorCode: 'MISSING_CONCURRENCY_GUARD',
-          summary: `${request.action} requires expected_hash or expected_version before apply.`,
-          conflict: {
-            target: targetLabel,
-            expected_hash: null,
-            expected_version: null,
-            current_version: currentVersion,
-          },
-        }) as ToolResult;
-      }
-
-      return null;
-    }
-
-    if (expected !== currentVersion) {
-      return buildWorkspaceConflictResult({
-        request,
-        context,
-        startMs,
-        errorCode: 'HASH_CONFLICT',
-        summary: `Concurrency conflict for ${targetLabel}. expected=${expected} actual=${currentVersion}`,
-        conflict: {
-          target: targetLabel,
-          expected_version: expected,
-          current_version: currentVersion,
-        },
-      }) as ToolResult;
-    }
-
-    return null;
-  }
-
-  private async computePathVersion(
-    pathUri: vscode.Uri,
-    fileStat: vscode.FileStat
-  ): Promise<string> {
-    if (fileStat.type === vscode.FileType.Directory) {
-      const entries = await vscode.workspace.fs.readDirectory(pathUri);
-      const normalizedEntries = entries
-        .map(([name, type]) => `${name}:${type}`)
-        .sort((left, right) => left.localeCompare(right))
-        .join('|');
-      return this.computeContentHash(normalizedEntries);
-    }
-
-    const fileBytes = await vscode.workspace.fs.readFile(pathUri);
-    return this.computeContentHash(new TextDecoder().decode(fileBytes));
-  }
-
   private normalizeTextEdits(
     entry: unknown,
     index: number,
@@ -2356,17 +2329,6 @@ export class FileSystemService {
     }
 
     return updated;
-  }
-
-  private computeContentHash(content: string): string {
-    let hash = 2166136261;
-    for (let index = 0; index < content.length; index += 1) {
-      hash ^= content.charCodeAt(index);
-      hash += (hash << 1) + (hash << 4) + (hash << 7) + (hash << 8) + (hash << 24);
-    }
-
-    const unsignedHash = hash >>> 0;
-    return `fnv1a-${unsignedHash.toString(16).padStart(8, '0')}-${content.length}`;
   }
 
   private validatePosition(

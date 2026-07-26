@@ -7,6 +7,7 @@ import { SnapshotContentProvider, SNAPSHOT_SCHEME } from './snapshot/snapshot-co
 import { SnapshotGarbageCollector } from './snapshot/garbage-collector';
 import { PlanDocumentProvider } from './plan-document-provider';
 import { VertexProcessManager } from './process-manager';
+import { debugLog, getDebugLogPath, initDebugLog, showDebugLog } from './debug-log';
 import * as path from 'path';
 import * as os from 'os';
 
@@ -16,7 +17,8 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   console.log('Vertex Swarm extension activated');
   const outputChannel = vscode.window.createOutputChannel('Vertex Swarm');
   const authOutputChannel = vscode.window.createOutputChannel('Vertex Swarm Auth');
-  outputChannel.appendLine(`[${new Date().toISOString()}] Extension activated`);
+  initDebugLog(outputChannel);
+  debugLog('Extension', `activated — file log: ${getDebugLogPath()}`);
   authOutputChannel.appendLine(`[${new Date().toISOString()}] Auth logging initialized`);
   context.subscriptions.push(outputChannel);
   context.subscriptions.push(authOutputChannel);
@@ -36,8 +38,9 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       const token = await entitlementClient.getToken();
       if (!token) return; // Let chat-runtime handle lazy start upon login
       await processManager.start(context, outputChannel, config, token);
+      debugLog('Extension', 'backend process manager started');
     } catch (err: any) {
-      outputChannel.appendLine(`[Extension] Failed to start process manager: ${err.message}`);
+      debugLog('Extension', `Failed to start process manager: ${err.message}`);
       vscode.window.showErrorMessage(`Failed to start Vertex Swarm backend: ${err.message}`);
     }
   });
@@ -125,6 +128,19 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       await sidebarProvider.handleLogout('User initiated logout');
     })
   );
+
+  context.subscriptions.push(
+    vscode.commands.registerCommand('vertex-swarm.showLogs', async () => {
+      await showDebugLog();
+    })
+  );
+
+  const logsStatusBar = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 50);
+  logsStatusBar.text = '$(output) Vertex Swarm Logs';
+  logsStatusBar.tooltip = `Open debug log (${getDebugLogPath()})`;
+  logsStatusBar.command = 'vertex-swarm.showLogs';
+  logsStatusBar.show();
+  context.subscriptions.push(logsStatusBar);
 }
 
 export function deactivate(): void {

@@ -195,14 +195,16 @@ async def abort_deep_plan_pipeline(
         return True, "ok", pipeline_id or None, False
 
     if status == STATUS_RUNNING:
-        orchestrator.request_pipeline_abort(chat_id)
         await set_pipeline_terminal_status(orchestrator, chat_id, STATUS_ABORTED)
+        run_id = orchestrator.pipeline_run_by_chat.get(str(chat_id))
+        if run_id:
+            await orchestrator.cancel_agent_run(run_id, reason="user")
         logger.info(
-            "deep_plan pipeline hard-abort requested chat_id=%s pipeline_id=%s",
+            "deep_plan pipeline targeted-abort requested chat_id=%s pipeline_id=%s",
             chat_id,
             pipeline_id,
         )
-        return True, "ok", pipeline_id or None, True
+        return True, "ok", pipeline_id or None, False
 
     return False, "no_active_pipeline", None, False
 

@@ -1,5 +1,5 @@
 import { create } from 'zustand'
-import { resolveStreamingAgentMessageId } from '../lib/liveAgentTurn'
+import { findLastAgentMessage, resolveStreamingAgentMessageId } from '../lib/liveAgentTurn'
 import {
   mergeSessionEvents,
   shouldMergeSessionEvents,
@@ -241,6 +241,56 @@ const shouldMergeEvent = (previous: SessionEvent | undefined, next: SessionEvent
 const normalizeEventComparisonContent = (content?: string) =>
   typeof content === 'string' ? content.replace(/\s+/g, ' ').trim() : ''
 
+const matchesAgentMessageId = (message: ChatMessage, id: string) =>
+  message.type === 'agent' && (message.id === id || message.dbMessageId === id)
+
+const resolveEventTargetIndex = (
+  messages: ChatMessage[],
+  event: SessionEvent,
+  activeMessageId: string | null,
+  isStreaming: boolean,
+): number => {
+  const eventMessageId =
+    typeof event.metadata?.message_id === 'string' ? event.metadata.message_id : undefined
+
+  if (eventMessageId) {
+    const byBackendId = messages.findIndex((message) =>
+      matchesAgentMessageId(message, eventMessageId),
+    )
+    if (byBackendId !== -1) {
+      return byBackendId
+    }
+  }
+
+  if (activeMessageId) {
+    const byActive = messages.findIndex((message) => message.id === activeMessageId)
+    if (byActive !== -1) {
+      return byActive
+    }
+  }
+
+  if (isStreaming) {
+    const lastAgent = findLastAgentMessage(messages)
+    if (lastAgent) {
+      const idx = messages.findIndex((message) => message.id === lastAgent.id)
+      if (idx !== -1) {
+        return idx
+      }
+    }
+  }
+
+  const isNestedTrace =
+    Boolean(event.metadata?.subagent_trace) || Boolean(event.metadata?.deep_plan_worker)
+  if (isNestedTrace) {
+    const lastAgent = findLastAgentMessage(messages)
+    if (lastAgent) {
+      return messages.findIndex((message) => message.id === lastAgent.id)
+    }
+  }
+
+  return -1
+}
+
 const mergeEvent = (previous: SessionEvent, next: SessionEvent): SessionEvent => {
   const previousType = previous.type === ('token' as SessionEvent['type']) ? 'output' : previous.type
   const nextType = next.type === ('token' as SessionEvent['type']) ? 'output' : next.type
@@ -379,6 +429,12 @@ export const useChatStore = create<ChatState>((set) => ({
 
   addEvent: (event: SessionEvent) => {
     set((state) => {
+      // A terminal/cancelled turn is immutable. In particular, do not let a
+      // late nested worker event resurrect a new assistant message.
+      if (!state.isStreaming) {
+        return state
+      }
+
       const normalizedEvent = {
         ...event,
         timestamp: event.timestamp || Date.now(),
@@ -391,11 +447,14 @@ export const useChatStore = create<ChatState>((set) => ({
         state.isStreaming,
       )
 
-      if (!activeMessageId) {
-        if (!state.isStreaming) {
-          return state
-        }
+      let targetIndex = resolveEventTargetIndex(
+        messages,
+        normalizedEvent,
+        activeMessageId,
+        state.isStreaming,
+      )
 
+      if (targetIndex === -1) {
         activeMessageId = `agent-${Date.now()}`
         messages.push({
           id: activeMessageId,
@@ -404,11 +463,10 @@ export const useChatStore = create<ChatState>((set) => ({
           events: [],
           timestamp: Date.now(),
         })
+        targetIndex = messages.length - 1
+      } else {
+        activeMessageId = messages[targetIndex]?.id ?? activeMessageId
       }
-
-      const targetIndex = messages.findIndex(
-        (message) => message.id === activeMessageId
-      )
 
       if (targetIndex === -1) {
         return state
@@ -454,13 +512,32 @@ export const useChatStore = create<ChatState>((set) => ({
         return state
       }
 
-      const previousEvent = currentEvents[currentEvents.length - 1]
-      const nextEvents = shouldMergeEvent(previousEvent, normalizedEvent)
+      // Heartbeats: keep one running status per stage so the event list stays small.
+      let eventsForMerge = currentEvents
+      if (
+        normalizedEvent.type === 'deep_plan_stage_status' &&
+        normalizedEvent.metadata?.status === 'running' &&
+        typeof normalizedEvent.metadata?.stage_id === 'string'
+      ) {
+        const stageId = normalizedEvent.metadata.stage_id
+        eventsForMerge = currentEvents.filter((event) => {
+          if (event.type !== 'deep_plan_stage_status') {
+            return true
+          }
+          return !(
+            event.metadata?.stage_id === stageId &&
+            event.metadata?.status === 'running'
+          )
+        })
+      }
+
+      const mergeBase = eventsForMerge[eventsForMerge.length - 1]
+      const nextEvents = shouldMergeEvent(mergeBase, normalizedEvent)
         ? [
-            ...currentEvents.slice(0, -1),
-            mergeEvent(previousEvent as SessionEvent, normalizedEvent),
+            ...eventsForMerge.slice(0, -1),
+            mergeEvent(mergeBase as SessionEvent, normalizedEvent),
           ]
-        : [...currentEvents, normalizedEvent]
+        : [...eventsForMerge, normalizedEvent]
 
       const isNestedTraceEvent =
         Boolean(normalizedEvent.metadata?.subagent_trace) ||

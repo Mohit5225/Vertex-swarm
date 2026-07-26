@@ -9,6 +9,8 @@ class StdioTransport:
     using Content-Length framing (similar to LSP).
     Uses thread pool executor for blocking I/O to support Windows safely.
     """
+    _MAX_HEADER_LINE_BYTES = 64 * 1024
+
     def __init__(self, in_stream=None, out_stream=None):
         self.in_stream = in_stream or sys.stdin.buffer
         self.out_stream = out_stream or sys.stdout.buffer
@@ -37,25 +39,34 @@ class StdioTransport:
             line = await self._readline()
             if not line:
                 return None  # EOF
-            
+
+            if len(line) > self._MAX_HEADER_LINE_BYTES:
+                raise ValueError(
+                    f"Stdio header line too large ({len(line)} bytes); "
+                    "likely a framing error on the extension→worker channel"
+                )
+
             line_str = line.decode('utf-8', errors='ignore').strip()
             if line_str == "":
                 break # End of headers
-                
+
             if line_str.lower().startswith("content-length:"):
                 try:
                     content_length = int(line_str.split(":")[1].strip())
                 except ValueError:
                     raise ValueError(f"Invalid Content-Length header: {line_str}")
-                
+
         if content_length is None:
             # We reached \r\n\r\n but saw no Content-Length header, or EOF
             return None
-            
+
+        if content_length < 0 or content_length > 64 * 1024 * 1024:
+            raise ValueError(f"Refusing Content-Length={content_length}")
+
         body = await self._readexactly(content_length)
         if len(body) < content_length:
             return None # EOF before reading full body
-            
+
         return json.loads(body.decode('utf-8'))
         
     async def write_message(self, msg: Dict[str, Any]) -> None:

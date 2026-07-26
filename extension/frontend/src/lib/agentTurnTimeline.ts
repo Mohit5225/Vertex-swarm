@@ -22,8 +22,8 @@ import { type HilCardState } from './hilTypes'
 import {
   buildDeepPlanJobsFromEvents,
   deepPlanJobsSegmentIsLive,
-  DEEP_PLAN_TOOL_NAMES,
   extractDeepPlanToolFailure,
+  formatDeepPlanJobRowLabel,
   type DeepPlanJobRow,
 } from './deepPlanJobTimeline'
 
@@ -39,6 +39,7 @@ const HIDDEN_STATUS_PHASES = new Set([
   'assistant_output',
   'completed',
   'spawning_subagent',
+  'deep_plan_running',
 ])
 
 const EXPLORE_ACTIONS = new Set([
@@ -308,7 +309,7 @@ const injectDeepPlanJobsSegment = (
       return true
     }
     const toolName = segment.node.toolName
-    return !toolName || !DEEP_PLAN_TOOL_NAMES.has(toolName)
+    return toolName !== 'deep_plan_tool'
   })
 
   const jobSegment: TurnSegment = {
@@ -398,6 +399,7 @@ const reconcileTimelineWithContent = (
     return segments
   }
 
+  
   const narrativeFromEvents = segments
     .filter((segment): segment is Extract<TurnSegment, { kind: 'narrative' }> => segment.kind === 'narrative')
     .map((segment) => segment.text)
@@ -798,7 +800,7 @@ export const buildAgentTurnTimeline = (
         }
         continue
       }
-      if (node.toolName && DEEP_PLAN_TOOL_NAMES.has(node.toolName)) {
+      if (node.toolName === 'deep_plan_tool') {
         if (node.toolCallId) {
           skippedDeepPlanToolCallIds.add(node.toolCallId)
         }
@@ -1078,6 +1080,17 @@ export const getNodeDurationMs = (node: ToolExecutionNode) => {
 export const summarizeLiveActivity = (segments: TurnSegment[]): string | null => {
   for (let index = segments.length - 1; index >= 0; index -= 1) {
     const segment = segments[index]
+
+    if (segment.kind === 'deep_plan_jobs') {
+      const running = segment.jobs.find((job) => job.status === 'running')
+      if (running && segment.isLive) {
+        return formatDeepPlanJobRowLabel(running, true)
+      }
+      const failed = segment.jobs.find((job) => job.status === 'failed')
+      if (failed) {
+        return formatDeepPlanJobRowLabel(failed, false)
+      }
+    }
 
     if (segment.kind === 'explore') {
       const runningNode = segment.nodes.find((node) => node.state === 'running')

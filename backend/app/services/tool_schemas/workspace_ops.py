@@ -86,10 +86,6 @@ WORKSPACE_OPS_TOOL_SPEC: dict[str, Any] = {
                                 "additionalProperties": False,
                             }
                         },
-                        "expected_hash": {
-                            "type": "string",
-                            "description": "The hash of the file content before the edit. Required for edit_file."
-                        },
                         "files": {
                             "type": "array",
                             "description": "Array of files or folders to create. Required for create_file. Limit: max 5 files and max 1 folder per turn. Proactively think in good folder/file practices like good naming, standardized folder structures, etc.",

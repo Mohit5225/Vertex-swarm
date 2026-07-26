@@ -92,14 +92,15 @@ const handleExtensionMessage = (event: MessageEvent) => {
   switch (message?.type) {
     case "authenticated": {
       const { user } = message.payload;
-      // Keep loading:true so the UI stays on "Checking Configuration..." while
-      // syncWebviewConfig() finishes its async work before sending config-ready
-      // or config-missing. Without this, the Configure Provider screen flashes
-      // briefly on every sign-in (isAuthenticated=true, hasConfig=false, loading=false).
+      const prev = useConfigStore.getState();
+      // Keep loading:true only during first-time bootstrap (before config-ready).
+      // syncWebviewConfig() re-sends authenticated when respawning the backend
+      // mid-chat (e.g. start-stream); flipping loading there replaces ChatPanel
+      // with the full-screen logo instead of the in-chat "Preparing..." state.
       useConfigStore.setState({
         user,
         isAuthenticated: true,
-        loading: true,
+        loading: !prev.hasConfig,
         error: null,
       });
       break;
@@ -157,6 +158,17 @@ const handleExtensionMessage = (event: MessageEvent) => {
       const eventType = message.payload?.type;
       const metadata = message.payload?.metadata ?? {};
 
+      if (eventType === "status") {
+        const phase = metadata.phase;
+        if (
+          phase === "cancelled" ||
+          phase === "deep_plan_aborted" ||
+          phase === "preempted"
+        ) {
+          useDeepPlanStore.getState().releaseComposerLock();
+        }
+      }
+
       if (eventType === "deep_plan_mode_active" || eventType === "deep_plan_started") {
         useDeepPlanStore.getState().applyModeEvent(metadata);
         if (typeof metadata.pipeline_id === "string") {
@@ -164,6 +176,9 @@ const handleExtensionMessage = (event: MessageEvent) => {
         }
       } else if (eventType === "deep_plan_stage_status") {
         useDeepPlanStore.getState().applyStageStatus(metadata);
+        if (typeof metadata.pipeline_id === "string") {
+          useDeepPlanStore.getState().setPipelineId(metadata.pipeline_id);
+        }
       } else if (eventType === "deep_plan_ready") {
         useDeepPlanStore.getState().setPhase("awaiting_approval", "Awaiting approval");
       }
@@ -178,6 +193,7 @@ const handleExtensionMessage = (event: MessageEvent) => {
 
     case "stream-complete":
       useChatStore.getState().finishStreaming();
+      useDeepPlanStore.getState().releaseComposerLock();
       break;
 
     case "chat-list": {
@@ -295,6 +311,7 @@ const handleExtensionMessage = (event: MessageEvent) => {
 
     case "cancel-stream":
       useChatStore.getState().finishStreaming();
+      useDeepPlanStore.getState().releaseComposerLock();
       break;
 
     case "plan-ready":
@@ -333,6 +350,10 @@ const handleExtensionMessage = (event: MessageEvent) => {
         useChatStore.getState().isStreaming
       ) {
         useChatStore.getState().setError(message.payload);
+        useDeepPlanStore.getState().releaseComposerLock();
+        if (useConfigStore.getState().hasConfig) {
+          useConfigStore.setState({ loading: false });
+        }
       } else {
         useConfigStore.setState({
           error: message.payload,

@@ -65,22 +65,11 @@ export function extractWorkspaceOpsRequest(rawArgs) {
     throw new Error('workspace_ops.payload must be an object.');
   }
 
-  const expectedHash = readStringCandidate(
-    rawArgs.expected_hash,
-    payload.expected_hash
-  );
-  const expectedVersion = readStringCandidate(
-    rawArgs.expected_version,
-    payload.expected_version
-  );
-
   return {
     action,
     requestId,
     mode,
     payload,
-    expectedHash,
-    expectedVersion,
   };
 }
 

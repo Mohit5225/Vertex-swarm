@@ -1,11 +1,15 @@
 """Artifact paths, validation, and assembly helpers."""
 from __future__ import annotations
 
+import logging
+import shutil
 from pathlib import Path
 from typing import Any
 
-from .constants import INDEX_REL, MANIFEST_REL, REQUIREMENTS_REL
+from .constants import ARTIFACT_ROOT, INDEX_REL, MANIFEST_REL, REQUIREMENTS_REL
 from .manifest import parse_manifest_json
+
+logger = logging.getLogger(__name__)
 
 _MIN_REQUIREMENTS_CHARS = 200
 _REQUIRED_REQUIREMENTS_MARKERS = (
@@ -14,21 +18,81 @@ _REQUIRED_REQUIREMENTS_MARKERS = (
 )
 
 
+def _artifact_marker_index(path: str) -> int:
+    lowered = path.replace("\\", "/").lower()
+    return lowered.find(f"{ARTIFACT_ROOT.lower()}/")
+
+
+def normalize_rel_path(relative: str | None, default: str) -> str:
+    raw = (relative or default).replace("\\", "/").strip()
+    marker = _artifact_marker_index(raw)
+    if marker > 0:
+        # workspace_ops writes under the repo; deep_plan_tool reads chat storage.
+        # Accept absolute paths like c:/proj/plan_pipeline/01_requirements.md.
+        raw = raw[marker:]
+    raw = raw.lstrip("/")
+    if ".." in raw.split("/"):
+        raise ValueError(f"invalid path: {relative!r}")
+    if not raw.startswith(f"{ARTIFACT_ROOT}/"):
+        raise ValueError(
+            f"artifact path must be under {ARTIFACT_ROOT}/ (got {relative!r})"
+        )
+    return raw
+
+
 def resolve_artifact_path(chat_dir: Path, relative: str) -> Path:
-    rel = relative.replace("\\", "/").lstrip("/")
-    if ".." in rel.split("/"):
-        raise ValueError(f"invalid artifact path: {relative!r}")
+    rel = normalize_rel_path(relative, relative)
     target = chat_dir / rel
-    if not str(target.resolve()).startswith(str(chat_dir.resolve())):
+    chat_resolved = chat_dir.resolve()
+    target_resolved = target.resolve()
+    if target_resolved != chat_resolved and chat_resolved not in target_resolved.parents:
         raise ValueError(f"artifact path escapes chat dir: {relative!r}")
     return target
 
 
-def normalize_rel_path(relative: str | None, default: str) -> str:
-    raw = (relative or default).replace("\\", "/").lstrip("/")
-    if ".." in raw.split("/"):
-        raise ValueError(f"invalid path: {relative!r}")
-    return raw
+def sync_plan_pipeline_from_workspace(
+    workspace_roots: list[str],
+    chat_dir: Path,
+) -> list[str]:
+    """Copy plan_pipeline/ from open workspace folders into chat storage.
+
+    workspace_ops writes artifacts under the VS Code workspace root; deep_plan_tool
+    validates under ~/.vertex-swarm/chats/<chat_id>/plan_pipeline/.
+    """
+    copied: list[str] = []
+    dest_root = chat_dir / ARTIFACT_ROOT
+    for root_str in workspace_roots:
+        src_root = Path(root_str) / ARTIFACT_ROOT
+        if not src_root.is_dir():
+            continue
+        for src_path in sorted(src_root.rglob("*")):
+            if not src_path.is_file():
+                continue
+            rel = src_path.relative_to(src_root)
+            dest = dest_root / rel
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            if not dest.exists() or src_path.stat().st_mtime > dest.stat().st_mtime:
+                shutil.copy2(src_path, dest)
+                copied.append(str((Path(ARTIFACT_ROOT) / rel).as_posix()))
+    if copied:
+        logger.info(
+            "Synced plan_pipeline from workspace to chat dir chat_id=%s files=%s",
+            chat_dir.name,
+            copied,
+        )
+    return copied
+
+
+def workspace_roots_from_context(context: dict[str, Any] | None) -> list[str]:
+    if not isinstance(context, dict):
+        return []
+    req_ctx = context.get("request_context")
+    if not isinstance(req_ctx, dict):
+        return []
+    folders = req_ctx.get("workspaceFolders")
+    if not isinstance(folders, list):
+        return []
+    return [folder for folder in folders if isinstance(folder, str) and folder.strip()]
 
 
 async def read_text_file(path: Path) -> str | None:
@@ -63,11 +127,18 @@ async def validate_handoff(
     *,
     requirements_path: str,
     manifest_path: str,
+    workspace_roots: list[str] | None = None,
 ) -> tuple[dict[str, Any] | None, dict[str, Any] | None, list[str]]:
     """Return (requirements_meta, manifest_dict, errors)."""
+    if workspace_roots:
+        sync_plan_pipeline_from_workspace(workspace_roots, chat_dir)
+
     errors: list[str] = []
-    req_path = resolve_artifact_path(chat_dir, requirements_path)
-    man_path = resolve_artifact_path(chat_dir, manifest_path)
+    try:
+        req_path = resolve_artifact_path(chat_dir, requirements_path)
+        man_path = resolve_artifact_path(chat_dir, manifest_path)
+    except ValueError as exc:
+        return None, None, [str(exc)]
 
     req_content = await read_text_file(req_path)
     if req_content is None:

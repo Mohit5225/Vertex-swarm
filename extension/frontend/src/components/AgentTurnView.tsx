@@ -15,6 +15,7 @@ import {
   summarizeTurnRollup,
   turnHasLiveWork,
 } from '../lib/agentTurnTimeline'
+import { isSpawnRowToolName } from '../lib/subagentTrace'
 import { type SessionEvent } from '../store/chatStore'
 import CollapsibleWorkRow from './CollapsibleWorkRow'
 import DeepPlanJobList from './DeepPlanJobList'
@@ -282,7 +283,10 @@ const AgentTurnView: React.FC<Props> = ({
         }
 
         if (segment.kind === 'tool') {
-          if (segment.node.toolName === 'spawn_subagent' && messageId) {
+          if (
+            isSpawnRowToolName(segment.node.toolName) &&
+            messageId
+          ) {
             return (
               <SpawnSubagentRow
                 key={segment.id}
@@ -316,6 +320,7 @@ const AgentTurnView: React.FC<Props> = ({
               pipelineError={segment.pipelineError}
               isLive={segment.isLive}
               messageId={messageId}
+              events={events}
             />
           )
         }

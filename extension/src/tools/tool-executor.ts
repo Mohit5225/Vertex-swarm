@@ -20,6 +20,7 @@ export class ToolExecutor {
       requestId?: string;
     }
   >();
+  private isAborted: (toolCallId: string) => boolean = () => false;
 
   constructor(
     private readonly fileSystemService: FileSystemService,
@@ -27,6 +28,16 @@ export class ToolExecutor {
     private readonly snapshotManager: ISnapshotManager,
     private readonly log: (message: string) => void = () => undefined
   ) { }
+
+  setAbortChecker(isAborted: (toolCallId: string) => boolean): void {
+    this.isAborted = isAborted;
+  }
+
+  private assertNotAborted(toolCallId: string): void {
+    if (this.isAborted(toolCallId)) {
+      throw new Error('Tool execution aborted.');
+    }
+  }
 
   async handle(message: ToolCallPayload): Promise<ToolResult> {
     this.log(
@@ -37,6 +48,7 @@ export class ToolExecutor {
       session_id: message.session_id,
       chat_id: message.chat_id,
       message_id: message.message_id,
+      should_abort: () => this.isAborted(message.tool_call_id),
     };
 
     let toolResult: ToolResult;
@@ -91,6 +103,7 @@ export class ToolExecutor {
           execution_time_ms: 0,
         };
       } else if (resolvedToolName === 'terminal_ops') {
+        this.assertNotAborted(context.tool_call_id);
         this.normalizePayload(resolvedArgs);
         toolResult = await this.terminalService.execute(resolvedArgs, context);
       } else {
@@ -111,11 +124,13 @@ export class ToolExecutor {
 
         let beforeStates = new Map<string, import('../changes/file-content-state').FileContentState>();
         if (isMutation && isApply && fileUris.length > 0) {
+          this.assertNotAborted(context.tool_call_id);
           beforeStates = await this.changeRecorder.captureBeforeStates(fileUris);
         }
 
         // Snapshot layer — undo/review only; independent of summary ledger.
         if (isMutation && isApply && fileUris.length > 0) {
+          this.assertNotAborted(context.tool_call_id);
           try {
             await this.snapshotManager.createSnapshot(fileUris, {
               sessionId: context.session_id,
@@ -130,31 +145,63 @@ export class ToolExecutor {
           }
         }
 
+        this.assertNotAborted(context.tool_call_id);
         toolResult = await this.fileSystemService.workspace_ops(resolvedArgs, context);
+        if (this.isAborted(context.tool_call_id)) {
+          toolResult = {
+            tool_name: message.tool_name,
+            tool_call_id: context.tool_call_id,
+            session_id: context.session_id,
+            chat_id: context.chat_id,
+            message_id: context.message_id,
+            status: 'cancelled',
+            content: 'Tool execution aborted.',
+            error_code: 'aborted',
+            execution_time_ms: 0,
+          };
+        }
 
         // Defer diff/snapshot ledger — ack RPC immediately after disk apply.
         if (toolResult.status === 'success' && isMutation && isApply && fileUris.length > 0) {
-          this.pendingChangeCapture.set(context.tool_call_id, {
-            action,
-            payload,
-            fileUris,
-            beforeStates,
-            requestId: this.optionalStringArg(resolvedArgs.request_id),
-          });
+          if (this.isAborted(context.tool_call_id)) {
+            this.log(`skipping change capture for aborted tool_call_id=${context.tool_call_id}`);
+          } else {
+            this.pendingChangeCapture.set(context.tool_call_id, {
+              action,
+              payload,
+              fileUris,
+              beforeStates,
+              requestId: this.optionalStringArg(resolvedArgs.request_id),
+            });
+          }
         }
       }
     } catch (error) {
-      toolResult = {
-        tool_name: message.tool_name,
-        tool_call_id: context.tool_call_id,
-        session_id: context.session_id,
-        chat_id: context.chat_id,
-        message_id: context.message_id,
-        status: 'error',
-        content: `Error executing tool: ${error instanceof Error ? error.message : String(error)}`,
-        error_code: 'EXECUTION_ERROR',
-        execution_time_ms: 0,
-      };
+      if (this.isAborted(context.tool_call_id)) {
+        toolResult = {
+          tool_name: message.tool_name,
+          tool_call_id: context.tool_call_id,
+          session_id: context.session_id,
+          chat_id: context.chat_id,
+          message_id: context.message_id,
+          status: 'cancelled',
+          content: 'Tool execution aborted.',
+          error_code: 'aborted',
+          execution_time_ms: 0,
+        };
+      } else {
+        toolResult = {
+          tool_name: message.tool_name,
+          tool_call_id: context.tool_call_id,
+          session_id: context.session_id,
+          chat_id: context.chat_id,
+          message_id: context.message_id,
+          status: 'error',
+          content: `Error executing tool: ${error instanceof Error ? error.message : String(error)}`,
+          error_code: 'EXECUTION_ERROR',
+          execution_time_ms: 0,
+        };
+      }
     }
 
     this.log(

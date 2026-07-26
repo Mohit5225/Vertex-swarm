@@ -5,13 +5,11 @@
 workspace_ops is the single source of truth for all file system operations.
 Every call requires: action, request_id, mode, payload.
 
-**Never write files via the terminal.** Do not use `echo`, `Set-Content`, `Out-File`, `tee`, or heredocs in `terminal_ops` to create or edit source files. Use `create_file` and `edit_file` here instead — they are faster, hash-safe, and do not open the user's terminal.
+**Never write files via the terminal.** Do not use `echo`, `Set-Content`, `Out-File`, `tee`, or heredocs in `terminal_ops` to create or edit source files. Use `create_file` and `edit_file` here instead — they are faster, reliable, and do not open the user's terminal.
 
 ---
 
-### HASH-BASED CONCURRENCY PROTOCOL (MANDATORY)
-
-Your mutations MUST include `expected_hash`. This is your contract with the file system.
+### FILE EDIT WORKFLOW
 
 **STEP 1: READ THE FILE(S)**
 Determine your reading strategy based on the overall objective. Sequential reading (one-by-one) is slow and inefficient.
@@ -20,28 +18,19 @@ Determine your reading strategy based on the overall objective. Sequential readi
 - Use when: Your overall task objective implies you will need the context of multiple files. Since you already have the folder structure, group your reads together to minimize latency.
 - Flexibility & Limits: You are heavily encouraged to batch your file reads in intelligent batches (up to 5 files at once). The total batch has a 100KB limit; if exceeded, the result is truncated, so group files strategically.
 - Action: `bulk_files_read`, mode: `preview`, payload: `{ paths: ["path/1.py", "path/2.py"] }`
-- Hash Handling: The response contains an array at `data.files`. EACH file object contains its own `current_hash`. Map the hash to the specific file for editing.
+- The response contains an array at `data.files`. Each file object contains its `content`.
 
 *Option B: Single File Read (`read_file`)*
 - Use when: You are **certain** that you need only ONE specific file for the overall objective, or you need to paginate through a single massive file that would otherwise break the 100KB bulk limit.
 - Action: `read_file`, mode: `preview`, payload: `{ path, startLine?, endLine? }`
-- Hash Handling: The response JSON contains `data.current_hash`. Extract and save this hash.
-
-- CRITICAL: A `current_hash` is ALWAYS present in a successful read response. Do NOT use a placeholder. Do NOT skip this step. Do NOT proceed to edit without a real hash string.
 
 **STEP 2: PLAN YOUR EDIT**
-- Decide what to change. Keep the exact hash string in memory — you will paste it verbatim.
+- Decide what to change based on the file content you read.
 
 **STEP 3: APPLY THE EDIT**
 - Call workspace_ops with action: `edit_file`, mode: `apply`
-- payload: `{ path, edits: [...], expected_hash: "<the exact hash string from Step 1>" }`
-- NEVER omit expected_hash. NEVER write a placeholder like `<hash_placeholder>`. NEVER fabricate a hash. NEVER reuse a stale hash.
-
-**STEP 4: CHECK THE RESULT**
-- `{ "status": "success" }` → done.
-- `{ "error_code": "HASH_CONFLICT" }` → file changed since your read. The response includes `conflict.current_version` with the current hash. Re-read the file (Step 1) to get the latest content and hash, then retry the edit.
-- `{ "error_code": "MISSING_CONCURRENCY_GUARD" }` → you forgot expected_hash or used a placeholder. Go back to your last read_file response, read `data.current_hash`, and include it now.
-- `{ "error_code": "CONFLICTING_CONCURRENCY_GUARDS" }` → you sent both expected_hash and expected_version. Use only expected_hash.
+- payload: `{ path, edits: [...] }`
+- Always read the file first so `targetContent` matches the file exactly.
 
 ---
 
@@ -86,8 +75,8 @@ To save roundtrips, search for multiple unrelated terms at once by providing `mu
 - action: `list_dir` | payload `{ path }` — use `"."` for root
 - action: `search_text` | payload `{ query, multiple_queries?, filePattern?, useRegex? }` — for file CONTENTS only, not filenames
 - action: `read_file` | payload `{ path, startLine?, endLine? }`
-- action: `bulk_files_read` | payload `{ paths: ["path1", "path2"] }` — Bulk read up to 5 files at once. Each returned file object contains its own `current_hash` and `content`. Use this when you need to read multiple files together. If the batch exceeds 100KB, it will be truncated.
-- action: `edit_file` | payload `{ path, edits:[...], expected_hash }` — always mode: apply
+- action: `bulk_files_read` | payload `{ paths: ["path1", "path2"] }` — Bulk read up to 5 files at once. Each returned file object contains its `content`. Use this when you need to read multiple files together. If the batch exceeds 100KB, it will be truncated.
+- action: `edit_file` | payload `{ path, edits:[...] }` — always mode: apply
   - Each edit: `{ targetContent, replacementContent, startLine, endLine, allowMultiple? }`
   - `targetContent`: The exact string of code currently in the file to replace. Must include exact whitespace/indentation.
   - `replacementContent`: The new code to drop in.
@@ -112,6 +101,4 @@ The same logical change across retries must have the same request_id. This is yo
 
 - Never retry a failed action with the same arguments.
 - If `EDIT_RETRY_BLOCKED`: you must run a discovery call before retrying `edit_file` on that path. Qualifying calls: `read_file` or `bulk_files_read` on that path, `search_text` that returns hits for that path, or a successful `create_file` / `delete_path` / `rename_path` that touches that path. Blind retries are rejected server-side.
-- If HASH_CONFLICT: re-read, get new hash, retry.
-- If MISSING_CONCURRENCY_GUARD: find `data.current_hash` from your last `workspace_ops` result (action `read_file` or per-file hash from `bulk_files_read`) and include it as `expected_hash`.
 - If a tool returns empty or unexpected data twice: stop and report to user. Do not loop.

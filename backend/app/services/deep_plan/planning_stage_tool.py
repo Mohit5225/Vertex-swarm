@@ -42,6 +42,7 @@ async def execute_run_planning_stage(
     pipeline_id: str,
     manifest: dict[str, Any],
     requirements_path: str,
+    spawn_tool_call_id: str | None = None,
 ) -> tuple[str, str, dict[str, Any] | None]:
     """Run one stage on Vertex's behalf. Returns (status, content, data)."""
     stage_id = str(stage_id or "").strip()
@@ -50,7 +51,7 @@ async def execute_run_planning_stage(
     if not stage_id or not pipeline_id:
         return ("error", "stage_id and pipeline_id are required.", {"error_code": "validation_error"})
 
-    if deep_o._parent.is_pipeline_abort_requested(deep_o._chat_id):
+    if deep_o._parent.is_run_cancel_requested(deep_o._pipeline_run_id):
         return (
             "error",
             "Deep plan aborted by user.",
@@ -170,7 +171,7 @@ async def execute_run_planning_stage(
     await record_stage_running(deep_o._parent, deep_o._chat_id, stage_id)
     await deep_o.emit_stage(pipeline_id, stage_id, "running", label=label)
 
-    if deep_o._parent.is_pipeline_abort_requested(deep_o._chat_id):
+    if deep_o._parent.is_run_cancel_requested(deep_o._pipeline_run_id):
         return (
             "error",
             "Deep plan aborted by user.",
@@ -192,9 +193,10 @@ async def execute_run_planning_stage(
         manifest=manifest,
         requirements_path=requirements_path,
         prior_artifacts=prior_artifacts,
+        spawn_tool_call_id=spawn_tool_call_id,
     )
 
-    if deep_o._parent.is_pipeline_abort_requested(deep_o._chat_id):
+    if deep_o._parent.is_run_cancel_requested(deep_o._pipeline_run_id):
         return (
             "error",
             "Deep plan aborted by user.",

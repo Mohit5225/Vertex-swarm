@@ -63,3 +63,4 @@ Thumbs.db
 *.log
 *.log.*
 backend/logs/
+extension/src/debug-log.ts

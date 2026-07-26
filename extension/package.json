@@ -67,6 +67,11 @@
         "command": "vertex-swarm.requestLogout",
         "title": "Sign Out",
         "icon": "$(sign-out)"
+      },
+      {
+        "command": "vertex-swarm.showLogs",
+        "title": "Vertex Swarm: Open Debug Logs",
+        "icon": "$(output)"
       }
     ],
     "menus": {
@@ -85,6 +90,11 @@
           "command": "vertex-swarm.requestLogout",
           "when": "view == vertex-swarm.sidebar",
           "group": "navigation@3"
+        },
+        {
+          "command": "vertex-swarm.showLogs",
+          "when": "view == vertex-swarm.sidebar",
+          "group": "navigation@4"
         }
       ]
     },
