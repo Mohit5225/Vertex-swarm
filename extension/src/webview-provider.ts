@@ -1,4 +1,6 @@
 import * as vscode from 'vscode';
+import * as os from 'os';
+import * as path from 'path';
 import { ConfigManager } from './config-manager';
 import { EntitlementClient } from './auth/entitlement-client';
 import { VertexSwarmChatRuntime } from './chat-runtime';
@@ -35,6 +37,12 @@ export class VertexSwarmSidebarProvider implements vscode.WebviewViewProvider {
       planDocumentProvider,
       postMessage: (message: object) => this.post(message),
       processManager,
+      toWebviewUri: (filePath: string) => {
+        if (!this.webviewView) {
+          return '';
+        }
+        return this.webviewView.webview.asWebviewUri(vscode.Uri.file(filePath)).toString();
+      },
     });
     this.context = context;
   }
@@ -54,6 +62,7 @@ export class VertexSwarmSidebarProvider implements vscode.WebviewViewProvider {
       localResourceRoots: [
         vscode.Uri.joinPath(this.extensionUri, 'frontend', 'dist'),
         vscode.Uri.joinPath(this.extensionUri, 'frontend', 'dist', 'assets'),
+        vscode.Uri.file(path.join(os.homedir(), '.vertex-swarm', 'chats')),
       ],
     };
 
@@ -122,7 +131,7 @@ export class VertexSwarmSidebarProvider implements vscode.WebviewViewProvider {
         content="default-src 'none';
                  style-src ${webview.cspSource} 'unsafe-inline';
                  script-src 'nonce-${nonce}';
-                 img-src ${webview.cspSource} data:;
+                 img-src ${webview.cspSource} data: blob:;
                  font-src ${webview.cspSource};" />
   <style>
     html, body, #root {

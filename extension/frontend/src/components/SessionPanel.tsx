@@ -1,6 +1,8 @@
 import React from 'react'
 import { ChevronRight, LogOut, Plus, Settings2 } from 'lucide-react'
 import type { VertexConfig } from '../store/configStore'
+import type { ContextPolicyData } from '../lib/contextPolicyTypes'
+import ContextPolicySection from './ContextPolicySection'
 
 const RETENTION_DAYS = [1, 2, 3, 4, 5, 6, 7] as const
 
@@ -10,7 +12,9 @@ interface SessionPanelProps {
   isStreaming: boolean
   hasMessages: boolean
   snapshotRetentionDays: number
+  contextPolicy: ContextPolicyData
   onSnapshotRetentionChange: (days: number) => void
+  onContextPolicyChange: (policy: ContextPolicyData) => void
   onNewTask: () => void
   onReconfigure: () => void
   onSignOut: () => void
@@ -22,7 +26,9 @@ const SessionPanel: React.FC<SessionPanelProps> = ({
   isStreaming,
   hasMessages,
   snapshotRetentionDays,
+  contextPolicy,
   onSnapshotRetentionChange,
+  onContextPolicyChange,
   onNewTask,
   onReconfigure,
   onSignOut,
@@ -67,6 +73,13 @@ const SessionPanel: React.FC<SessionPanelProps> = ({
           })}
         </div>
       </div>
+
+      <div className="popover-divider" />
+
+      <ContextPolicySection
+        policy={contextPolicy}
+        onChange={onContextPolicyChange}
+      />
 
       {hasMessages ? (
         <>

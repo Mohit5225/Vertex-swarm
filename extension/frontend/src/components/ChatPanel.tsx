@@ -10,6 +10,8 @@ import { ChevronDown, Undo2 } from 'lucide-react'
 import TodoWidget from './TodoWidget'
 import AgentTracePanel from './AgentTracePanel'
 import { useAgentPanelStore } from '../store/agentPanelStore'
+import { useContextPolicyStore } from '../store/contextPolicyStore'
+import type { ContextPolicyData } from '../lib/contextPolicyTypes'
 
 import { collectMessageFileChanges } from '../lib/messageDiffs'
 import {
@@ -213,6 +215,8 @@ const ChatPanel: React.FC = () => {
   const [showSessionPanel, setShowSessionPanel] = useState(false)
   const [showHistoryPanel, setShowHistoryPanel] = useState(false)
   const [snapshotRetentionDays, setSnapshotRetentionDays] = useState(7)
+  const contextPolicy = useContextPolicyStore((state) => state.policy)
+  const setContextPolicy = useContextPolicyStore((state) => state.setPolicy)
   const messagesScrollRef = useRef<HTMLDivElement>(null)
   const messagesEndRef = useRef<HTMLDivElement>(null)
   const stickToBottomRef = useRef(true)
@@ -351,15 +355,29 @@ const ChatPanel: React.FC = () => {
             setSnapshotRetentionDays(message.payload.snapshotRetentionDays);
           }
           break;
+        case 'context-policy-state':
+          if (message.payload) {
+            setContextPolicy(message.payload as ContextPolicyData);
+          }
+          break;
       }
     };
     window.addEventListener('message', handleMessage);
 
     // Request initial config
     getVsCodeApi()?.postMessage({ type: 'get-config' });
+    getVsCodeApi()?.postMessage({ type: 'get-context-policy' });
 
     return () => window.removeEventListener('message', handleMessage);
-  }, []);
+  }, [setContextPolicy]);
+
+  const handleContextPolicyChange = (policy: ContextPolicyData) => {
+    setContextPolicy(policy)
+    getVsCodeApi()?.postMessage({
+      type: 'set-context-policy',
+      payload: policy,
+    })
+  }
 
   const handleConfirmLogout = () => {
     setShowLogoutConfirm(false)
@@ -458,6 +476,7 @@ const ChatPanel: React.FC = () => {
             isStreaming={isStreaming}
             hasMessages={messages.length > 0}
             snapshotRetentionDays={snapshotRetentionDays}
+            contextPolicy={contextPolicy}
             onSnapshotRetentionChange={(days) => {
               setSnapshotRetentionDays(days)
               getVsCodeApi()?.postMessage({
@@ -465,6 +484,7 @@ const ChatPanel: React.FC = () => {
                 payload: { snapshotRetentionDays: days },
               })
             }}
+            onContextPolicyChange={handleContextPolicyChange}
             onNewTask={handleStartFresh}
             onReconfigure={() => {
               setShowSessionPanel(false)

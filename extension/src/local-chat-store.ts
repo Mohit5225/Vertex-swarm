@@ -65,6 +65,7 @@ export class LocalChatStore {
           role: parsed.role || 'user',
           content: parsed.content || '',
           events: parsed.events || [],
+          attachments: Array.isArray(parsed.attachments) ? parsed.attachments : [],
           createdAt: parsed.created_at || parsed.timestamp || new Date().toISOString(),
           turn_duration_ms:
             typeof parsed.turn_duration_ms === 'number'
@@ -124,6 +125,27 @@ export class LocalChatStore {
     } catch {
       return null;
     }
+  }
+
+  public async clearActiveToolCategories(chatId: string): Promise<void> {
+    const session = await this.loadSession(chatId);
+    if (!session) {
+      return;
+    }
+    const workingMemory =
+      session.working_memory && typeof session.working_memory === 'object'
+        ? (session.working_memory as Record<string, unknown>)
+        : null;
+    if (!workingMemory || !Array.isArray(workingMemory.active_tool_categories)) {
+      return;
+    }
+    workingMemory.active_tool_categories = [];
+    await this.writeSession(chatId, session);
+  }
+
+  private async writeSession(chatId: string, session: Record<string, unknown>): Promise<void> {
+    const sessionPath = path.join(this.chatsDir, chatId, 'session.json');
+    await fs.writeFile(sessionPath, JSON.stringify(session, null, 2), 'utf8');
   }
 
   public async getIdeContextEnabled(chatId: string): Promise<boolean> {

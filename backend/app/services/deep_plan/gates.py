@@ -31,19 +31,47 @@ _PLANNING_GATE_YES_IDS = frozenset(
 
 
 async def read_session_state(orchestrator: LLMOrchestrator, chat_id: str) -> dict[str, Any]:
-    state: dict[str, Any] = {}
+    """Read session state, merging NATS and file_store working_memory.
+
+    NATS is the hot path; session.json is the durable fallback. When both are
+    present we union their working_memory so neither store can silently drop
+    keys the other wrote (e.g. active_tool_categories persisted to file while
+    NATS was stale).
+    """
+    nats_state: dict[str, Any] = {}
     try:
         state_str = await orchestrator.nats.kv_get("SESSIONS", f"session.{chat_id}")
         if state_str:
-            state = json.loads(state_str)
+            nats_state = json.loads(state_str)
     except Exception:
         logger.exception("Failed to read session from NATS chat_id=%s", chat_id)
 
-    if not state:
-        file_state = await orchestrator.file_store.read_session(chat_id)
-        if isinstance(file_state, dict):
-            state = file_state
-    return state
+    file_state = await orchestrator.file_store.read_session(chat_id)
+    if not isinstance(file_state, dict):
+        file_state = {}
+
+    if not nats_state and not file_state:
+        return {}
+
+    # Start from file (durable) then overlay NATS (hot) for top-level keys.
+    merged: dict[str, Any] = {**file_state, **nats_state}
+
+    nats_wm = nats_state.get("working_memory") if isinstance(nats_state.get("working_memory"), dict) else {}
+    file_wm = file_state.get("working_memory") if isinstance(file_state.get("working_memory"), dict) else {}
+    merged_wm: dict[str, Any] = {**file_wm, **nats_wm}
+
+    # active_tool_categories: union both sources (order-preserving).
+    nats_cats = nats_wm.get("active_tool_categories")
+    file_cats = file_wm.get("active_tool_categories")
+    if isinstance(nats_cats, list) or isinstance(file_cats, list):
+        merged_cats = list(dict.fromkeys(
+            [c for c in (nats_cats or []) if isinstance(c, str)]
+            + [c for c in (file_cats or []) if isinstance(c, str)]
+        ))
+        merged_wm["active_tool_categories"] = merged_cats
+
+    merged["working_memory"] = merged_wm
+    return merged
 
 
 async def persist_session_state(orchestrator: LLMOrchestrator, chat_id: str, state: dict[str, Any]) -> None:

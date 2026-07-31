@@ -11,6 +11,9 @@ import { TerminalService, JobCompletionEvent } from './tools/terminal-service';
 import { createRequestContext } from './request-context';
 import { PlanDocumentProvider } from './plan-document-provider';
 import { LocalChatStore } from './local-chat-store';
+import { AttachmentStore } from './attachment-store';
+import { ContextPolicyStore } from './context-policy';
+import type { ContextPolicyData } from './types/index';
 import { EntitlementClient } from './auth/entitlement-client';
 import type {
   WebviewToExtensionMessage,
@@ -24,8 +27,15 @@ import type {
   ChatMessageData,
   ToolCallPayload,
   ToolResult,
+  ChatAttachmentPayload,
+  ChatAttachmentData,
 } from './types/index';
 import { debugLog } from './debug-log';
+import {
+  mergeLoadedToolCategories,
+  parseActiveToolCategoriesFromWorkingMemory,
+  parseLoadedCategoriesFromEvent,
+} from './loaded-tool-categories';
 
 
 export interface VertexSwarmChatRuntimeOptions {
@@ -37,6 +47,8 @@ export interface VertexSwarmChatRuntimeOptions {
   postMessage: (message: object) => void;
   planDocumentProvider?: PlanDocumentProvider;
   processManager: VertexProcessManager;
+  /** Resolve a local attachment file path to a webview-safe URI */
+  toWebviewUri?: (filePath: string) => string;
 }
 
 export class VertexSwarmChatRuntime {
@@ -58,6 +70,8 @@ export class VertexSwarmChatRuntime {
   }
 
   private readonly chatStore = new LocalChatStore();
+  private readonly attachmentStore = new AttachmentStore();
+  private readonly contextPolicyStore = new ContextPolicyStore();
   private readonly entitlementClient: EntitlementClient;
   private readonly configManager: ConfigManager;
   private readonly context: vscode.ExtensionContext;
@@ -73,10 +87,16 @@ export class VertexSwarmChatRuntime {
   private readonly processedToolCallIds = new Set<string>();
   private readonly abortedToolCallIds = new Set<string>();
   private readonly inFlightToolCalls = new Map<string, ToolCallPayload>();
+  /** Loaded tool categories per chat — survives across user turns in-process. */
+  private readonly loadedToolCategoriesByChat = new Map<string, string[]>();
 
   private processManager: VertexProcessManager;
+  private readonly toWebviewUri?: (filePath: string) => string;
   private currentChatId: string | null = null;
   private streamCancellationRequested: boolean = false;
+  /** Latest webview turn id; stale worker `done` from a preempted turn must not match. */
+  private activeClientTurnId: string | null = null;
+  private clientTurnSerial = 0;
   private staticContext: { os: string; workspaceFolders: string[] } | null = null;
   private lastRegisteredRpcClient: any = null;
   private sessionMaintenanceInterval?: NodeJS.Timeout;
@@ -130,10 +150,12 @@ export class VertexSwarmChatRuntime {
         this.streamCancellationRequested || this.abortedToolCallIds.has(toolCallId)
     );
     this.processManager = options.processManager;
+    this.toWebviewUri = options.toWebviewUri;
     this.processManager.onBackendDied((reason) => {
       this.log(`Backend died under us: ${reason}`);
       this.lastRegisteredRpcClient = null;
       this.streamCancellationRequested = true;
+      this.activeClientTurnId = null;
       this.clearStreamStallWatch();
       this.post({
         type: 'error',
@@ -166,6 +188,12 @@ export class VertexSwarmChatRuntime {
           if (this.processManager.rpcClient) {
             this.processManager.rpcClient.sendNotification('config/update_keys', { entitlement_token: refreshed });
           }
+        } else {
+          this.log(
+            check.exp * 1000 < Date.now()
+              ? 'Background session maintenance: refresh failed and access token is expired'
+              : 'Background session maintenance: refresh failed; will retry while access token is still valid'
+          );
         }
       }
     } catch (e) {
@@ -185,6 +213,14 @@ export class VertexSwarmChatRuntime {
     this.streamStallChatId = null;
     this.lastStreamEventAt = 0;
     this.lastStallUiPostAt = 0;
+  }
+
+  private completeClientTurn(clientTurnId: string): void {
+    if (this.activeClientTurnId === clientTurnId) {
+      this.activeClientTurnId = null;
+    }
+    this.clearStreamStallWatch();
+    this.post({ type: 'stream-complete' });
   }
 
   private startStreamStallWatch(chatId: string): void {
@@ -435,6 +471,8 @@ export class VertexSwarmChatRuntime {
       case 'start-stream': {
         this.streamCancellationRequested = false;
         const payload = message.payload as StreamStartPayload;
+        const clientTurnId = `ct_${Date.now()}_${++this.clientTurnSerial}`;
+        this.activeClientTurnId = clientTurnId;
 
         try {
           let token = await this.entitlementClient.getToken();
@@ -458,7 +496,7 @@ export class VertexSwarmChatRuntime {
 
           if (!token) {
             this.post({ type: 'auth-required' });
-            this.post({ type: 'stream-complete' });
+            this.completeClientTurn(clientTurnId);
             return;
           }
 
@@ -470,18 +508,19 @@ export class VertexSwarmChatRuntime {
           const streamMessage = parsed.message;
           const chatId = this.currentChatId ?? await this.createChat(ideContextEnabled);
 
-          if (this.streamCancellationRequested) {
+          if (this.streamCancellationRequested || this.activeClientTurnId !== clientTurnId) {
             this.log(`Stream cancelled before creation finished`);
-            this.post({ type: 'stream-complete' });
+            this.completeClientTurn(clientTurnId);
             return;
           }
 
           this.log(
-            `starting chat stream chat_id=${chatId ?? 'unknown'} ide_context_enabled=${ideContextEnabled} deep_plan=${deepPlanRequested}`
+            `starting chat stream chat_id=${chatId ?? 'unknown'} ide_context_enabled=${ideContextEnabled} deep_plan=${deepPlanRequested} client_turn_id=${clientTurnId}`
           );
 
           if (!chatId) {
             this.post({ type: 'error', payload: 'Failed to create chat' });
+            this.completeClientTurn(clientTurnId);
             return;
           }
 
@@ -492,9 +531,9 @@ export class VertexSwarmChatRuntime {
             ? await this.workspaceStore.getSkeleton()
             : undefined;
 
-          if (this.streamCancellationRequested) {
+          if (this.streamCancellationRequested || this.activeClientTurnId !== clientTurnId) {
             this.log(`Stream cancelled while fetching skeleton`);
-            this.post({ type: 'stream-complete' });
+            this.completeClientTurn(clientTurnId);
             return;
           }
 
@@ -504,7 +543,7 @@ export class VertexSwarmChatRuntime {
             if (!success || !this.processManager.rpcClient) {
               // syncWebviewConfig already posts the appropriate auth-required or error UI
               this.log('stream start aborted: backend unavailable after respawn attempt');
-              this.post({ type: 'stream-complete' });
+              this.completeClientTurn(clientTurnId);
               return;
             }
           }
@@ -548,6 +587,50 @@ export class VertexSwarmChatRuntime {
             });
           }
 
+          if (this.activeClientTurnId !== clientTurnId) {
+            this.log(`Superseded before session/start client_turn_id=${clientTurnId}`);
+            return;
+          }
+
+          const activeToolCategories = await this.getActiveToolCategoriesForChat(chatId);
+
+          let savedAttachments: ChatAttachmentData[] = [];
+          const incomingAttachments = Array.isArray(payload.attachments)
+            ? (payload.attachments as ChatAttachmentPayload[])
+            : [];
+
+          if (incomingAttachments.length > 0) {
+            const savePolicy = await this.contextPolicyStore.load();
+            const records = await this.attachmentStore.saveAttachments(
+              chatId,
+              incomingAttachments,
+              {
+                maxFileBytes: savePolicy.images.save_max_bytes,
+                maxCountPerMessage: savePolicy.images.save_max_count,
+              },
+            );
+            savedAttachments = this.resolveAttachmentUris(chatId, records);
+            if (payload.tempId) {
+              this.post({
+                type: 'attachments-resolved',
+                payload: {
+                  tempId: payload.tempId,
+                  attachments: savedAttachments,
+                },
+              });
+            }
+          }
+
+          const attachmentPayload = savedAttachments.map(
+            ({ id, filename, mimeType, size, relativePath }) => ({
+              id,
+              filename,
+              mimeType,
+              size,
+              relativePath,
+            }),
+          );
+
           this.processManager.rpcClient.sendNotification('session/start', {
             chat_id: chatId,
             message: streamMessage,
@@ -555,8 +638,13 @@ export class VertexSwarmChatRuntime {
             workspace_skeleton: workspaceSkeleton,
             request_context: requestContext,
             deep_plan_requested: deepPlanRequested,
+            client_turn_id: clientTurnId,
+            active_tool_categories: activeToolCategories,
+            attachments: attachmentPayload.length > 0 ? attachmentPayload : undefined,
           });
-          this.log(`session/start sent chat_id=${chatId} message_len=${streamMessage.length}`);
+          this.log(
+            `session/start sent chat_id=${chatId} message_len=${streamMessage.length} client_turn_id=${clientTurnId} loaded_tools=${activeToolCategories.join(',') || 'none'}`
+          );
           this.startStreamStallWatch(chatId);
 
           // Forward the real DB message_id so the webview can patch the temp local id
@@ -575,6 +663,7 @@ export class VertexSwarmChatRuntime {
           const errorMessage = error instanceof Error ? error.message : 'Unknown error';
           this.log(`Failed to start stream: ${errorMessage}`);
           this.post({ type: 'error', payload: errorMessage });
+          this.completeClientTurn(clientTurnId);
         }
         break;
       }
@@ -608,6 +697,10 @@ export class VertexSwarmChatRuntime {
 
       case 'cancel-stream': {
         this.streamCancellationRequested = true;
+        // UI already called finishStreaming; drop turn ownership so a trailing
+        // worker `done` cannot be confused with a turn the user starts next.
+        const serialAtCancel = this.clientTurnSerial;
+        this.activeClientTurnId = null;
         const payload = message.payload as StreamCancelPayload;
         const chatId = payload.sessionId || this.currentChatId;
         this.log(`cancel stream requested session_id=${chatId ?? 'unknown'}`);
@@ -630,6 +723,13 @@ export class VertexSwarmChatRuntime {
           type: 'deep-plan-mode',
           payload: { active: false },
         });
+        // A newer start-stream may have begun while we awaited cancel I/O.
+        if (this.clientTurnSerial !== serialAtCancel) {
+          this.log(
+            `skip stream-complete after cancel; newer turn serial=${this.clientTurnSerial} cancel_serial=${serialAtCancel}`
+          );
+          break;
+        }
         this.clearStreamStallWatch();
         this.post({ type: 'stream-complete' });
         break;
@@ -795,6 +895,20 @@ export class VertexSwarmChatRuntime {
         break;
       }
 
+      case 'get-context-policy': {
+        const policy = await this.contextPolicyStore.load();
+        this.post({ type: 'context-policy-state', payload: policy });
+        break;
+      }
+
+      case 'set-context-policy': {
+        const policy = await this.contextPolicyStore.save(
+          message.payload as ContextPolicyData,
+        );
+        this.post({ type: 'context-policy-state', payload: policy });
+        break;
+      }
+
       case 'set-config': {
         const payload = message.payload as { snapshotRetentionDays?: number };
         const config = vscode.workspace.getConfiguration('vertexSwarm');
@@ -843,6 +957,12 @@ export class VertexSwarmChatRuntime {
         try {
           const result = await this.chatStore.truncateMessages(chatId, messageId);
           this.log(`truncate-messages: deleted ${result.deletedCount} messages session_id=${result.sessionId}`);
+
+          // Rewind loaded tool categories — the agent must re-load for the
+          // truncated conversation point instead of inheriting later state.
+          this.loadedToolCategoriesByChat.delete(chatId);
+          await this.chatStore.clearActiveToolCategories(chatId);
+          this.log(`truncate-messages: cleared loaded tool categories chat_id=${chatId}`);
 
           // Restore snapshot for this turn (graceful if none exists)
           try {
@@ -991,6 +1111,7 @@ export class VertexSwarmChatRuntime {
         if (isCurrentChat) {
           this.markStreamActivity(params.chat_id);
           this.log(this.describeEvent(params.event));
+          this.trackLoadedToolCategoriesFromEvent(params.chat_id, params.event);
           if (params.event.type === 'plan_chunk') {
             this.planDocumentProvider?.appendPlanChunk(params.chat_id, params.event.content);
             return;
@@ -1005,8 +1126,33 @@ export class VertexSwarmChatRuntime {
             return;
           }
           if (params.event.type === 'done') {
+            const doneTurnId =
+              typeof params.event.client_turn_id === 'string'
+                ? params.event.client_turn_id
+                : typeof params.event.clientTurnId === 'string'
+                  ? params.event.clientTurnId
+                  : null;
+            if (
+              this.activeClientTurnId &&
+              doneTurnId &&
+              doneTurnId !== this.activeClientTurnId
+            ) {
+              this.log(
+                `ignored stale done client_turn_id=${doneTurnId} active=${this.activeClientTurnId}`
+              );
+              return;
+            }
+            if (this.activeClientTurnId && !doneTurnId) {
+              this.log(
+                `ignored untagged done while newer turn active client_turn_id=${this.activeClientTurnId}`
+              );
+              return;
+            }
             this.flushNestedTraceBuffer();
             this.clearStreamStallWatch();
+            if (!doneTurnId || doneTurnId === this.activeClientTurnId) {
+              this.activeClientTurnId = null;
+            }
             this.post({ type: 'stream-complete' });
             return;
           }
@@ -1073,6 +1219,10 @@ export class VertexSwarmChatRuntime {
 
   private async openChat(chatId: string): Promise<void> {
     const messages = await this.chatStore.loadMessages(chatId);
+    const messagesWithUris = messages.map((message) => ({
+      ...message,
+      attachments: this.resolveAttachmentUris(chatId, message.attachments ?? []),
+    }));
     const ideContextEnabled = await this.chatStore.getIdeContextEnabled(chatId);
     const session = await this.chatStore.loadSession(chatId);
     const workingMemory =
@@ -1083,6 +1233,10 @@ export class VertexSwarmChatRuntime {
     const deepPlanPhase = workingMemory?.deep_plan_phase ?? null;
     const deepPlanRequested = Boolean(workingMemory?.deep_plan_requested);
     const deepPlanConfirmed = Boolean(workingMemory?.deep_plan_confirmed);
+    const activeFromSession = parseActiveToolCategoriesFromWorkingMemory(workingMemory);
+    if (activeFromSession.length > 0) {
+      this.mergeLoadedToolCategoriesForChat(chatId, activeFromSession);
+    }
 
     this.currentChatId = chatId;
     this.log(`opened chat chat_id=${chatId} messages=${messages.length}`);
@@ -1092,7 +1246,7 @@ export class VertexSwarmChatRuntime {
       payload: {
         chatId,
         ideContextEnabled,
-        messages,
+        messages: messagesWithUris,
         deepPlanPipeline,
         deepPlanPhase,
         deepPlanRequested,
@@ -1401,5 +1555,79 @@ export class VertexSwarmChatRuntime {
 
     const normalized = value.replace(/\s+/g, ' ').trim();
     return normalized.length > 160 ? `${normalized.slice(0, 157)}...` : normalized;
+  }
+
+  private setLoadedToolCategories(chatId: string, categories: string[]): void {
+    if (categories.length === 0) {
+      return;
+    }
+    this.loadedToolCategoriesByChat.set(chatId, [...new Set(categories)]);
+  }
+
+  private mergeLoadedToolCategoriesForChat(chatId: string, categories: string[]): void {
+    if (categories.length === 0) {
+      return;
+    }
+    const existing = this.loadedToolCategoriesByChat.get(chatId) ?? [];
+    const merged = mergeLoadedToolCategories(existing, categories);
+    this.loadedToolCategoriesByChat.set(chatId, merged);
+  }
+
+  private trackLoadedToolCategoriesFromEvent(chatId: string, event: SessionEvent): void {
+    const categories = parseLoadedCategoriesFromEvent(event);
+    if (!categories) {
+      return;
+    }
+    this.mergeLoadedToolCategoriesForChat(chatId, categories);
+  }
+
+  private async getActiveToolCategoriesForChat(chatId: string): Promise<string[]> {
+    // Always re-read session.json so external edits or backend writes that
+    // happened outside the extension are reflected. Union with in-memory so
+    // categories learned from stream events this session are not dropped.
+    const session = await this.chatStore.loadSession(chatId);
+    const workingMemory =
+      session && typeof session.working_memory === 'object' && session.working_memory !== null
+        ? (session.working_memory as Record<string, unknown>)
+        : null;
+    const fromSession = parseActiveToolCategoriesFromWorkingMemory(workingMemory);
+
+    const inMemory = this.loadedToolCategoriesByChat.get(chatId) ?? [];
+    const merged = mergeLoadedToolCategories(inMemory, fromSession);
+    if (merged.length > 0) {
+      this.setLoadedToolCategories(chatId, merged);
+    }
+    return merged;
+  }
+
+  private resolveAttachmentUris(
+    chatId: string,
+    attachments: Array<{
+      id: string;
+      filename: string;
+      mimeType: string;
+      size: number;
+      relativePath: string;
+      uri?: string;
+    }>,
+  ): ChatAttachmentData[] {
+    return attachments.map((attachment) => {
+      if (attachment.uri) {
+        return attachment as ChatAttachmentData;
+      }
+      const absolutePath = this.attachmentStore.resolveAbsolutePath(
+        chatId,
+        attachment.relativePath,
+      );
+      const uri = this.toWebviewUri?.(absolutePath) ?? '';
+      return {
+        id: attachment.id,
+        filename: attachment.filename,
+        mimeType: attachment.mimeType,
+        size: attachment.size,
+        relativePath: attachment.relativePath,
+        uri,
+      };
+    });
   }
 }

@@ -3,6 +3,38 @@
  * Used for postMessage communication
  */
 
+export interface ContextPolicyData {
+  version: number;
+  budget: {
+    max_total_tokens: number;
+    reserve_for_reply_tokens: number;
+  };
+  text: {
+    compaction_enabled: boolean;
+    max_history_tokens: number | null;
+  };
+  images: {
+    save_max_bytes: number;
+    save_max_count: number;
+    send_max_long_edge_px: number;
+    send_max_bytes_per_image: number;
+    send_max_count: number;
+    max_turns_in_context: number;
+    max_llm_rounds_with_images: number;
+    target_tokens_per_image: number;
+    max_tokens_for_images_total: number;
+  };
+  files: {
+    enabled: boolean;
+  };
+}
+
+export interface ContextPolicyFieldRange {
+  min: number;
+  max: number;
+  step: number;
+}
+
 export interface SessionEvent {
   id: string;
   type: 'thinking' | 'code' | 'output' | 'error' | 'status' | 'tool_call' | 'tool_result'
@@ -97,6 +129,7 @@ export type ExtensionToWebviewMessage =
   | { type: 'stream-complete' }
   | { type: 'cancel-stream'; payload: { sessionId: string } }
   | { type: 'config-state'; payload: { snapshotRetentionDays: number } }
+  | { type: 'context-policy-state'; payload: ContextPolicyData }
   | { type: 'message-id-assigned'; payload: { tempId: string; realId: string } }
   | { type: 'messages-truncated'; payload: { messageId: string; messageText: string } }
   | { type: 'auth-required' }
@@ -131,6 +164,13 @@ export type ExtensionToWebviewMessage =
         snapshot_id?: string
         snapshot_session_id?: string
       }
+    }
+  | {
+      type: 'attachments-resolved'
+      payload: {
+        tempId: string
+        attachments: ChatAttachmentData[]
+      }
     };
 
 // Messages FROM Webview TO Extension Host
@@ -155,6 +195,8 @@ export type WebviewToExtensionMessage =
   | { type: 'review-snapshot'; payload: { file: string; originalUri: string; snapshotPath?: string; operation?: string; isNewFile?: boolean; isDeleted?: boolean; isBinary?: boolean } }
   | { type: 'get-config' }
   | { type: 'set-config'; payload: { snapshotRetentionDays: number } }
+  | { type: 'get-context-policy' }
+  | { type: 'set-context-policy'; payload: ContextPolicyData }
   | { type: 'open-plan' }
   | { type: 'open-deep-plan-folder' }
   | { type: 'planning-approve'; payload: { pipeline_id: string } }
@@ -166,6 +208,24 @@ export type WebviewToExtensionMessage =
 // Legacy union kept for backward compat
 export type ExtensionMessage = ExtensionToWebviewMessage | WebviewToExtensionMessage;
 
+export interface ChatAttachmentPayload {
+  id: string;
+  filename: string;
+  mimeType: string;
+  /** Base64-encoded file bytes (no data: prefix) */
+  dataBase64: string;
+}
+
+export interface ChatAttachmentData {
+  id: string;
+  filename: string;
+  mimeType: string;
+  size: number;
+  relativePath: string;
+  /** Resolved webview URI for display */
+  uri?: string;
+}
+
 export interface StreamStartPayload {
   message: string;
   ideContextEnabled: boolean;
@@ -173,6 +233,7 @@ export interface StreamStartPayload {
   requestContext?: RequestContextPayload;
   /** True when composer is in deep plan mode (slash /deep-plan or active mode). */
   deepPlanRequested?: boolean;
+  attachments?: ChatAttachmentPayload[];
 }
 
 export interface StreamCancelPayload {
@@ -195,6 +256,7 @@ export interface ChatMessageData {
   events?: SessionEvent[];
   createdAt: string;
   turn_duration_ms?: number;
+  attachments?: ChatAttachmentData[];
 }
 
 export interface ChatListPayload {

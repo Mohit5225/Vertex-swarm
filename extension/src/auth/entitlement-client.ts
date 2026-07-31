@@ -84,7 +84,8 @@ export class EntitlementClient {
         return empty;
       }
 
-      const payloadStr = Buffer.from(payloadBase64, 'base64').toString('utf8');
+      // JWTs are base64url; plain 'base64' drops '-' / '_' and can corrupt exp/iss.
+      const payloadStr = Buffer.from(payloadBase64, 'base64url').toString('utf8');
       const payload = JSON.parse(payloadStr);
 
       if (payload.iss !== 'vertex-swarm-backend') {
@@ -118,34 +119,76 @@ export class EntitlementClient {
   }
 
   private async refreshTokenInternal(): Promise<string | undefined> {
-    try {
-      const refreshToken = await this.secretStorage.get('vertex_refresh_jwt');
-      if (!refreshToken) {
-        this.warn('No refresh token found in storage.');
-        return undefined;
-      }
-
-      const response = await fetch(this.authEndpoint('/oauth/refresh'), {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json'
-        },
-        body: JSON.stringify({ refresh_token: refreshToken })
-      });
-
-      if (response.ok) {
-        const data = await response.json() as { access_token: string, refresh_token: string };
-        await this.secretStorage.store('vertex_access_jwt', data.access_token);
-        await this.secretStorage.store('vertex_refresh_jwt', data.refresh_token);
-        this.log('Tokens successfully refreshed in background.');
-        return data.access_token;
-      }
-      this.warn(`Failed to refresh token: status ${response.status}`);
-      return undefined;
-    } catch (err) {
-      this.warn(`Failed to refresh token network error: ${err instanceof Error ? err.message : String(err)}`);
+    const refreshToken = await this.secretStorage.get('vertex_refresh_jwt');
+    if (!refreshToken) {
+      this.warn('No refresh token found in storage.');
       return undefined;
     }
+
+    const url = this.authEndpoint('/oauth/refresh');
+    let lastError: unknown;
+
+    for (let attempt = 1; attempt <= EntitlementClient.FETCH_RETRIES; attempt++) {
+      try {
+        this.log(`Refreshing tokens (attempt ${attempt}/${EntitlementClient.FETCH_RETRIES}) via ${url}`);
+        const response = await fetch(url, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({ refresh_token: refreshToken }),
+          signal: AbortSignal.timeout(EntitlementClient.FETCH_TIMEOUT_MS),
+        });
+
+        if (response.ok) {
+          const data = await response.json() as { access_token?: unknown; refresh_token?: unknown };
+          if (typeof data.access_token !== 'string' || typeof data.refresh_token !== 'string') {
+            throw new Error('Refresh response missing access_token/refresh_token');
+          }
+          await this.secretStorage.store('vertex_access_jwt', data.access_token);
+          await this.secretStorage.store('vertex_refresh_jwt', data.refresh_token);
+          this.log('Tokens successfully refreshed in background.');
+          return data.access_token;
+        }
+
+        const detail = await response.text().catch(() => '');
+        // 401 means the refresh token is dead — retries will not help.
+        if (response.status === 401 || response.status === 403) {
+          this.warn(
+            `Failed to refresh token: status ${response.status}${detail ? ` (${detail.slice(0, 200)})` : ''}`
+          );
+          return undefined;
+        }
+
+        throw new Error(
+          `Refresh failed: status ${response.status}${detail ? ` (${detail.slice(0, 200)})` : ''}`
+        );
+      } catch (err) {
+        lastError = err;
+        const detail = this.formatFetchError(err, url);
+        this.warn(detail);
+        if (attempt < EntitlementClient.FETCH_RETRIES && this.isRetryableFetchError(err)) {
+          await new Promise((resolve) => setTimeout(resolve, 1500 * attempt));
+          continue;
+        }
+        if (attempt < EntitlementClient.FETCH_RETRIES) {
+          // Non-network 5xx / transient server errors — still retry a couple times.
+          const message = err instanceof Error ? err.message : String(err);
+          if (/status 5\d\d/.test(message) || /Refresh failed/.test(message)) {
+            await new Promise((resolve) => setTimeout(resolve, 1500 * attempt));
+            continue;
+          }
+        }
+        break;
+      }
+    }
+
+    this.warn(
+      `Failed to refresh token after retries: ${
+        lastError instanceof Error ? lastError.message : String(lastError)
+      }`
+    );
+    return undefined;
   }
 
   /** Triggers an authorization-code flow using PKCE and a loopback callback. */
@@ -393,6 +436,9 @@ export class EntitlementClient {
       message.includes('fetch failed') ||
       message.includes('timeout') ||
       message.includes('aborted') ||
+      message.includes('status 5') ||
+      err.name === 'TimeoutError' ||
+      err.name === 'AbortError' ||
       causeCode.includes('econn') ||
       causeCode.includes('etimedout') ||
       causeCode.includes('enotfound') ||

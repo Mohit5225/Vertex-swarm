@@ -13,7 +13,19 @@ import {
   isTypingSlashCommand,
   type SlashCommand,
 } from '../lib/slashCommands'
-import { ArrowUp, Plus, Sparkles, Square } from 'lucide-react'
+import {
+  ACCEPTED_IMAGE_INPUT,
+  createDraftAttachment,
+  fileToBase64,
+  revokeDraftAttachments,
+  type ChatAttachment,
+  type DraftAttachment,
+} from '../lib/attachments'
+import { formatMegabytes, getImageSaveLimits } from '../lib/contextPolicy'
+import { useContextPolicyStore } from '../store/contextPolicyStore'
+import AttachmentThumbnails from './AttachmentThumbnails'
+import ImagePreviewModal from './ImagePreviewModal'
+import { ArrowUp, ImagePlus, Paperclip, Plus, Sparkles, Square } from 'lucide-react'
 
 interface Props {
   disabled?: boolean
@@ -57,6 +69,9 @@ const InputArea: React.FC<Props> = ({
   const [showContextDismissButton, setShowContextDismissButton] = useState(false)
   const [isHoveringStop, setIsHoveringStop] = useState(false)
   const [slashHighlight, setSlashHighlight] = useState(0)
+  const [draftAttachments, setDraftAttachments] = useState<DraftAttachment[]>([])
+  const [previewIndex, setPreviewIndex] = useState<number | null>(null)
+  const [attachmentError, setAttachmentError] = useState<string | null>(null)
 
   const deepPlanSessionActive = useDeepPlanStore((s) => s.active)
   const deepPlanPhase = useDeepPlanStore((s) => s.phase)
@@ -67,6 +82,11 @@ const InputArea: React.FC<Props> = ({
   const releaseComposerLock = useDeepPlanStore((s) => s.releaseComposerLock)
   const messages = useChatStore((s) => s.messages)
   const isStreaming = useChatStore((s) => s.isStreaming)
+  const contextPolicy = useContextPolicyStore((s) => s.policy)
+  const imageSaveLimits = useMemo(
+    () => getImageSaveLimits(contextPolicy),
+    [contextPolicy],
+  )
 
   const deepPlanComposerLabel = useMemo(() => {
     if (!deepPlanSessionActive || deepPlanPhase === 'off') {
@@ -94,9 +114,10 @@ const InputArea: React.FC<Props> = ({
   const slashCommands = slashMenuOpen ? filterSlashCommands(body.trimStart()) : []
   const composed = composeMessage(showToken, body)
   const trimmedMessage = composed.trim()
+  const hasDraftAttachments = draftAttachments.length > 0
 
   const isRunning = disabled
-  const isSendDisabled = !isRunning && !trimmedMessage
+  const isSendDisabled = !isRunning && !trimmedMessage && !hasDraftAttachments
 
   const {
     addMessage,
@@ -106,6 +127,9 @@ const InputArea: React.FC<Props> = ({
     currentChatId,
   } = useChatStore()
   const textareaRef = useRef<HTMLTextAreaElement>(null)
+  const fileInputRef = useRef<HTMLInputElement>(null)
+  const draftAttachmentsRef = useRef(draftAttachments)
+  draftAttachmentsRef.current = draftAttachments
   const quickActionsRef = useRef<HTMLDivElement>(null)
   const contextBadgeRef = useRef<HTMLDivElement>(null)
   const slashMenuRef = useRef<HTMLDivElement>(null)
@@ -152,13 +176,76 @@ const InputArea: React.FC<Props> = ({
     setBody(parsed.body)
   }
 
+  const addFiles = (files: FileList | File[]) => {
+    const incoming = Array.from(files)
+    if (incoming.length === 0) {
+      return
+    }
+
+    const { maxAttachments, maxAttachmentBytes } = imageSaveLimits
+    setAttachmentError(null)
+    const remaining = maxAttachments - draftAttachments.length
+    if (remaining <= 0) {
+      setAttachmentError(`Maximum ${maxAttachments} images per message.`)
+      return
+    }
+
+    const accepted = incoming.slice(0, remaining)
+    const next: DraftAttachment[] = []
+    let error: string | null = null
+    for (const file of accepted) {
+      if (file.size > maxAttachmentBytes) {
+        error = `"${file.name}" exceeds the ${formatMegabytes(maxAttachmentBytes)} limit.`
+        continue
+      }
+      const draft = createDraftAttachment(file, imageSaveLimits)
+      if (draft) {
+        next.push(draft)
+      }
+    }
+
+    if (next.length === 0) {
+      setAttachmentError(error ?? 'Only image files are supported.')
+      return
+    }
+
+    if (error) {
+      setAttachmentError(error)
+    }
+
+    setDraftAttachments((current) => [...current, ...next])
+  }
+
+  const removeDraftAttachment = (id: string) => {
+    setDraftAttachments((current) => {
+      const target = current.find((item) => item.id === id)
+      if (target) {
+        URL.revokeObjectURL(target.previewUrl)
+      }
+      return current.filter((item) => item.id !== id)
+    })
+  }
+
+  const draftAsChatAttachments = useMemo<ChatAttachment[]>(
+    () =>
+      draftAttachments.map((attachment) => ({
+        id: attachment.id,
+        filename: attachment.filename,
+        mimeType: attachment.mimeType,
+        size: attachment.size,
+        uri: attachment.previewUrl,
+      })),
+    [draftAttachments],
+  )
+
   const handleSend = async () => {
-    if (disabled || !trimmedMessage) {
+    if (disabled || (!trimmedMessage && !hasDraftAttachments)) {
       return
     }
 
     const userMessage = trimmedMessage
     const deepPlanRequested = showToken || deepPlanSessionActive
+    const attachmentsToSend = [...draftAttachments]
 
     if (deepPlanRequested && showToken) {
       activateDeepPlan('user_slash', 'requirement_extraction')
@@ -166,16 +253,28 @@ const InputArea: React.FC<Props> = ({
 
     setBody('')
     setDeepPlanToken(false)
+    setPreviewIndex(null)
+    setDraftAttachments([])
+    setAttachmentError(null)
 
     if (textareaRef.current) {
       textareaRef.current.style.height = 'auto'
     }
 
     const tempId = `msg-${Date.now()}`
+    const optimisticAttachments: ChatAttachment[] = attachmentsToSend.map((attachment) => ({
+      id: attachment.id,
+      filename: attachment.filename,
+      mimeType: attachment.mimeType,
+      size: attachment.size,
+      uri: attachment.previewUrl,
+    }))
+
     addMessage({
       id: tempId,
       type: 'user',
       content: userMessage,
+      attachments: optimisticAttachments.length > 0 ? optimisticAttachments : undefined,
       deepPlan: deepPlanRequested,
       timestamp: Date.now(),
     })
@@ -184,6 +283,18 @@ const InputArea: React.FC<Props> = ({
     setStreaming(true)
 
     try {
+      const encodedAttachments =
+        attachmentsToSend.length > 0
+          ? await Promise.all(
+              attachmentsToSend.map(async (attachment) => ({
+                id: attachment.id,
+                filename: attachment.filename,
+                mimeType: attachment.mimeType,
+                dataBase64: await fileToBase64(attachment.file),
+              })),
+            )
+          : undefined
+
       getVsCodeApi()?.postMessage({
         type: 'start-stream',
         payload: {
@@ -191,12 +302,15 @@ const InputArea: React.FC<Props> = ({
           ideContextEnabled,
           tempId,
           deepPlanRequested,
+          attachments: encodedAttachments,
         },
       })
     } catch (error) {
       console.error('Failed to send message:', error)
       setError('Unable to start the agent stream. Please try again.')
       setStreaming(false)
+      useChatStore.getState().truncateAfter(tempId)
+      revokeDraftAttachments(attachmentsToSend)
     }
   }
 
@@ -283,8 +397,14 @@ const InputArea: React.FC<Props> = ({
   }
 
   useEffect(() => {
+    return () => {
+      revokeDraftAttachments(draftAttachmentsRef.current)
+    }
+  }, [])
+
+  useEffect(() => {
     resizeTextarea()
-  }, [body, showToken])
+  }, [body, showToken, draftAttachments.length])
 
   useEffect(() => {
     if (!disabled && textareaRef.current) {
@@ -382,6 +502,33 @@ const InputArea: React.FC<Props> = ({
           </div>
         )}
 
+        {hasDraftAttachments && (
+          <AttachmentThumbnails
+            attachments={draftAsChatAttachments}
+            onPreview={setPreviewIndex}
+            onRemove={disabled ? undefined : removeDraftAttachment}
+            size="composer"
+          />
+        )}
+
+        {attachmentError && (
+          <p className="mb-2 text-xs text-[#f87171]">{attachmentError}</p>
+        )}
+
+        <input
+          ref={fileInputRef}
+          type="file"
+          accept={ACCEPTED_IMAGE_INPUT}
+          multiple
+          className="hidden"
+          onChange={(event) => {
+            if (event.target.files) {
+              addFiles(event.target.files)
+            }
+            event.target.value = ''
+          }}
+        />
+
         <div className="composer-input-row">
           {showToken && (
             <span
@@ -396,6 +543,25 @@ const InputArea: React.FC<Props> = ({
             value={body}
             onChange={handleInput}
             onKeyDown={handleKeyDown}
+            onPaste={(event) => {
+              const items = event.clipboardData?.items
+              if (!items) {
+                return
+              }
+              const imageFiles: File[] = []
+              for (const item of items) {
+                if (item.type.startsWith('image/')) {
+                  const file = item.getAsFile()
+                  if (file) {
+                    imageFiles.push(file)
+                  }
+                }
+              }
+              if (imageFiles.length > 0) {
+                event.preventDefault()
+                addFiles(imageFiles)
+              }
+            }}
             onFocus={() => setIsFocused(true)}
             onBlur={() => setIsFocused(false)}
             placeholder={
@@ -436,6 +602,20 @@ const InputArea: React.FC<Props> = ({
                 <button
                   type="button"
                   disabled={disabled}
+                  onClick={() => {
+                    setShowQuickActions(false)
+                    fileInputRef.current?.click()
+                  }}
+                  className="popover-row disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  <div className="flex items-center gap-3">
+                    <ImagePlus className="h-4 w-4 text-[var(--vs-accent)]" />
+                    <span>Attach images</span>
+                  </div>
+                </button>
+                <button
+                  type="button"
+                  disabled={disabled}
                   onClick={() => onToggleIdeContext(!ideContextEnabled)}
                   className="popover-row justify-between disabled:cursor-not-allowed disabled:opacity-50"
                 >
@@ -454,6 +634,19 @@ const InputArea: React.FC<Props> = ({
               </div>
             )}
           </div>
+
+          <button
+            type="button"
+            onClick={() => fileInputRef.current?.click()}
+            disabled={disabled}
+            className={`inline-flex h-8 w-8 items-center justify-center rounded-md border transition ${disabled
+                ? 'cursor-not-allowed border-transparent bg-transparent text-[var(--vs-text-tertiary)]'
+                : 'border-[var(--vs-border)] bg-white/[0.03] text-[var(--vs-text-secondary)] hover:bg-[var(--vs-accent-muted)] hover:text-[var(--vs-text-primary)]'
+              }`}
+            title="Attach images"
+          >
+            <Paperclip className="h-4 w-4" />
+          </button>
 
           <div className="min-w-0 text-[11px] text-[var(--vs-text-tertiary)]">
             <span>{disabled ? 'Streaming response' : 'Enter to send'}</span>
@@ -486,6 +679,14 @@ const InputArea: React.FC<Props> = ({
           )}
         </button>
       </div>
+
+      {previewIndex !== null && (
+        <ImagePreviewModal
+          attachments={draftAsChatAttachments}
+          initialIndex={previewIndex}
+          onClose={() => setPreviewIndex(null)}
+        />
+      )}
     </div>
   )
 }

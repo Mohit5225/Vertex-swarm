@@ -4,6 +4,7 @@ import {
   mergeSessionEvents,
   shouldMergeSessionEvents,
 } from '../lib/sessionEvents'
+import type { ChatAttachment } from '../lib/attachments'
 
 export interface SessionEvent {
   id: string
@@ -37,6 +38,7 @@ export interface ChatMessage {
   dbMessageId?: string
   type: 'user' | 'agent' | 'system'
   content: string
+  attachments?: ChatAttachment[]
   events?: SessionEvent[]
   timestamp: number
   /** User message sent while deep plan composer mode was active */
@@ -89,6 +91,7 @@ interface ChatState {
   finishStreaming: () => void
   clearMessages: () => void
   patchMessageId: (tempId: string, realId: string) => void
+  patchMessageAttachments: (tempId: string, attachments: ChatAttachment[]) => void
   truncateAfter: (messageId: string) => void
   setPlanReadyForMessageId: (messageId: string | null) => void
   setDeepPlanReadyForMessageId: (messageId: string | null) => void
@@ -654,6 +657,14 @@ export const useChatStore = create<ChatState>((set) => ({
         state.currentTodo?.sourceMessageId === tempId
           ? { ...state.currentTodo, sourceMessageId: realId }
           : state.currentTodo,
+    }))
+  },
+
+  patchMessageAttachments: (tempId: string, attachments: ChatAttachment[]) => {
+    set((state) => ({
+      messages: state.messages.map((m) =>
+        m.id === tempId ? { ...m, attachments } : m
+      ),
     }))
   },
 

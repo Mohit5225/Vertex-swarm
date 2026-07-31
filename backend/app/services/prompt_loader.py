@@ -25,6 +25,28 @@ SUPPORTED_CATEGORIES: list[str] = [
     "hil_tool",
 ]
 
+# One-line descriptions — mirrored from TOOL CATALOG in llm_service.py
+CATEGORY_DESCRIPTIONS: dict[str, str] = {
+    "workspace_ops": (
+        "File operations: read, search, list, create, edit, rename, delete. "
+        "Never write source files via the terminal."
+    ),
+    "terminal_ops": (
+        "Shell commands, builds, tests, lint, git, installs, and diagnostics."
+    ),
+    "plan_tool": (
+        "Present an implementation plan and wait for user approval before invasive changes."
+    ),
+    "todo_tool": "Drive the persistent execution checklist widget.",
+    "web_search": "Look up external docs, APIs, errors, or version-specific facts not in the repo.",
+    "spawn_subagent": (
+        "Parallel or isolated deliverables via child agents — not for routine one-file edits."
+    ),
+    "hil_tool": (
+        "Structured multiple-choice questions via an inline card; blocks until the user answers."
+    ),
+}
+
 
 def load_category(category: str) -> Optional[str]:
     """Return the guidance prose for a tool category.
@@ -63,20 +85,40 @@ def load_categories(categories: list[str]) -> dict[str, str]:
     return result
 
 
+def build_already_loaded_tools_block(active_categories: list[str]) -> str:
+    """Summarize which tool categories are already loaded for this session."""
+    if not active_categories:
+        return ""
+
+    lines = [
+        "## ALREADY LOADED TOOLS",
+        (
+            "These categories are already active. Their schemas are in tools[] and "
+            "full usage guidance follows below. Do NOT call load_tool_context for them again."
+        ),
+        "",
+    ]
+    for category in active_categories:
+        description = CATEGORY_DESCRIPTIONS.get(category, "Loaded tool category.")
+        lines.append(f"- {category}: {description}")
+    return "\n".join(lines)
+
+
 def build_injected_guidance(active_categories: list[str]) -> str:
     """Build the combined guidance block to prepend to the system prompt.
 
-    Called on every turn from chat.py once categories are known for this session.
+    Called on every LLM round once categories are known for this session.
     Returns an empty string if no categories are active yet.
     """
     if not active_categories:
         return ""
 
+    notice = build_already_loaded_tools_block(active_categories)
     loaded = load_categories(active_categories)
     if not loaded:
-        return ""
+        return notice
 
-    sections: list[str] = []
+    sections: list[str] = [notice]
     for category in active_categories:
         prose = loaded.get(category)
         if prose:

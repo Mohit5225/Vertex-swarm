@@ -179,7 +179,7 @@ class WorkerNode:
                 )
             return
 
-        if not chat_id or not message:
+        if not chat_id or (not message and not params.get("attachments")):
             if chat_id:
                 await self._emit_session_error(chat_id, "Invalid session start request.")
             return

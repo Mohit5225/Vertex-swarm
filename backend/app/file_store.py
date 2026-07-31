@@ -41,7 +41,16 @@ class FileStore:
         async with aiofiles.open(meta_file, mode='w', encoding='utf-8') as f:
             await f.write(json.dumps(meta, indent=2))
             
-    async def append_message(self, chat_id: str, role: str, content: str, events: List[Dict[str, Any]] = None, message_id: str = None, turn_duration_ms: int | None = None) -> None:
+    async def append_message(
+        self,
+        chat_id: str,
+        role: str,
+        content: str,
+        events: List[Dict[str, Any]] = None,
+        message_id: str = None,
+        turn_duration_ms: int | None = None,
+        attachments: List[Dict[str, Any]] | None = None,
+    ) -> None:
         chat_dir = self.chats_path / chat_id
         await self._ensure_dir(chat_dir)
         
@@ -52,6 +61,8 @@ class FileStore:
             "content": content,
             "events": events or []
         }
+        if attachments:
+            msg["attachments"] = attachments
         if turn_duration_ms is not None and turn_duration_ms >= 0:
             msg["turn_duration_ms"] = turn_duration_ms
         

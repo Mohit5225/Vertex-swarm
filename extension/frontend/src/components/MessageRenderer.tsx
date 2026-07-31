@@ -1,4 +1,4 @@
-import React, { useMemo } from 'react'
+import React, { useMemo, useState } from 'react'
 import { type ChatMessage } from '../store/chatStore'
 import { useChatStore } from '../store/chatStore'
 import ReactMarkdown from 'react-markdown'
@@ -12,6 +12,8 @@ import DeepPlanCard from './DeepPlanCard'
 import { FileChangesCard } from './FileChangesCard'
 import { collectMessageFileChanges } from '../lib/messageDiffs'
 import AgentTurnView from './AgentTurnView'
+import AttachmentThumbnails from './AttachmentThumbnails'
+import ImagePreviewModal from './ImagePreviewModal'
 
 interface Props {
   message: ChatMessage
@@ -30,6 +32,7 @@ const renderAssistantText = (content: string) => (
 )
 
 const MessageRenderer: React.FC<Props> = ({ message }) => {
+  const [previewIndex, setPreviewIndex] = useState<number | null>(null)
   const isUser = message.type === 'user'
   const isSystem = message.type === 'system'
   const { activeMessageId, isStreaming, messages, currentChatId, planReadyForMessageId, deepPlanReadyForMessageId } =
@@ -80,6 +83,7 @@ const MessageRenderer: React.FC<Props> = ({ message }) => {
   }, [message.events])
 
   const renderedAssistantContent = message.content ? renderAssistantText(message.content) : null
+  const messageAttachments = message.attachments ?? []
 
   const renderedStreamingAssistantContent = isStreamingMessage && message.content ? (
     <div
@@ -183,13 +187,22 @@ const MessageRenderer: React.FC<Props> = ({ message }) => {
             </div>
           ) : (
             <>
+              {isUser && messageAttachments.length > 0 && (
+                <AttachmentThumbnails
+                  attachments={messageAttachments}
+                  onPreview={setPreviewIndex}
+                  size="message"
+                />
+              )}
               {renderedStreamingAssistantContent ??
                 (renderedAssistantContent &&
                   (isUser ? (
                     <div className="relative">
-                      <p className="whitespace-pre-wrap break-words text-[15px] leading-7 text-[#f4f7ff]">
-                        {message.content}
-                      </p>
+                      {message.content ? (
+                        <p className="whitespace-pre-wrap break-words text-[15px] leading-7 text-[#f4f7ff]">
+                          {message.content}
+                        </p>
+                      ) : null}
                     </div>
                   ) : (
                     renderedAssistantContent
@@ -203,7 +216,19 @@ const MessageRenderer: React.FC<Props> = ({ message }) => {
               <p>{pendingLabel}</p>
             </div>
           )}
+
+          {isUser && !message.content && messageAttachments.length > 0 && previewIndex === null && (
+            <span className="sr-only">Image attachment</span>
+          )}
         </div>
+
+        {previewIndex !== null && messageAttachments.length > 0 && (
+          <ImagePreviewModal
+            attachments={messageAttachments}
+            initialIndex={previewIndex}
+            onClose={() => setPreviewIndex(null)}
+          />
+        )}
 
         {isUser && !isStreaming && (
           <div className="absolute -left-2 top-1/2 -translate-x-full -translate-y-1/2 opacity-0 group-hover:opacity-100 transition-opacity flex items-center gap-1.5 pr-2">

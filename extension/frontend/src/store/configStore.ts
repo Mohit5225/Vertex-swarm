@@ -230,6 +230,14 @@ const handleExtensionMessage = (event: MessageEvent) => {
           createdAt: string;
           turn_duration_ms?: number;
           events?: Array<Record<string, unknown>>;
+          attachments?: Array<{
+            id: string;
+            filename: string;
+            mimeType: string;
+            size: number;
+            relativePath: string;
+            uri?: string;
+          }>;
         }>;
       };
       useChatStore.getState().replaceMessages(
@@ -244,6 +252,17 @@ const handleExtensionMessage = (event: MessageEvent) => {
                   ? "system"
                   : "user",
             content: message.content,
+            attachments: Array.isArray(message.attachments)
+              ? message.attachments
+                  .filter((attachment) => attachment.uri)
+                  .map((attachment) => ({
+                    id: attachment.id,
+                    filename: attachment.filename,
+                    mimeType: attachment.mimeType,
+                    size: attachment.size,
+                    uri: attachment.uri as string,
+                  }))
+              : undefined,
             turnDurationMs:
               typeof message.turn_duration_ms === "number"
                 ? message.turn_duration_ms
@@ -298,6 +317,37 @@ const handleExtensionMessage = (event: MessageEvent) => {
         .getState()
         .patchMessageId(message.payload.tempId, message.payload.realId);
       break;
+
+    case "attachments-resolved": {
+      const tempId = message.payload.tempId
+      const existing = useChatStore
+        .getState()
+        .messages.find((entry) => entry.id === tempId)
+      existing?.attachments?.forEach((attachment) => {
+        if (attachment.uri.startsWith("blob:")) {
+          URL.revokeObjectURL(attachment.uri)
+        }
+      })
+      useChatStore
+        .getState()
+        .patchMessageAttachments(
+          tempId,
+          message.payload.attachments.map((attachment: {
+            id: string;
+            filename: string;
+            mimeType: string;
+            size: number;
+            uri?: string;
+          }) => ({
+            id: attachment.id,
+            filename: attachment.filename,
+            mimeType: attachment.mimeType,
+            size: attachment.size,
+            uri: attachment.uri ?? "",
+          })),
+        );
+      break;
+    }
 
     case "messages-truncated":
       useChatStore.getState().truncateAfter(message.payload.messageId);

@@ -19,9 +19,18 @@ from app.stdio_transport import StdioTransport
 
 from app.schemas.tool import ToolResultSchema
 from app.services.llm_service import stream_chat_events, format_tool_response
+from app.services.context.assembly import assemble_history_messages
+from app.services.context.message_parts import message_has_image_parts, strip_image_parts
+from app.services.context.policy import load_context_policy
+from app.services.context.rounds import prepare_messages_for_llm_round
 from app.services.tool_memory import build_tool_memory_from_trace_events, format_tool_memory_for_prompt
 from app.services.tool_registry import build_tools_list, is_loadable_tool_loaded, resolve_loadable_tool_name
-from app.services.prompt_loader import build_injected_guidance, load_categories, SUPPORTED_CATEGORIES
+from app.services.prompt_loader import (
+    build_already_loaded_tools_block,
+    build_injected_guidance,
+    load_categories,
+    SUPPORTED_CATEGORIES,
+)
 from app.services.hil_support import validate_hil_ask_payload, normalize_hil_questions, enrich_hil_answers
 from app.services.deep_plan import (
     DeepPlanOrchestrator,
@@ -34,7 +43,7 @@ from app.services.deep_plan import (
     resolve_deep_plan_gate,
     set_deep_plan_confirmed,
 )
-from app.services.deep_plan.gates import DEEP_PLAN_CONFIRMED_KEY
+from app.services.deep_plan.gates import DEEP_PLAN_CONFIRMED_KEY, persist_session_state
 from app.services.deep_plan.artifacts import (
     normalize_rel_path,
     validate_handoff,
@@ -711,6 +720,41 @@ def _log_trace_event(
 # Tool call helpers
 # ---------------------------------------------------------------------------
 
+def _resolve_existing_active_categories(
+    context: dict[str, Any],
+    session_state: dict[str, Any],
+) -> tuple[list[str], dict[str, Any]]:
+    """Merge active tool categories from request context and persisted session state.
+
+    Both sources are filtered to SUPPORTED_CATEGORIES so corrupt session.json
+    or untrusted client input cannot inject unknown category names into the
+    "already loaded" prompt.
+    """
+    raw_context_categories = context.get("active_tool_categories") or []
+    existing_active_categories = [
+        c for c in raw_context_categories
+        if isinstance(c, str) and c in SUPPORTED_CATEGORIES
+    ]
+    existing_tool_memory: dict[str, Any] = {}
+
+    working_memory = session_state.get("working_memory")
+    if isinstance(working_memory, dict):
+        persisted_categories = working_memory.get("active_tool_categories")
+        if isinstance(persisted_categories, list):
+            filtered_persisted = [
+                c for c in persisted_categories
+                if isinstance(c, str) and c in SUPPORTED_CATEGORIES
+            ]
+            existing_active_categories = list(
+                dict.fromkeys(existing_active_categories + filtered_persisted)
+            )
+        tool_memory = working_memory.get("tool_memory")
+        if isinstance(tool_memory, dict):
+            existing_tool_memory = tool_memory
+
+    return existing_active_categories, existing_tool_memory
+
+
 def _is_load_tool_context_call(call: dict[str, Any]) -> bool:
     tool_name = call.get("tool_name", "")
     return tool_name in ("load_tool_context", "workspace_ops.load_tool_context")
@@ -809,23 +853,20 @@ async def _execute_tool_call(
         if not isinstance(requested, list):
             requested = []
         valid = [c for c in requested if c in SUPPORTED_CATEGORIES]
+        already_loaded = set(active_categories_holder[0])
+        newly_loaded = [c for c in valid if c not in already_loaded]
 
-        loaded_prose = load_categories(valid)
-        newly_loaded = list(loaded_prose.keys())
+        loaded_prose = load_categories(newly_loaded or valid)
 
         merged = list(dict.fromkeys(active_categories_holder[0] + newly_loaded))
         active_categories_holder[0] = merged
         active_tool_guidance_holder[0] = build_injected_guidance(merged) or None
 
         try:
-            state_str = await orchestrator.nats.kv_get("SESSIONS", f"session.{chat_id}")
-            if state_str:
-                state = json.loads(state_str)
-                if "working_memory" not in state:
-                    state["working_memory"] = {}
-                state["working_memory"]["active_tool_categories"] = merged
-                await orchestrator.nats.kv_set("SESSIONS", f"session.{chat_id}", json.dumps(state))
-                await orchestrator.file_store.write_session(chat_id, state)
+            state = await read_session_state(orchestrator, chat_id)
+            working_memory = state.setdefault("working_memory", {})
+            working_memory["active_tool_categories"] = merged
+            await persist_session_state(orchestrator, chat_id, state)
         except Exception:
             logger.exception("Failed to persist active_tool_categories session_id=%s", synthetic_session_id)
 
@@ -840,14 +881,26 @@ async def _execute_tool_call(
                 )
             )
 
-        combined_prose = "\n\n---\n\n".join(loaded_prose.values())
         if newly_loaded:
+            combined_prose = "\n\n---\n\n".join(
+                loaded_prose[c] for c in newly_loaded if c in loaded_prose
+            )
             result_content = (
                 f"Loaded tools: {', '.join(newly_loaded)}. "
-                f"Schemas and usage guidance are ready.\n\n{combined_prose}"
+                f"Schemas and usage guidance are ready."
             )
+            if combined_prose:
+                result_content = f"{result_content}\n\n{combined_prose}"
+        elif valid:
+            already_block = build_already_loaded_tools_block(list(active_categories_holder[0]))
+            result_content = (
+                f"Already loaded: {', '.join(valid)}. "
+                "Do not call load_tool_context for these again."
+            )
+            if already_block:
+                result_content = f"{result_content}\n\n{already_block}"
         elif active_categories_holder[0]:
-            result_content = f"Already loaded: {', '.join(active_categories_holder[0])}."
+            result_content = build_already_loaded_tools_block(list(active_categories_holder[0]))
         else:
             result_content = "No tool categories loaded."
         return (tool_call_id, tool_name, result_content, "success", None, None)
@@ -1690,33 +1743,59 @@ async def _run_agent_loop_impl(
     if context.get("deep_plan_requested"):
         working_memory = {**working_memory, "deep_plan_requested": True}
 
-    state_str = await orchestrator.nats.kv_get("SESSIONS", f"session.{chat_id}")
-    existing_active_categories = context.get("active_tool_categories", [])
-    existing_tool_memory = {}
-    if state_str:
-        state = json.loads(state_str)
-        if "working_memory" in state and "active_tool_categories" in state["working_memory"]:
-            # Merge context inherited categories with session persisted categories
-            existing_active_categories = list(dict.fromkeys(existing_active_categories + state["working_memory"]["active_tool_categories"]))
-        existing_tool_memory = state.get("working_memory", {}).get("tool_memory", {})
-        if isinstance(state.get("working_memory"), dict):
-            working_memory = {**working_memory, **state["working_memory"]}
+    existing_active_categories, existing_tool_memory = _resolve_existing_active_categories(
+        context,
+        session_state if isinstance(session_state, dict) else {},
+    )
+    if isinstance(session_state.get("working_memory"), dict):
+        working_memory = {**working_memory, **session_state["working_memory"]}
+
+    logger.info(
+        "restored active_tool_categories chat_id=%s count=%d categories=%s",
+        chat_id,
+        len(existing_active_categories),
+        existing_active_categories,
+    )
 
     if not ephemeral_run:
+        message_attachments = context.get("attachments")
+        attachment_records = (
+            message_attachments if isinstance(message_attachments, list) else None
+        )
         await orchestrator.file_store.append_message(
-            chat_id, "user", message, message_id=request_message_id
+            chat_id,
+            "user",
+            message,
+            message_id=request_message_id,
+            attachments=attachment_records,
         )
         history_raw = await orchestrator.file_store.read_messages(chat_id)
     else:
         history_raw = []
 
-    llm_messages = []
-    for m in history_raw:
-        content = m.get("content")
-        role = m.get("role")
-        if not content:
-            content = "[Executed workspace tools]" if role == "assistant" else "[Empty message]"
-        llm_messages.append({"role": role, "content": content})
+    context_policy = load_context_policy(orchestrator.config.base_path)
+    chat_dir_path = orchestrator.config.base_path / "chats" / chat_id
+    context_notifications: list[str] = []
+    images_stripped_for_round_limit = False
+    images_stripped_for_vision_error = False
+
+    if ephemeral_run:
+        llm_messages = []
+        for m in history_raw:
+            content = m.get("content")
+            role = m.get("role")
+            if not content:
+                content = "[Executed workspace tools]" if role == "assistant" else "[Empty message]"
+            llm_messages.append({"role": role, "content": content})
+    else:
+        assembly_result = assemble_history_messages(
+            history_raw,
+            chat_dir_path,
+            context_policy,
+        )
+        llm_messages = assembly_result.messages
+        context_notifications.extend(assembly_result.notifications)
+
     request_context_message = _build_request_context_message(req_request_context)
     tool_memory_message = format_tool_memory_for_prompt(existing_tool_memory)
 
@@ -1728,7 +1807,7 @@ async def _run_agent_loop_impl(
         system_context_messages.append({"role": "system", "content": request_context_message})
     if tool_memory_message:
         system_context_messages.append({"role": "system", "content": tool_memory_message})
-        
+
     task_type = context.get("task_type")
     if task_type and deep_plan_pipeline_mode:
         system_context_messages.append({
@@ -1740,12 +1819,6 @@ async def _run_agent_loop_impl(
             ),
         })
     elif task_type:
-        inherited = existing_active_categories or []
-        inherit_note = (
-            f"Already loaded tool categories (do NOT call load_tool_context for these): {', '.join(inherited)}.\n"
-            if inherited
-            else ""
-        )
         system_context_messages.append({
             "role": "system",
             "content": (
@@ -1753,7 +1826,6 @@ async def _run_agent_loop_impl(
                 "You are running as a specialized subagent focusing on this specific task type. "
                 "Focus ONLY on this task. Use tools to produce the deliverable (read and write as needed). "
                 "Return your final comprehensive result to the parent orchestrator when complete.\n"
-                f"{inherit_note}"
                 "Do not narrate plans without calling tools. Prefer writing the deliverable over long prose."
             ),
         })
@@ -1956,6 +2028,8 @@ async def _run_agent_loop_impl(
 
     try:
         await emit_trace_and_push(build_status_event("Preparing conversation context...", "preparing_context"))
+        for note in context_notifications:
+            await emit_trace_and_push(build_status_event(note, "context_policy"))
 
         while True:
             llm_round += 1
@@ -2059,6 +2133,19 @@ async def _run_agent_loop_impl(
             status_phase = "calling_model" if llm_round == 1 else "resuming_after_tool"
             await emit_trace_and_push(build_status_event(status_text, status_phase))
 
+            round_prep = prepare_messages_for_llm_round(
+                llm_messages,
+                llm_round,
+                context_policy,
+                round_strip_notified=images_stripped_for_round_limit,
+            )
+            if round_prep.notification:
+                images_stripped_for_round_limit = True
+                await emit_trace_and_push(
+                    build_status_event(round_prep.notification, "context_policy")
+                )
+            round_messages = round_prep.messages
+
             llm_context_log_base = {
                 "user_id": user_id,
                 "chat_id": str(chat_id),
@@ -2069,16 +2156,16 @@ async def _run_agent_loop_impl(
                 "workspace_skeleton_included": bool(req_workspace_skeleton),
                 "workspace_skeleton_len": len(req_workspace_skeleton) if req_workspace_skeleton else 0,
                 "request_context_included": bool(req_request_context),
-                "llm_message_count": len(llm_messages),
-                "last_message_role": llm_messages[-1].get("role") if llm_messages else None,
+                "llm_message_count": len(round_messages),
+                "last_message_role": round_messages[-1].get("role") if round_messages else None,
             }
 
-            profiler.log_payload_snapshot(llm_round, llm_messages)
+            profiler.log_payload_snapshot(llm_round, round_messages)
 
             # Try primary model, fallback to secondary on rate limit
             try:
                 stream_iterator = stream_chat_events(
-                    llm_messages,
+                    round_messages,
                     config=orchestrator.config,
                     workspace_skeleton=req_workspace_skeleton,
                     context_log_metadata={
@@ -2103,7 +2190,7 @@ async def _run_agent_loop_impl(
                 )
                 await emit_trace_and_push(build_status_event("Primary model rate-limited, switching to fallback...", "fallback_model"))
                 stream_iterator = stream_chat_events(
-                    llm_messages,
+                    round_messages,
                     config=orchestrator.config,
                     workspace_skeleton=req_workspace_skeleton,
                     model=orchestrator.config.llm_fallback_model,
@@ -2121,118 +2208,160 @@ async def _run_agent_loop_impl(
             # ── Phase 1: drain the full LLM stream ────────────────────────────────
             # Collect ALL tool_call events before executing any of them.
             collected_tool_calls: list[dict[str, Any]] = []
+            stream_completed = False
 
-            try:
-                async for event in stream_iterator:
-                    event_type = event.get("type")
+            while not stream_completed:
+                collected_tool_calls = []
+                try:
+                    async for event in stream_iterator:
+                        event_type = event.get("type")
 
-                    if event_type == "usage":
-                        usage_content = event.get("content")
-                        if isinstance(usage_content, dict):
-                            profiler.log_api_usage(llm_round, usage_content)
-                        continue
-
-                    if event_type == "token":
-                        token = str(event.get("content", ""))
-                        if not token:
+                        if event_type == "usage":
+                            usage_content = event.get("content")
+                            if isinstance(usage_content, dict):
+                                profiler.log_api_usage(llm_round, usage_content)
                             continue
 
-                        if in_plan_mode:
-                            plan_buffer += token
-                            await push_event(_build_event("plan_chunk", content=token))
-                            continue
+                        if event_type == "token":
+                            token = str(event.get("content", ""))
+                            if not token:
+                                continue
 
-                        assistant_turn_content += token
-                        full_response += token
-                        if isinstance(stage_progress_counter, list):
-                            stage_progress_counter[0] = stage_progress_counter[0] + len(token)
-                        if external_trace_emit:
-                            trace_output_buffer.append(token)
-                            await flush_trace_output()
-                        else:
-                            await push_event(
-                                _build_event(
-                                    "token",
-                                    content=token,
-                                    metadata={"phase": "assistant_output"},
+                            if in_plan_mode:
+                                plan_buffer += token
+                                await push_event(_build_event("plan_chunk", content=token))
+                                continue
+
+                            assistant_turn_content += token
+                            full_response += token
+                            if isinstance(stage_progress_counter, list):
+                                stage_progress_counter[0] = stage_progress_counter[0] + len(token)
+                            if external_trace_emit:
+                                trace_output_buffer.append(token)
+                                await flush_trace_output()
+                            else:
+                                await push_event(
+                                    _build_event(
+                                        "token",
+                                        content=token,
+                                        metadata={"phase": "assistant_output"},
+                                    )
                                 )
+                            continue
+
+                        if event_type == "thinking":
+                            thinking_content = str(event.get("content", ""))
+                            if not thinking_content:
+                                continue
+
+                            assistant_reasoning_content += thinking_content
+
+                            if not thinking_content.strip():
+                                continue
+
+                            await emit_trace_and_push(_build_event("thinking", content=thinking_content, metadata={"phase": "reasoning"}, session_id=synthetic_session_id, chat_id=str(chat_id), message_id=request_message_id))
+                            continue
+
+                        if event_type == "tool_call":
+                            tool_name_evt = event.get("tool_name")
+                            tool_call_id_evt = event.get("tool_call_id")
+                            tool_args_evt = event.get("args")
+
+                            if not isinstance(tool_name_evt, str) or not isinstance(tool_call_id_evt, str):
+                                logger.warning("Skipping malformed tool_call event: %s", event)
+                                continue
+
+                            collected_tool_calls.append({
+                                "tool_name": tool_name_evt,
+                                "tool_call_id": tool_call_id_evt,
+                                "args": tool_args_evt,
+                            })
+                            continue
+
+                    if stream_aborted:
+                        break
+
+                    await flush_trace_output(force=True)
+                    stream_completed = True
+
+                except asyncio.CancelledError:
+                    stream_aborted = True
+                    raise
+                except Exception as stream_exc:
+                    if (
+                        isinstance(stream_exc, APIError)
+                        and not images_stripped_for_vision_error
+                        and message_has_image_parts(round_messages)
+                    ):
+                        changed, stripped_messages = strip_image_parts(llm_messages)
+                        if changed:
+                            images_stripped_for_vision_error = True
+                            llm_messages = stripped_messages
+                            round_prep = prepare_messages_for_llm_round(
+                                llm_messages,
+                                llm_round,
+                                context_policy,
+                                round_strip_notified=images_stripped_for_round_limit,
                             )
-                        continue
-
-                    if event_type == "thinking":
-                        thinking_content = str(event.get("content", ""))
-                        if not thinking_content:
+                            round_messages = round_prep.messages
+                            logger.info(
+                                "retrying llm stream without images chat_id=%s llm_round=%s",
+                                chat_id,
+                                llm_round,
+                            )
+                            stream_iterator = stream_chat_events(
+                                round_messages,
+                                config=orchestrator.config,
+                                workspace_skeleton=req_workspace_skeleton,
+                                context_log_metadata={
+                                    **llm_context_log_base,
+                                    "model": orchestrator.config.llm_model,
+                                    "is_fallback": False,
+                                    "images_stripped": True,
+                                },
+                                active_tool_guidance=active_tool_guidance_holder[0],
+                                active_categories=active_categories_holder[0],
+                                deep_plan_available=deep_plan_available_holder[0],
+                                deep_plan_pipeline_mode=deep_plan_pipeline_mode_holder[0],
+                            )
                             continue
 
-                        assistant_reasoning_content += thinking_content
-
-                        if not thinking_content.strip():
-                            continue
-
-                        await emit_trace_and_push(_build_event("thinking", content=thinking_content, metadata={"phase": "reasoning"}, session_id=synthetic_session_id, chat_id=str(chat_id), message_id=request_message_id))
-                        continue
-
-                    if event_type == "tool_call":
-                        tool_name_evt = event.get("tool_name")
-                        tool_call_id_evt = event.get("tool_call_id")
-                        tool_args_evt = event.get("args")
-
-                        if not isinstance(tool_name_evt, str) or not isinstance(tool_call_id_evt, str):
-                            logger.warning("Skipping malformed tool_call event: %s", event)
-                            continue
-                        
-                        collected_tool_calls.append({
-                            "tool_name": tool_name_evt,
-                            "tool_call_id": tool_call_id_evt,
-                            "args": tool_args_evt,
-                        })
-                        continue
-
-                if stream_aborted:
-                    break
-
-                await flush_trace_output(force=True)
-
-            except asyncio.CancelledError:
-                stream_aborted = True
-                raise
-            except Exception as stream_exc:
-                error_details = str(stream_exc)
-                if isinstance(stream_exc, APIError):
-                    api_err = _api_error_details(stream_exc)
-                    logger.error(
-                        "LLM stream API error for chat %s: message=%s type=%s code=%s body=%s",
-                        chat_id,
-                        api_err["message"],
-                        api_err["type"],
-                        api_err["code"],
-                        api_err["body"],
-                        exc_info=True,
+                    error_details = str(stream_exc)
+                    if isinstance(stream_exc, APIError):
+                        api_err = _api_error_details(stream_exc)
+                        logger.error(
+                            "LLM stream API error for chat %s: message=%s type=%s code=%s body=%s",
+                            chat_id,
+                            api_err["message"],
+                            api_err["type"],
+                            api_err["code"],
+                            api_err["body"],
+                            exc_info=True,
+                        )
+                        error_details = api_err["message"] or error_details
+                    else:
+                        logger.error("LLM stream error for chat %s:\n%s", chat_id, stream_exc, exc_info=True)
+                    if not orchestrator.config.llm_key.strip():
+                        error_details = "LLM API key is missing. Open Settings and configure your provider key."
+                    run_failed = True
+                    stream_aborted = True
+                    await emit_trace_and_push(
+                        _build_event(
+                            "error",
+                            content=f"LLM stream failed: {error_details}",
+                            metadata={"phase": "stream_error"},
+                            session_id=synthetic_session_id,
+                            chat_id=str(chat_id),
+                            message_id=request_message_id,
+                        )
                     )
-                    error_details = api_err["message"] or error_details
-                else:
-                    logger.error("LLM stream error for chat %s:\n%s", chat_id, stream_exc, exc_info=True)
-                if not orchestrator.config.llm_key.strip():
-                    error_details = "LLM API key is missing. Open Settings and configure your provider key."
-                run_failed = True
-                stream_aborted = True
-                await emit_trace_and_push(
-                    _build_event(
-                        "error",
-                        content=f"LLM stream failed: {error_details}",
-                        metadata={"phase": "stream_error"},
-                        session_id=synthetic_session_id,
-                        chat_id=str(chat_id),
-                        message_id=request_message_id,
-                    )
-                )
-            finally:
-                aclose = getattr(stream_iterator, "aclose", None)
-                if aclose is not None:
-                    try:
-                        await aclose()  # type: ignore[misc]
-                    except Exception:
-                        pass
+                finally:
+                    aclose = getattr(stream_iterator, "aclose", None)
+                    if aclose is not None:
+                        try:
+                            await aclose()  # type: ignore[misc]
+                        except Exception:
+                            pass
 
             if stream_aborted:
                 break
@@ -2556,37 +2685,23 @@ async def _run_agent_loop_impl(
 
     if not ephemeral_run:
         try:
-            state_str = await orchestrator.nats.kv_get("SESSIONS", f"session.{chat_id}")
-            if not state_str:
-                logger.warning(
-                    "tool memory persistence skipped session missing user_id=%s chat_id=%s session_id=%s message_id=%s",
-                    user_id,
-                    chat_id,
-                    synthetic_session_id,
-                    request_message_id,
-                )
-            else:
-                state = json.loads(state_str)
-                if "working_memory" not in state:
-                    state["working_memory"] = {}
-                previous_tool_memory = state["working_memory"].get("tool_memory")
-                updated_tool_memory = build_tool_memory_from_trace_events(
-                    previous_tool_memory, trace_events
-                )
-                state["working_memory"]["tool_memory"] = updated_tool_memory
-                await orchestrator.nats.kv_set(
-                    "SESSIONS", f"session.{chat_id}", json.dumps(state)
-                )
-                await orchestrator.file_store.write_session(chat_id, state)
+            state = await read_session_state(orchestrator, chat_id)
+            working_memory = state.setdefault("working_memory", {})
+            previous_tool_memory = working_memory.get("tool_memory")
+            updated_tool_memory = build_tool_memory_from_trace_events(
+                previous_tool_memory, trace_events
+            )
+            working_memory["tool_memory"] = updated_tool_memory
+            await persist_session_state(orchestrator, chat_id, state)
 
-                logger.info(
-                    "tool memory persisted user_id=%s chat_id=%s session_id=%s message_id=%s mutation_count=%s",
-                    user_id,
-                    chat_id,
-                    synthetic_session_id,
-                    request_message_id,
-                    len(updated_tool_memory.get("completed_mutations", [])),
-                )
+            logger.info(
+                "tool memory persisted user_id=%s chat_id=%s session_id=%s message_id=%s mutation_count=%s",
+                user_id,
+                chat_id,
+                synthetic_session_id,
+                request_message_id,
+                len(updated_tool_memory.get("completed_mutations", [])),
+            )
         except Exception:
             logger.exception(
                 "tool memory persistence failed user_id=%s chat_id=%s session_id=%s message_id=%s",
@@ -2598,10 +2713,29 @@ async def _run_agent_loop_impl(
 
     profiler.dump(str(orchestrator.file_store.chats_path / chat_id / "logs"))
     if not ephemeral_run:
-        try:
-            await push_event({"type": "done", "messageId": request_message_id})
-        except Exception:
-            logger.exception("Failed to push done event")
+        # Preempted turns must not emit `done`. A replacement turn already owns the
+        # webview stream; a trailing done races ahead and flips isStreaming=false,
+        # after which the UI drops all live events while the worker keeps running.
+        cancel_reason = orchestrator.run_cancel_reason(run_id) if run_id else None
+        if cancel_reason == "preempted":
+            logger.info(
+                "Skipping done event for preempted turn chat_id=%s message_id=%s run_id=%s",
+                chat_id,
+                request_message_id,
+                run_id,
+            )
+        else:
+            try:
+                done_event: dict[str, Any] = {
+                    "type": "done",
+                    "messageId": request_message_id,
+                }
+                client_turn_id = context.get("client_turn_id")
+                if isinstance(client_turn_id, str) and client_turn_id:
+                    done_event["client_turn_id"] = client_turn_id
+                await push_event(done_event)
+            except Exception:
+                logger.exception("Failed to push done event")
 
     if ephemeral_run:
         from app.services.deep_plan.runner import resolve_ephemeral_agent_response
