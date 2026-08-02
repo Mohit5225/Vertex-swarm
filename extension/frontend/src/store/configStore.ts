@@ -167,6 +167,14 @@ const handleExtensionMessage = (event: MessageEvent) => {
         ) {
           useDeepPlanStore.getState().releaseComposerLock();
         }
+        if (phase === "context_policy") {
+          const notice = typeof message.payload?.content === "string"
+            ? message.payload.content.trim()
+            : "";
+          if (notice) {
+            useChatStore.getState().addContextNotice(notice);
+          }
+        }
       }
 
       if (eventType === "deep_plan_mode_active" || eventType === "deep_plan_started") {
@@ -261,6 +269,7 @@ const handleExtensionMessage = (event: MessageEvent) => {
                     mimeType: attachment.mimeType,
                     size: attachment.size,
                     uri: attachment.uri as string,
+                    relativePath: attachment.relativePath,
                   }))
               : undefined,
             turnDurationMs:
@@ -338,26 +347,65 @@ const handleExtensionMessage = (event: MessageEvent) => {
             mimeType: string;
             size: number;
             uri?: string;
+            relativePath?: string;
           }) => ({
             id: attachment.id,
             filename: attachment.filename,
             mimeType: attachment.mimeType,
             size: attachment.size,
             uri: attachment.uri ?? "",
+            relativePath: attachment.relativePath,
           })),
         );
       break;
     }
 
-    case "messages-truncated":
-      useChatStore.getState().truncateAfter(message.payload.messageId);
-      // We also need to emit a custom event on window so ChatPanel can pick up the queuedEdit text
+    case "messages-truncated": {
+      const payload = message.payload as {
+        messageId: string;
+        messageText: string;
+        attachments?: Array<{
+          id: string;
+          filename: string;
+          mimeType: string;
+          size: number;
+          uri?: string;
+          relativePath?: string;
+        }>;
+      };
+      const existing = useChatStore
+        .getState()
+        .messages.find(
+          (entry) =>
+            entry.id === payload.messageId ||
+            entry.dbMessageId === payload.messageId,
+        );
+      const fallbackAttachments = existing?.attachments ?? [];
+
+      useChatStore.getState().truncateAfter(payload.messageId);
+
+      const restoredSource =
+        payload.attachments && payload.attachments.length > 0
+          ? payload.attachments
+          : fallbackAttachments;
+
       window.dispatchEvent(
         new CustomEvent("vertex-queued-edit", {
-          detail: { text: message.payload.messageText },
+          detail: {
+            text: payload.messageText,
+            attachments: restoredSource.map((attachment) => ({
+              id: attachment.id,
+              filename: attachment.filename,
+              mimeType: attachment.mimeType,
+              size: attachment.size,
+              uri: attachment.uri ?? "",
+              relativePath: attachment.relativePath,
+            })),
+          },
         }),
       );
       break;
+    }
 
     case "cancel-stream":
       useChatStore.getState().finishStreaming();
@@ -390,6 +438,26 @@ const handleExtensionMessage = (event: MessageEvent) => {
       } else {
         useDeepPlanStore.getState().deactivate();
       }
+      break;
+    }
+
+    case "stream-start-failed": {
+      clearRestoreTimers();
+      const failureMessage =
+        typeof message.payload?.message === "string"
+          ? message.payload.message
+          : "Unable to start the agent stream. Please try again.";
+      const tempId =
+        typeof message.payload?.tempId === "string"
+          ? message.payload.tempId
+          : undefined;
+      if (tempId) {
+        useChatStore.getState().rollbackOptimisticSend(tempId, failureMessage);
+      } else {
+        useChatStore.getState().setError(failureMessage);
+        useChatStore.getState().finishStreaming();
+      }
+      useDeepPlanStore.getState().releaseComposerLock();
       break;
     }
 

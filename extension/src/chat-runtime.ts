@@ -14,7 +14,7 @@ import { LocalChatStore } from './local-chat-store';
 import { AttachmentStore } from './attachment-store';
 import { ContextPolicyStore } from './context-policy';
 import type { ContextPolicyData } from './types/index';
-import { EntitlementClient } from './auth/entitlement-client';
+import { EntitlementClient, ACCESS_TOKEN_REFRESH_BUFFER_MS } from './auth/entitlement-client';
 import type {
   WebviewToExtensionMessage,
   SessionEvent,
@@ -53,7 +53,6 @@ export interface VertexSwarmChatRuntimeOptions {
 
 export class VertexSwarmChatRuntime {
   private static readonly MAX_PROCESSED_TOOL_CALL_IDS = 10_000;
-  private static readonly TOKEN_REFRESH_BUFFER_MS = 5 * 60 * 1000;
 
   /** Strip `/deep-plan` prefix; opens gate A on the backend session. */
   private static parseDeepPlanCommand(message: string): { message: string; deepPlanRequested: boolean } {
@@ -99,7 +98,6 @@ export class VertexSwarmChatRuntime {
   private clientTurnSerial = 0;
   private staticContext: { os: string; workspaceFolders: string[] } | null = null;
   private lastRegisteredRpcClient: any = null;
-  private sessionMaintenanceInterval?: NodeJS.Timeout;
   private streamStallTimer?: NodeJS.Timeout;
   private streamStallChatId: string | null = null;
   private lastStreamEventAt = 0;
@@ -151,6 +149,11 @@ export class VertexSwarmChatRuntime {
     );
     this.processManager = options.processManager;
     this.toWebviewUri = options.toWebviewUri;
+    void this.attachmentStore.sweepStagingDirectories().then((removed) => {
+      if (removed > 0) {
+        this.log(`swept ${removed} orphan attachment staging director${removed === 1 ? 'y' : 'ies'}`);
+      }
+    });
     this.processManager.onBackendDied((reason) => {
       this.log(`Backend died under us: ${reason}`);
       this.lastRegisteredRpcClient = null;
@@ -163,38 +166,17 @@ export class VertexSwarmChatRuntime {
       });
       this.post({ type: 'stream-complete' });
     });
-
-    // Actively maintain session in the background (runs every 45 seconds)
-    this.sessionMaintenanceInterval = setInterval(() => {
-      this.maintainSession();
-    }, 45 * 1000);
   }
 
-  private async maintainSession(): Promise<void> {
+  /** Called from extension.ts on a single shared interval (not per-runtime). */
+  public async maintainSession(): Promise<void> {
     try {
-      const token = await this.entitlementClient.getToken();
-      if (!token) return;
-
-      const check = await this.entitlementClient.checkEntitlement(token);
-      if (!check.valid && check.exp === 0) {
-        this.log('Session token failed local issuer/format checks.');
+      const token = await this.entitlementClient.ensureFreshAccessToken(ACCESS_TOKEN_REFRESH_BUFFER_MS);
+      if (!token) {
         return;
       }
-      // Refresh if it expires within the buffer
-      if (check.exp * 1000 < Date.now() + VertexSwarmChatRuntime.TOKEN_REFRESH_BUFFER_MS) {
-        const refreshed = await this.entitlementClient.refreshToken();
-        if (refreshed) {
-          this.log('Background session maintenance: token refreshed');
-          if (this.processManager.rpcClient) {
-            this.processManager.rpcClient.sendNotification('config/update_keys', { entitlement_token: refreshed });
-          }
-        } else {
-          this.log(
-            check.exp * 1000 < Date.now()
-              ? 'Background session maintenance: refresh failed and access token is expired'
-              : 'Background session maintenance: refresh failed; will retry while access token is still valid'
-          );
-        }
+      if (this.processManager.rpcClient) {
+        this.processManager.rpcClient.sendNotification('config/update_keys', { entitlement_token: token });
       }
     } catch (e) {
       this.log(`Background session maintenance failed: ${e}`);
@@ -203,6 +185,16 @@ export class VertexSwarmChatRuntime {
 
   private log(message: string) {
     debugLog('ChatRuntime', message);
+  }
+
+  private postStreamStartFailed(tempId: string | undefined, message: string): void {
+    this.post({
+      type: 'stream-start-failed',
+      payload: {
+        message,
+        ...(tempId ? { tempId } : {}),
+      },
+    });
   }
 
   private clearStreamStallWatch(): void {
@@ -360,7 +352,7 @@ export class VertexSwarmChatRuntime {
 
       case 'request-session': {
         this.log('webview requested current session');
-        const hasValidSession = await this.syncWebviewConfig();
+        const hasValidSession = await this.syncWebviewConfig({ coldStart: true });
         if (hasValidSession) {
           await this.sendChatList();
         }
@@ -475,24 +467,7 @@ export class VertexSwarmChatRuntime {
         this.activeClientTurnId = clientTurnId;
 
         try {
-          let token = await this.entitlementClient.getToken();
-          if (token) {
-            const check = await this.entitlementClient.checkEntitlement(token);
-            if (!check.valid && check.exp === 0) {
-              token = undefined;
-            } else if (check.exp * 1000 < Date.now() + VertexSwarmChatRuntime.TOKEN_REFRESH_BUFFER_MS) {
-              this.log('Token expiring within 5 minutes, refreshing...');
-              const refreshed = await this.entitlementClient.refreshToken();
-              if (refreshed) {
-                token = refreshed;
-                if (this.processManager.rpcClient) {
-                  this.processManager.rpcClient.sendNotification('config/update_keys', { entitlement_token: token });
-                }
-              } else if (check.exp * 1000 < Date.now()) {
-                token = undefined; // Force auth-required if strictly expired and refresh failed
-              }
-            }
-          }
+          const token = await this.entitlementClient.ensureFreshAccessToken(ACCESS_TOKEN_REFRESH_BUFFER_MS);
 
           if (!token) {
             this.post({ type: 'auth-required' });
@@ -519,7 +494,10 @@ export class VertexSwarmChatRuntime {
           );
 
           if (!chatId) {
-            this.post({ type: 'error', payload: 'Failed to create chat' });
+            this.postStreamStartFailed(
+              payload.tempId,
+              'Failed to create chat. Please try again.',
+            );
             this.completeClientTurn(clientTurnId);
             return;
           }
@@ -541,8 +519,11 @@ export class VertexSwarmChatRuntime {
             this.log('Backend not running during stream start, attempting respawn...');
             const success = await this.syncWebviewConfig();
             if (!success || !this.processManager.rpcClient) {
-              // syncWebviewConfig already posts the appropriate auth-required or error UI
               this.log('stream start aborted: backend unavailable after respawn attempt');
+              this.postStreamStartFailed(
+                payload.tempId,
+                'Unable to start the agent stream. Please try again.',
+              );
               this.completeClientTurn(clientTurnId);
               return;
             }
@@ -598,17 +579,37 @@ export class VertexSwarmChatRuntime {
           const incomingAttachments = Array.isArray(payload.attachments)
             ? (payload.attachments as ChatAttachmentPayload[])
             : [];
+          const existingAttachments = Array.isArray(payload.existingAttachments)
+            ? payload.existingAttachments
+            : [];
 
-          if (incomingAttachments.length > 0) {
+          if (incomingAttachments.length > 0 || existingAttachments.length > 0) {
             const savePolicy = await this.contextPolicyStore.load();
-            const records = await this.attachmentStore.saveAttachments(
-              chatId,
-              incomingAttachments,
-              {
-                maxFileBytes: savePolicy.images.save_max_bytes,
-                maxCountPerMessage: savePolicy.images.save_max_count,
-              },
-            );
+            const saveLimits = {
+              maxFileBytes: savePolicy.images.save_max_bytes,
+              maxCountPerMessage: savePolicy.images.save_max_count,
+            };
+            const records = [
+              ...(existingAttachments.length > 0
+                ? await this.attachmentStore.resolveExistingAttachments(
+                    chatId,
+                    existingAttachments,
+                    saveLimits,
+                  )
+                : []),
+              ...(incomingAttachments.length > 0
+                ? await this.attachmentStore.saveAttachments(
+                    chatId,
+                    incomingAttachments,
+                    saveLimits,
+                  )
+                : []),
+            ];
+            if (records.length > saveLimits.maxCountPerMessage) {
+              throw new Error(
+                `Maximum ${saveLimits.maxCountPerMessage} attachments per message.`,
+              );
+            }
             savedAttachments = this.resolveAttachmentUris(chatId, records);
             if (payload.tempId) {
               this.post({
@@ -662,7 +663,12 @@ export class VertexSwarmChatRuntime {
         } catch (error) {
           const errorMessage = error instanceof Error ? error.message : 'Unknown error';
           this.log(`Failed to start stream: ${errorMessage}`);
-          this.post({ type: 'error', payload: errorMessage });
+          this.postStreamStartFailed(
+            payload.tempId,
+            errorMessage.includes('attachment') || errorMessage.includes('image')
+              ? errorMessage
+              : `Unable to start the agent stream: ${errorMessage}`,
+          );
           this.completeClientTurn(clientTurnId);
         }
         break;
@@ -946,8 +952,25 @@ export class VertexSwarmChatRuntime {
       }
 
       case 'truncate-messages': {
-        const payload = message.payload as any;
+        const payload = message.payload as {
+          chatId?: string;
+          messageId?: string;
+          messageText?: string;
+          preserveAttachmentPaths?: string[];
+          editAttachments?: Array<{
+            id: string;
+            filename: string;
+            mimeType: string;
+            size: number;
+            relativePath: string;
+          }>;
+        };
         const { chatId, messageId, messageText } = payload;
+        const preservePaths = new Set(
+          Array.isArray(payload.preserveAttachmentPaths)
+            ? payload.preserveAttachmentPaths.filter((entry) => typeof entry === 'string')
+            : [],
+        );
         this.log(`truncate-messages requested chat_id=${chatId} message_id=${messageId}`);
 
         if (!chatId || !messageId) {
@@ -957,6 +980,25 @@ export class VertexSwarmChatRuntime {
         try {
           const result = await this.chatStore.truncateMessages(chatId, messageId);
           this.log(`truncate-messages: deleted ${result.deletedCount} messages session_id=${result.sessionId}`);
+
+          const pathsToDelete = result.deletedAttachmentPaths.filter(
+            (relativePath) => !preservePaths.has(relativePath),
+          );
+
+          if (pathsToDelete.length > 0) {
+            const removedFiles = await this.attachmentStore.deleteAttachmentFiles(
+              chatId,
+              pathsToDelete,
+            );
+            this.log(
+              `truncate-messages: deleted ${removedFiles} attachment file(s) chat_id=${chatId}`,
+            );
+          }
+
+          const restoredAttachments = Array.isArray(payload.editAttachments)
+            && payload.editAttachments.length > 0
+            ? this.resolveAttachmentUris(chatId, payload.editAttachments)
+            : [];
 
           // Rewind loaded tool categories — the agent must re-load for the
           // truncated conversation point instead of inheriting later state.
@@ -979,7 +1021,11 @@ export class VertexSwarmChatRuntime {
           // Tell webview to drop the messages and pre-fill input
           this.post({
             type: 'messages-truncated',
-            payload: { messageId, messageText: messageText ?? '' },
+            payload: {
+              messageId,
+              messageText: messageText ?? '',
+              attachments: restoredAttachments,
+            },
           });
         } catch (err) {
           const msg = err instanceof Error ? err.message : String(err);
@@ -1003,24 +1049,13 @@ export class VertexSwarmChatRuntime {
 
 
 
-  public async syncWebviewConfig(): Promise<boolean> {
-    let token = await this.entitlementClient.getToken();
-    if (token) {
-      const check = await this.entitlementClient.checkEntitlement(token);
-      if (!check.valid && check.exp === 0) {
-        token = undefined;
-      } else if (check.exp * 1000 < Date.now() + VertexSwarmChatRuntime.TOKEN_REFRESH_BUFFER_MS) {
-        this.log('Session expiring, attempting automatic JWT refresh...');
-        const refreshed = await this.entitlementClient.refreshToken();
-        if (refreshed) {
-          token = refreshed;
-          if (this.processManager.rpcClient) {
-            this.processManager.rpcClient.sendNotification('config/update_keys', { entitlement_token: token });
-          }
-        } else if (check.exp * 1000 < Date.now()) {
-          token = undefined;
-        }
-      }
+  public async syncWebviewConfig(options?: { coldStart?: boolean }): Promise<boolean> {
+    const token = await this.entitlementClient.ensureFreshAccessToken(
+      ACCESS_TOKEN_REFRESH_BUFFER_MS,
+      options?.coldStart ? { coldStart: true } : undefined,
+    );
+    if (token && this.processManager.rpcClient) {
+      this.processManager.rpcClient.sendNotification('config/update_keys', { entitlement_token: token });
     }
 
     if (!token) {

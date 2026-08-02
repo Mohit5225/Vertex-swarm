@@ -3,6 +3,9 @@ import * as http from 'http';
 import * as crypto from 'crypto';
 import { getHostedAuthUrl } from './hosted-auth-url';
 
+/** Start refreshing well before access-token expiry so a cold Render instance can wake up. */
+export const ACCESS_TOKEN_REFRESH_BUFFER_MS = 45 * 60 * 1000;
+
 export interface EntitlementResult {
   valid: boolean;
   /** The token's role claim (e.g. 'authenticated', 'admin'). */
@@ -12,6 +15,11 @@ export interface EntitlementResult {
   /** The user's email from the JWT email claim. */
   email: string;
   exp: number;
+}
+
+interface RefreshTokenOptions {
+  maxAttempts?: number;
+  retryDelayMs?: (attempt: number) => number;
 }
 
 export class EntitlementClient {
@@ -107,6 +115,40 @@ export class EntitlementClient {
   }
 
   /**
+   * Return a valid access token, refreshing against the hosted auth service when
+   * expiry is within `bufferMs`. Uses the refresh token — still works after the
+   * access token has expired, as long as the refresh session is alive.
+   */
+  async ensureFreshAccessToken(
+    bufferMs: number = ACCESS_TOKEN_REFRESH_BUFFER_MS,
+    options?: { coldStart?: boolean },
+  ): Promise<string | undefined> {
+    let token = await this.getToken();
+    if (!token) {
+      return undefined;
+    }
+
+    const check = await this.checkEntitlement(token);
+    if (!check.valid && check.exp === 0) {
+      return undefined;
+    }
+
+    const needsRefresh = check.exp * 1000 < Date.now() + bufferMs;
+    if (!needsRefresh) {
+      return token;
+    }
+
+    const refreshed = options?.coldStart
+      ? await this.refreshTokenWithColdStartRetries()
+      : await this.refreshToken();
+    if (refreshed) {
+      return refreshed;
+    }
+
+    return check.exp * 1000 >= Date.now() ? token : undefined;
+  }
+
+  /**
    * Refreshes the token against the Hosted Auth API using the current JWT.
    */
   async refreshToken(): Promise<string | undefined> {
@@ -118,7 +160,24 @@ export class EntitlementClient {
     return this.refreshPromise;
   }
 
-  private async refreshTokenInternal(): Promise<string | undefined> {
+  /**
+   * Refresh with longer backoff for Render free-tier cold starts (workspace open).
+   */
+  async refreshTokenWithColdStartRetries(): Promise<string | undefined> {
+    if (!this.refreshPromise) {
+      this.refreshPromise = this.refreshTokenInternal({
+        maxAttempts: 5,
+        retryDelayMs: (attempt) => Math.min(60_000, 10_000 * attempt),
+      }).finally(() => {
+        this.refreshPromise = null;
+      });
+    }
+    return this.refreshPromise;
+  }
+
+  private async refreshTokenInternal(options?: RefreshTokenOptions): Promise<string | undefined> {
+    const maxAttempts = options?.maxAttempts ?? EntitlementClient.FETCH_RETRIES;
+    const retryDelayMs = options?.retryDelayMs ?? ((attempt: number) => 1500 * attempt);
     const refreshToken = await this.secretStorage.get('vertex_refresh_jwt');
     if (!refreshToken) {
       this.warn('No refresh token found in storage.');
@@ -128,9 +187,9 @@ export class EntitlementClient {
     const url = this.authEndpoint('/oauth/refresh');
     let lastError: unknown;
 
-    for (let attempt = 1; attempt <= EntitlementClient.FETCH_RETRIES; attempt++) {
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
       try {
-        this.log(`Refreshing tokens (attempt ${attempt}/${EntitlementClient.FETCH_RETRIES}) via ${url}`);
+        this.log(`Refreshing tokens (attempt ${attempt}/${maxAttempts}) via ${url}`);
         const response = await fetch(url, {
           method: 'POST',
           headers: {
@@ -167,15 +226,15 @@ export class EntitlementClient {
         lastError = err;
         const detail = this.formatFetchError(err, url);
         this.warn(detail);
-        if (attempt < EntitlementClient.FETCH_RETRIES && this.isRetryableFetchError(err)) {
-          await new Promise((resolve) => setTimeout(resolve, 1500 * attempt));
+        if (attempt < maxAttempts && this.isRetryableFetchError(err)) {
+          await new Promise((resolve) => setTimeout(resolve, retryDelayMs(attempt)));
           continue;
         }
-        if (attempt < EntitlementClient.FETCH_RETRIES) {
+        if (attempt < maxAttempts) {
           // Non-network 5xx / transient server errors — still retry a couple times.
           const message = err instanceof Error ? err.message : String(err);
           if (/status 5\d\d/.test(message) || /Refresh failed/.test(message)) {
-            await new Promise((resolve) => setTimeout(resolve, 1500 * attempt));
+            await new Promise((resolve) => setTimeout(resolve, retryDelayMs(attempt)));
             continue;
           }
         }

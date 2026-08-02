@@ -109,7 +109,11 @@ export const FileEditRow: React.FC<Props> = ({ node, expanded, onToggle }) => {
         <span className="flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-[var(--vs-surface)] text-[var(--vs-text-primary)] shadow-[0_0_0_3px_rgba(10,14,22,0.94)]">
           <Icon className="h-3 w-3" />
         </span>
-        <span className="min-w-0 flex-1 truncate text-[13px] font-medium text-[var(--vs-text-secondary)]">
+        <span
+          className={`min-w-0 flex-1 truncate text-[13px] font-medium ${
+            node.state === 'running' ? 'vs-text-shimmer' : 'text-[var(--vs-text-secondary)]'
+          }`}
+        >
           {node.summary}
         </span>
         {hasChangeDetail ? (

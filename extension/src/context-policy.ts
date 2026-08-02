@@ -66,7 +66,7 @@ export const DEFAULT_CONTEXT_POLICY: ContextPolicy = {
     reserve_for_reply_tokens: 8_000,
   },
   text: {
-    compaction_enabled: false,
+    compaction_enabled: true,
     max_history_tokens: null,
   },
   images: {

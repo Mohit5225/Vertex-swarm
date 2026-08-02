@@ -1,9 +1,11 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
-import { ChevronDown, Loader2 } from 'lucide-react'
+import { ChevronDown } from 'lucide-react'
 import {
   buildAgentTurnTimeline,
+  EXPLORE_COLLAPSE_AT,
+  exploreThingCount,
   finalizeAgentTurnTimeline,
   formatDuration,
   formatExploreSummary,
@@ -119,6 +121,9 @@ const AgentTurnView: React.FC<Props> = ({
     setExpanded((current) => ({ ...current, [id]: !current[id] }))
   }
 
+  const isRowOpen = (id: string, defaultOpen: boolean) =>
+    Object.prototype.hasOwnProperty.call(expanded, id) ? expanded[id] : defaultOpen
+
   return (
     <div className="flex flex-col gap-1">
       {hasToolWork ? (
@@ -127,10 +132,13 @@ const AgentTurnView: React.FC<Props> = ({
           onClick={() => setTraceExpanded((value) => !value)}
           className="flex w-full items-center gap-2 rounded-md px-1 py-1 text-left transition hover:bg-white/[0.03]"
         >
-          {isWorking ? (
-            <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin text-[var(--vs-accent)]" />
-          ) : null}
-          <span className="text-[12px] font-medium text-[var(--vs-text-tertiary)]">{turnLabel}</span>
+          <span
+            className={`text-[12px] font-medium ${
+              isWorking ? 'vs-text-shimmer' : 'text-[var(--vs-text-tertiary)]'
+            }`}
+          >
+            {turnLabel}
+          </span>
           {rollup ? (
             <span className="text-[11px] font-medium text-[var(--vs-text-tertiary)]">{rollup}</span>
           ) : null}
@@ -141,9 +149,8 @@ const AgentTurnView: React.FC<Props> = ({
       ) : null}
 
       {isLive && !hasToolWork && !hasVisibleNarrative ? (
-        <div className="flex items-center gap-2 px-1 py-1 text-[12px] text-[var(--vs-text-tertiary)]">
-          <Loader2 className="h-3 w-3 shrink-0 animate-spin text-[var(--vs-accent)]" />
-          <span>Working…</span>
+        <div className="flex items-center gap-2 px-1 py-1 text-[12px]">
+          <span className="vs-text-shimmer font-medium">Working…</span>
         </div>
       ) : null}
 
@@ -182,7 +189,10 @@ const AgentTurnView: React.FC<Props> = ({
 
           const durationMs = getThoughtDurationMs(segment)
           const label = formatThoughtSummary(durationMs, segment.isLive)
-          const isExpanded = expanded[segment.id] ?? false
+          const isExpanded = isRowOpen(
+            segment.id,
+            alwaysExpandTrace || Boolean(segment.isLive)
+          )
           return (
             <CollapsibleWorkRow
               key={segment.id}
@@ -199,15 +209,36 @@ const AgentTurnView: React.FC<Props> = ({
         }
 
         if (segment.kind === 'explore') {
-          const label = formatExploreSummary(
-            {
-              filesRead: segment.filesRead,
-              searches: segment.searches,
-              lists: segment.lists,
-            },
-            segment.isLive
-          )
-          const isExpanded = expanded[segment.id] ?? false
+          const counts = {
+            filesRead: segment.filesRead,
+            searches: segment.searches,
+            lists: segment.lists,
+          }
+          const thingCount = exploreThingCount(counts)
+          const batchDefaultOpen =
+            alwaysExpandTrace ||
+            Boolean(segment.isLive) ||
+            thingCount < EXPLORE_COLLAPSE_AT
+
+          // One concrete action: show the path/label directly — no "Listed 1 folder" shell.
+          if (segment.nodes.length === 1) {
+            const node = segment.nodes[0]
+            const rowId = segment.id
+            return (
+              <CollapsibleWorkRow
+                key={segment.id}
+                label={node.summary}
+                isLive={Boolean(segment.isLive) || node.state === 'running'}
+                expanded={isRowOpen(rowId, false)}
+                onToggle={() => toggle(rowId)}
+              >
+                <ToolCallDebugPanel node={node} />
+              </CollapsibleWorkRow>
+            )
+          }
+
+          const label = formatExploreSummary(counts, segment.isLive)
+          const isExpanded = isRowOpen(segment.id, batchDefaultOpen)
           return (
             <CollapsibleWorkRow
               key={segment.id}
@@ -218,14 +249,15 @@ const AgentTurnView: React.FC<Props> = ({
             >
               <div className="space-y-1">
                 {segment.nodes.map((node) => {
-                  const nodeExpanded = expanded[`${segment.id}:${node.id}`] ?? false
+                  const nodeKey = `${segment.id}:${node.id}`
+                  const nodeExpanded = isRowOpen(nodeKey, false)
                   return (
                     <CollapsibleWorkRow
                       key={node.id}
                       label={node.summary}
                       isLive={node.state === 'running'}
                       expanded={nodeExpanded}
-                      onToggle={() => toggle(`${segment.id}:${node.id}`)}
+                      onToggle={() => toggle(nodeKey)}
                     >
                       <ToolCallDebugPanel node={node} />
                     </CollapsibleWorkRow>
@@ -265,7 +297,10 @@ const AgentTurnView: React.FC<Props> = ({
             <FileEditRow
               key={segment.id}
               node={segment.node}
-              expanded={expanded[segment.id] ?? false}
+              expanded={isRowOpen(
+                segment.id,
+                alwaysExpandTrace || segment.node.state === 'running'
+              )}
               onToggle={() => toggle(segment.id)}
             />
           )
@@ -298,7 +333,10 @@ const AgentTurnView: React.FC<Props> = ({
             )
           }
 
-          const isExpanded = expanded[segment.id] ?? false
+          const isExpanded = isRowOpen(
+            segment.id,
+            alwaysExpandTrace || segment.node.state === 'running'
+          )
           return (
             <CollapsibleWorkRow
               key={segment.id}

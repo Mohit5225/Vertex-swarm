@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react'
-import { ChevronRight, Loader2, Terminal } from 'lucide-react'
+import { ChevronRight, Terminal } from 'lucide-react'
 import type { ToolExecutionNode } from '../lib/agentRunBlocks'
 import { getVsCodeApi } from '../lib/vscode'
 import {
@@ -128,7 +128,10 @@ const TerminalToolCard: React.FC<Props> = ({
               {payload.purpose}
             </span>
           ) : null}
-          <span className="terminal-tool-title" title={title}>
+          <span
+            className={`terminal-tool-title ${isRunning ? 'vs-text-shimmer terminal-tool-title--live' : ''}`}
+            title={title}
+          >
             {title}
           </span>
         </span>
@@ -144,9 +147,6 @@ const TerminalToolCard: React.FC<Props> = ({
         ) : null}
 
         <span className="terminal-tool-meta">
-          {isRunning ? (
-            <Loader2 className="h-3 w-3 animate-spin text-[var(--vs-accent)]" />
-          ) : null}
           {resolvedExitCode !== null ? (
             <span
               className={`terminal-tool-exit ${resolvedExitCode === 0 ? 'terminal-tool-exit--ok' : 'terminal-tool-exit--error'}`}

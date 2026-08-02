@@ -79,3 +79,60 @@ def message_content_text(content: Any) -> str:
                 parts.append(part["text"])
         return "\n".join(parts)
     return ""
+
+
+def compute_text_budget(
+    *,
+    max_total_tokens: int,
+    reserve_for_reply_tokens: int,
+    reserved_overhead_tokens: int,
+    image_tokens_used: int,
+    max_history_tokens: int | None,
+) -> int:
+    available = (
+        max_total_tokens
+        - reserve_for_reply_tokens
+        - reserved_overhead_tokens
+        - image_tokens_used
+    )
+    text_budget = max(0, available)
+    if max_history_tokens is not None:
+        text_budget = min(text_budget, max_history_tokens)
+    return text_budget
+
+
+def estimate_messages_text_tokens(messages: list[dict[str, Any]]) -> int:
+    total = 0
+    for message in messages:
+        content = message.get("content")
+        if isinstance(content, str):
+            total += estimate_text_tokens(content)
+        elif isinstance(content, list):
+            total += estimate_text_tokens(message_content_text(content))
+    return total
+
+
+def estimate_reserved_overhead_tokens(
+    *,
+    system_context_messages: list[dict[str, Any]],
+    workspace_skeleton: str | None,
+    active_tool_guidance: str | None,
+    include_deep_plan_guidance: bool = False,
+) -> int:
+    """Tokens reserved for the main system prompt plus orchestrator system inserts."""
+    from app.services.llm_service import _build_system_prompt
+
+    combined_guidance = active_tool_guidance
+    if include_deep_plan_guidance:
+        from app.services.prompt_loader import load_deep_plan_gate_guidance
+
+        deep_guidance = load_deep_plan_gate_guidance()
+        if deep_guidance:
+            parts = [part for part in (combined_guidance, deep_guidance) if part]
+            combined_guidance = "\n\n---\n\n".join(parts) if parts else None
+
+    total = estimate_text_tokens(
+        _build_system_prompt(workspace_skeleton, combined_guidance),
+    )
+    total += estimate_messages_text_tokens(system_context_messages)
+    return total

@@ -1,5 +1,5 @@
 import React, { useMemo } from 'react'
-import { ExternalLink, Loader2, Square } from 'lucide-react'
+import { ExternalLink, Square } from 'lucide-react'
 import { type ToolExecutionNode } from '../lib/agentRunBlocks'
 import {
   collectSubagentTraceEvents,
@@ -79,13 +79,17 @@ const SpawnSubagentRow: React.FC<Props> = ({
   return (
     <div className="flex min-w-0 items-start gap-2 py-0.5">
       {isLive ? (
-        <Loader2 className="mt-0.5 h-3 w-3 shrink-0 animate-spin text-[var(--vs-accent)]" />
+        <span className="mt-1.5 h-1.5 w-1.5 shrink-0 rounded-full bg-[var(--vs-accent)]" />
       ) : (
         <span className="mt-0.5 h-3 w-3 shrink-0 rounded-full bg-[#7dcea0]/80" />
       )}
       <div className="min-w-0 flex-1">
         <div className="flex flex-wrap items-center gap-2">
-          <p className="text-[12px] leading-5 text-[var(--vs-text-secondary)]">
+          <p
+            className={`text-[12px] leading-5 ${
+              isLive ? 'vs-text-shimmer' : 'text-[var(--vs-text-secondary)]'
+            }`}
+          >
             {isLive ? `${label}…` : label}
           </p>
           <button

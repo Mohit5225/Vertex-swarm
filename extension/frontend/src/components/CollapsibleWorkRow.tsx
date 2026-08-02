@@ -1,5 +1,5 @@
 import React from 'react'
-import { ChevronDown, Loader2 } from 'lucide-react'
+import { ChevronDown } from 'lucide-react'
 
 interface Props {
   label: string
@@ -24,10 +24,13 @@ const CollapsibleWorkRow: React.FC<Props> = ({
       onClick={onToggle}
       className="flex w-full items-center gap-2 rounded-md px-1 py-1 text-left transition hover:bg-white/[0.03]"
     >
-      {isLive ? (
-        <Loader2 className="h-3 w-3 shrink-0 animate-spin text-[var(--vs-accent)]" />
-      ) : null}
-      <span className="text-[12px] font-medium text-[var(--vs-text-tertiary)]">{label}</span>
+      <span
+        className={`text-[12px] font-medium ${
+          isLive ? 'vs-text-shimmer' : 'text-[var(--vs-text-tertiary)]'
+        }`}
+      >
+        {label}
+      </span>
       {children ? (
         <span className="ml-auto inline-flex h-4 w-4 items-center justify-center text-[var(--vs-text-tertiary)]">
           <ChevronDown

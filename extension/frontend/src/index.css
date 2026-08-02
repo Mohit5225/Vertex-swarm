@@ -715,11 +715,11 @@
   }
 
   .retention-chips {
-    @apply mt-2 flex flex-wrap gap-1.5;
+    @apply mt-2 grid grid-cols-7 gap-1.5;
   }
 
   .retention-chip {
-    @apply min-w-[2.25rem] rounded-md px-2 py-1.5 text-center text-[12px] font-medium transition;
+    @apply min-w-0 rounded-md px-1 py-1.5 text-center text-[12px] font-medium transition;
     color: var(--vs-text-secondary);
     background: rgba(255, 255, 255, 0.03);
     border: 1px solid var(--vs-border-soft);
@@ -764,6 +764,15 @@
 
   .context-policy-field {
     @apply mt-3 first:mt-0;
+  }
+
+  .context-policy-toggle {
+    @apply mt-3 flex items-start gap-2 text-[12px] leading-5;
+    color: var(--vs-text-secondary);
+  }
+
+  .context-policy-toggle input {
+    @apply mt-0.5;
   }
 
   .context-policy-field-header {
@@ -869,6 +878,10 @@
   .terminal-tool-title {
     @apply truncate text-[13px] font-medium;
     color: var(--vs-text-primary);
+  }
+
+  .terminal-tool-title--live {
+    color: transparent;
   }
 
   .terminal-tool-mode {
@@ -979,6 +992,37 @@
 @layer utilities {
   .animate-fade-up {
     animation: fadeUp 0.38s ease-out forwards;
+  }
+
+  /* Cursor-style live status: highlight sweeps through the glyphs */
+  .vs-text-shimmer {
+    --vs-shimmer-base: var(--vs-text-tertiary);
+    --vs-shimmer-peak: color-mix(in srgb, var(--vs-text-primary) 88%, var(--vs-accent-bright));
+    background-image: linear-gradient(
+      90deg,
+      var(--vs-shimmer-base) 0%,
+      var(--vs-shimmer-base) 40%,
+      var(--vs-shimmer-peak) 50%,
+      var(--vs-shimmer-base) 60%,
+      var(--vs-shimmer-base) 100%
+    );
+    background-size: 220% 100%;
+    background-repeat: no-repeat;
+    -webkit-background-clip: text;
+    background-clip: text;
+    color: transparent;
+    -webkit-text-fill-color: transparent;
+    animation: vsTextShimmer 1.7s linear infinite;
+  }
+
+  @keyframes vsTextShimmer {
+    0% {
+      background-position: 100% 0;
+    }
+
+    100% {
+      background-position: -120% 0;
+    }
   }
 
   @keyframes fadeUp {

@@ -7,12 +7,20 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from app.services.context.budget import compute_text_budget
 from app.services.context.image_encoding import EncodedImage, encode_image_file
 from app.services.context.message_parts import build_user_content
 from app.services.context.paths import resolve_attachment_path
 from app.services.context.policy import ContextPolicy
+from app.services.context.text_selection import (
+    compaction_notice,
+    estimate_history_message_text_tokens,
+    select_history_positions,
+)
 
 logger = logging.getLogger(__name__)
+
+_VALID_ROLES = frozenset({"user", "assistant", "system"})
 
 
 @dataclass
@@ -93,6 +101,25 @@ def _encode_attachments_for_message(
     return kept, notifications
 
 
+def _estimate_image_tokens_for_history(
+    history_raw: list[dict[str, Any]],
+    chat_dir: Path,
+    policy: ContextPolicy,
+    eligible: set[int],
+    notifications: list[str],
+) -> int:
+    total = 0
+    for index in sorted(eligible):
+        message = history_raw[index]
+        attachments = _attachment_records(message)
+        if not attachments:
+            continue
+        encoded, notes = _encode_attachments_for_message(chat_dir, attachments, policy)
+        notifications.extend(notes)
+        total += sum(item.estimated_tokens for item in encoded)
+    return total
+
+
 def _history_content(
     message: dict[str, Any],
     *,
@@ -121,23 +148,76 @@ def _history_content(
     return "[Empty message]"
 
 
+def _valid_history_entries(
+    history_raw: list[dict[str, Any]],
+) -> list[tuple[int, dict[str, Any]]]:
+    return [
+        (index, message)
+        for index, message in enumerate(history_raw)
+        if message.get("role") in _VALID_ROLES
+    ]
+
+
 def assemble_history_messages(
     history_raw: list[dict[str, Any]],
     chat_dir: Path,
     policy: ContextPolicy,
+    *,
+    reserved_overhead_tokens: int = 0,
 ) -> AssemblyResult:
     notifications: list[str] = []
+    entries = _valid_history_entries(history_raw)
+    if not entries:
+        return AssemblyResult(messages=[], notifications=notifications)
+
     eligible = _eligible_image_user_indices(
         history_raw,
         policy.images.max_turns_in_context,
     )
 
+    selected_indices: set[int]
+    if policy.text.compaction_enabled:
+        image_tokens_used = _estimate_image_tokens_for_history(
+            history_raw,
+            chat_dir,
+            policy,
+            eligible,
+            notifications,
+        )
+        text_budget = compute_text_budget(
+            max_total_tokens=policy.budget.max_total_tokens,
+            reserve_for_reply_tokens=policy.budget.reserve_for_reply_tokens,
+            reserved_overhead_tokens=reserved_overhead_tokens,
+            image_tokens_used=image_tokens_used,
+            max_history_tokens=policy.text.max_history_tokens,
+        )
+        token_costs = [
+            estimate_history_message_text_tokens(message)
+            for _, message in entries
+        ]
+        selection = select_history_positions(token_costs, text_budget)
+        selected_indices = {
+            entries[position][0] for position in selection.selected_positions
+        }
+        notice = compaction_notice(selection.omitted_count)
+        if notice:
+            notifications.append(notice)
+            logger.info(
+                "context compaction omitted=%s text_budget=%s image_tokens=%s reserved_overhead=%s",
+                selection.omitted_count,
+                text_budget,
+                image_tokens_used,
+                reserved_overhead_tokens,
+            )
+    else:
+        selected_indices = {index for index, _ in entries}
+
     messages: list[dict[str, Any]] = []
-    for index, message in enumerate(history_raw):
-        role = message.get("role")
-        if role not in {"user", "assistant", "system"}:
+    for index, message in entries:
+        if index not in selected_indices:
             continue
 
+        role = message.get("role")
         content = _history_content(
             message,
             chat_dir=chat_dir,

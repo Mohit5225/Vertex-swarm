@@ -236,13 +236,27 @@ const MessageRenderer: React.FC<Props> = ({ message }) => {
               onClick={() => {
                 const messageId = message.dbMessageId || message.id
                 if (!messageId || !currentChatId) return
+                const preserveAttachmentPaths = messageAttachments
+                  .map((attachment) => attachment.relativePath)
+                  .filter((relativePath): relativePath is string => Boolean(relativePath))
+                const editAttachments = messageAttachments
+                  .filter((attachment) => attachment.relativePath)
+                  .map((attachment) => ({
+                    id: attachment.id,
+                    filename: attachment.filename,
+                    mimeType: attachment.mimeType,
+                    size: attachment.size,
+                    relativePath: attachment.relativePath as string,
+                  }))
                 getVsCodeApi()?.postMessage({
                   type: 'truncate-messages',
                   payload: {
                     chatId: currentChatId,
                     messageId: messageId,
-                    messageText: message.content
-                  }
+                    messageText: message.content,
+                    preserveAttachmentPaths,
+                    editAttachments,
+                  },
                 })
               }}
               className="p-1.5 rounded-md text-[var(--vs-text-tertiary)] hover:text-white hover:bg-white/[0.05] transition-colors"

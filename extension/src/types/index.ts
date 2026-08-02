@@ -131,7 +131,14 @@ export type ExtensionToWebviewMessage =
   | { type: 'config-state'; payload: { snapshotRetentionDays: number } }
   | { type: 'context-policy-state'; payload: ContextPolicyData }
   | { type: 'message-id-assigned'; payload: { tempId: string; realId: string } }
-  | { type: 'messages-truncated'; payload: { messageId: string; messageText: string } }
+  | {
+      type: 'messages-truncated'
+      payload: {
+        messageId: string
+        messageText: string
+        attachments?: ChatAttachmentData[]
+      }
+    }
   | { type: 'auth-required' }
   | { type: 'config-missing'; payload?: { reason?: string } }
   | { type: 'config-ready'; payload: { llmBaseUrl?: string; llmModel?: string } }
@@ -171,6 +178,13 @@ export type ExtensionToWebviewMessage =
         tempId: string
         attachments: ChatAttachmentData[]
       }
+    }
+  | {
+      type: 'stream-start-failed'
+      payload: {
+        message: string
+        tempId?: string
+      }
     };
 
 // Messages FROM Webview TO Extension Host
@@ -202,7 +216,16 @@ export type WebviewToExtensionMessage =
   | { type: 'planning-approve'; payload: { pipeline_id: string } }
   | { type: 'planning-reject'; payload: { pipeline_id: string; rejection_feedback?: string } }
   | { type: 'exit-deep-plan-mode'; payload: Record<string, never> }
-  | { type: 'truncate-messages'; payload: { chatId: string; messageId: string; messageText: string } }
+  | {
+      type: 'truncate-messages'
+      payload: {
+        chatId: string
+        messageId: string
+        messageText: string
+        preserveAttachmentPaths?: string[]
+        editAttachments?: ChatAttachmentData[]
+      }
+    }
   | { type: 'save-config'; payload: { llmBaseUrl?: string, llmModel?: string, llmKey?: string, exaKey?: string } };
 
 // Legacy union kept for backward compat
@@ -214,6 +237,13 @@ export interface ChatAttachmentPayload {
   mimeType: string;
   /** Base64-encoded file bytes (no data: prefix) */
   dataBase64: string;
+}
+
+export interface ExistingChatAttachmentPayload {
+  id: string;
+  filename: string;
+  mimeType: string;
+  relativePath: string;
 }
 
 export interface ChatAttachmentData {
@@ -234,6 +264,8 @@ export interface StreamStartPayload {
   /** True when composer is in deep plan mode (slash /deep-plan or active mode). */
   deepPlanRequested?: boolean;
   attachments?: ChatAttachmentPayload[];
+  /** Reuse attachments already stored for this chat (e.g. after edit). */
+  existingAttachments?: ExistingChatAttachmentPayload[];
 }
 
 export interface StreamCancelPayload {

@@ -16,6 +16,7 @@ import {
 import {
   ACCEPTED_IMAGE_INPUT,
   createDraftAttachment,
+  createRestoredComposerAttachment,
   fileToBase64,
   revokeDraftAttachments,
   type ChatAttachment,
@@ -25,6 +26,7 @@ import { formatMegabytes, getImageSaveLimits } from '../lib/contextPolicy'
 import { useContextPolicyStore } from '../store/contextPolicyStore'
 import AttachmentThumbnails from './AttachmentThumbnails'
 import ImagePreviewModal from './ImagePreviewModal'
+import type { QueuedEditPayload } from '../lib/attachments'
 import { ArrowUp, ImagePlus, Paperclip, Plus, Sparkles, Square } from 'lucide-react'
 
 interface Props {
@@ -33,7 +35,7 @@ interface Props {
   ideContextEnabled: boolean
   onToggleIdeContext: (enabled: boolean) => void
   onQueuedPromptApplied?: () => void
-  queuedEdit?: string
+  queuedEdit?: QueuedEditPayload | null
   onQueuedEditApplied?: () => void
 }
 
@@ -219,7 +221,7 @@ const InputArea: React.FC<Props> = ({
   const removeDraftAttachment = (id: string) => {
     setDraftAttachments((current) => {
       const target = current.find((item) => item.id === id)
-      if (target) {
+      if (target?.previewUrl.startsWith('blob:')) {
         URL.revokeObjectURL(target.previewUrl)
       }
       return current.filter((item) => item.id !== id)
@@ -283,14 +285,24 @@ const InputArea: React.FC<Props> = ({
     setStreaming(true)
 
     try {
+      const newAttachments = attachmentsToSend.filter((attachment) => attachment.file)
+      const existingAttachments = attachmentsToSend
+        .filter((attachment) => attachment.relativePath && !attachment.file)
+        .map((attachment) => ({
+          id: attachment.id,
+          filename: attachment.filename,
+          mimeType: attachment.mimeType,
+          relativePath: attachment.relativePath as string,
+        }))
+
       const encodedAttachments =
-        attachmentsToSend.length > 0
+        newAttachments.length > 0
           ? await Promise.all(
-              attachmentsToSend.map(async (attachment) => ({
+              newAttachments.map(async (attachment) => ({
                 id: attachment.id,
                 filename: attachment.filename,
                 mimeType: attachment.mimeType,
-                dataBase64: await fileToBase64(attachment.file),
+                dataBase64: await fileToBase64(attachment.file as File),
               })),
             )
           : undefined
@@ -303,14 +315,16 @@ const InputArea: React.FC<Props> = ({
           tempId,
           deepPlanRequested,
           attachments: encodedAttachments,
+          existingAttachments:
+            existingAttachments.length > 0 ? existingAttachments : undefined,
         },
       })
     } catch (error) {
       console.error('Failed to send message:', error)
-      setError('Unable to start the agent stream. Please try again.')
-      setStreaming(false)
-      useChatStore.getState().truncateAfter(tempId)
-      revokeDraftAttachments(attachmentsToSend)
+      useChatStore.getState().rollbackOptimisticSend(
+        tempId,
+        'Unable to start the agent stream. Please try again.',
+      )
     }
   }
 
@@ -434,7 +448,14 @@ const InputArea: React.FC<Props> = ({
     if (!queuedEdit) {
       return
     }
-    loadComposerText(queuedEdit)
+    loadComposerText(queuedEdit.text)
+    revokeDraftAttachments(draftAttachmentsRef.current)
+    const restored = queuedEdit.attachments
+      .map((attachment) => createRestoredComposerAttachment(attachment))
+      .filter((attachment): attachment is DraftAttachment => attachment !== null)
+    setDraftAttachments(restored)
+    setPreviewIndex(null)
+    setAttachmentError(null)
     onQueuedEditApplied?.()
     requestAnimationFrame(() => {
       resizeTextarea()

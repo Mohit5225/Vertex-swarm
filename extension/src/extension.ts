@@ -1,5 +1,5 @@
 import * as vscode from 'vscode';
-import { EntitlementClient } from './auth/entitlement-client';
+import { EntitlementClient, ACCESS_TOKEN_REFRESH_BUFFER_MS } from './auth/entitlement-client';
 import { ConfigManager } from './config-manager';
 import { VertexSwarmSidebarProvider } from './webview-provider';
 import { VertexSwarmChatParticipant } from './chat-participant';
@@ -35,7 +35,10 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   // Initialize backend asynchronously so we don't block extension activation
   configManager.getConfig().then(async (config) => {
     try {
-      const token = await entitlementClient.getToken();
+      const token = await entitlementClient.ensureFreshAccessToken(
+        ACCESS_TOKEN_REFRESH_BUFFER_MS,
+        { coldStart: true },
+      );
       if (!token) return; // Let chat-runtime handle lazy start upon login
       await processManager.start(context, outputChannel, config, token);
       debugLog('Extension', 'backend process manager started');
@@ -90,6 +93,14 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       }
     )
   );
+
+  // One shared session-maintenance loop (Render free tier may be cold for minutes).
+  const sessionMaintenanceInterval = setInterval(() => {
+    void sidebarProvider.maintainSession();
+  }, 45 * 1000);
+  context.subscriptions.push({
+    dispose: () => clearInterval(sessionMaintenanceInterval),
+  });
 
   // Sidebar toggle commands
   context.subscriptions.push(

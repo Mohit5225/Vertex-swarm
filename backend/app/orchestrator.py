@@ -1779,23 +1779,6 @@ async def _run_agent_loop_impl(
     images_stripped_for_round_limit = False
     images_stripped_for_vision_error = False
 
-    if ephemeral_run:
-        llm_messages = []
-        for m in history_raw:
-            content = m.get("content")
-            role = m.get("role")
-            if not content:
-                content = "[Executed workspace tools]" if role == "assistant" else "[Empty message]"
-            llm_messages.append({"role": role, "content": content})
-    else:
-        assembly_result = assemble_history_messages(
-            history_raw,
-            chat_dir_path,
-            context_policy,
-        )
-        llm_messages = assembly_result.messages
-        context_notifications.extend(assembly_result.notifications)
-
     request_context_message = _build_request_context_message(req_request_context)
     tool_memory_message = format_tool_memory_for_prompt(existing_tool_memory)
 
@@ -1868,6 +1851,40 @@ async def _run_agent_loop_impl(
                 "Do NOT use plan_tool for this path."
             ),
         })
+
+    reserved_overhead_tokens = 0
+    if not ephemeral_run:
+        from app.services.context.budget import estimate_reserved_overhead_tokens
+
+        skeleton = (
+            req_workspace_skeleton
+            if isinstance(req_workspace_skeleton, str)
+            else None
+        )
+        reserved_overhead_tokens = estimate_reserved_overhead_tokens(
+            system_context_messages=system_context_messages,
+            workspace_skeleton=skeleton,
+            active_tool_guidance=active_tool_guidance,
+            include_deep_plan_guidance=deep_plan_gate_open,
+        )
+
+    if ephemeral_run:
+        llm_messages = []
+        for m in history_raw:
+            content = m.get("content")
+            role = m.get("role")
+            if not content:
+                content = "[Executed workspace tools]" if role == "assistant" else "[Empty message]"
+            llm_messages.append({"role": role, "content": content})
+    else:
+        assembly_result = assemble_history_messages(
+            history_raw,
+            chat_dir_path,
+            context_policy,
+            reserved_overhead_tokens=reserved_overhead_tokens,
+        )
+        llm_messages = assembly_result.messages
+        context_notifications.extend(assembly_result.notifications)
 
     if system_context_messages:
         llm_messages = [
@@ -2297,6 +2314,12 @@ async def _run_agent_loop_impl(
                         if changed:
                             images_stripped_for_vision_error = True
                             llm_messages = stripped_messages
+                            await emit_trace_and_push(
+                                build_status_event(
+                                    "Images were not sent because this model does not support vision. Retrying with text only.",
+                                    "context_policy",
+                                )
+                            )
                             round_prep = prepare_messages_for_llm_round(
                                 llm_messages,
                                 llm_round,

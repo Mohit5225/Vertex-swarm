@@ -23,7 +23,7 @@ class BudgetPolicy:
 
 @dataclass
 class TextPolicy:
-    compaction_enabled: bool = False
+    compaction_enabled: bool = True
     max_history_tokens: int | None = None
 
 

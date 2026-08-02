@@ -248,6 +248,15 @@ export const getThoughtDurationMs = (segment: Extract<TurnSegment, { kind: 'thou
   return delta > 0 ? delta : 0
 }
 
+/** Collapse explore batches once they hit this many concrete things (files + searches + lists). */
+export const EXPLORE_COLLAPSE_AT = 5
+
+export const exploreThingCount = (counts: {
+  filesRead: number
+  searches: number
+  lists: number
+}) => counts.filesRead + counts.searches + counts.lists
+
 export const formatExploreSummary = (
   counts: { filesRead: number; searches: number; lists: number },
   isLive = false

@@ -93,9 +93,11 @@ interface ChatState {
   patchMessageId: (tempId: string, realId: string) => void
   patchMessageAttachments: (tempId: string, attachments: ChatAttachment[]) => void
   truncateAfter: (messageId: string) => void
+  rollbackOptimisticSend: (tempId: string, errorMessage: string) => void
   setPlanReadyForMessageId: (messageId: string | null) => void
   setDeepPlanReadyForMessageId: (messageId: string | null) => void
   clearTodo: () => void
+  addContextNotice: (content: string) => void
 }
 
 const isTodoItem = (value: unknown): value is TodoItem => {
@@ -685,6 +687,44 @@ export const useChatStore = create<ChatState>((set) => ({
     })
   },
 
+  rollbackOptimisticSend: (tempId: string, errorMessage: string) => {
+    set((state) => {
+      const idx = state.messages.findIndex(
+        (m) => m.id === tempId || m.dbMessageId === tempId
+      )
+      if (idx === -1) {
+        return {
+          ...state,
+          isStreaming: false,
+          activeMessageId: null,
+          error: errorMessage,
+        }
+      }
+
+      const target = state.messages[idx]
+      target.attachments?.forEach((attachment) => {
+        if (attachment.uri.startsWith('blob:')) {
+          URL.revokeObjectURL(attachment.uri)
+        }
+      })
+
+      const messages = state.messages.slice(0, idx)
+      return {
+        messages,
+        isStreaming: false,
+        activeMessageId: null,
+        error: errorMessage,
+        currentTodo: extractTodoStateFromMessages(messages),
+        planReadyForMessageId:
+          state.planReadyForMessageId === tempId ? null : state.planReadyForMessageId,
+        deepPlanReadyForMessageId:
+          state.deepPlanReadyForMessageId === tempId
+            ? null
+            : state.deepPlanReadyForMessageId,
+      }
+    })
+  },
+
   clearMessages: () => {
     set((state) => ({
       messages: [],
@@ -710,5 +750,34 @@ export const useChatStore = create<ChatState>((set) => ({
 
   clearTodo: () => {
     set({ currentTodo: null })
+  },
+
+  addContextNotice: (content: string) => {
+    const trimmed = content.trim()
+    if (!trimmed) {
+      return
+    }
+
+    set((state) => {
+      const notice: ChatMessage = {
+        id: `sys-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+        type: 'system',
+        content: trimmed,
+        timestamp: Date.now(),
+      }
+
+      if (state.isStreaming && state.messages.length > 0) {
+        const last = state.messages[state.messages.length - 1]
+        if (last?.type === 'agent') {
+          return {
+            messages: [...state.messages.slice(0, -1), notice, last],
+          }
+        }
+      }
+
+      return {
+        messages: [...state.messages, notice],
+      }
+    })
   },
 }))

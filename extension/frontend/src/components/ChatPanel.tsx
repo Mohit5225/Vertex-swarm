@@ -11,6 +11,7 @@ import TodoWidget from './TodoWidget'
 import AgentTracePanel from './AgentTracePanel'
 import { useAgentPanelStore } from '../store/agentPanelStore'
 import { useContextPolicyStore } from '../store/contextPolicyStore'
+import type { ChatAttachment, QueuedEditPayload } from '../lib/attachments'
 import type { ContextPolicyData } from '../lib/contextPolicyTypes'
 
 import { collectMessageFileChanges } from '../lib/messageDiffs'
@@ -210,7 +211,7 @@ const ChatPanel: React.FC = () => {
     setCurrentIdeContextEnabled: state.setCurrentIdeContextEnabled,
   }))
   const [queuedPrompt, setQueuedPrompt] = useState('')
-  const [queuedEdit, setQueuedEdit] = useState('')
+  const [queuedEdit, setQueuedEdit] = useState<QueuedEditPayload | null>(null)
   const [showLogoutConfirm, setShowLogoutConfirm] = useState(false)
   const [showSessionPanel, setShowSessionPanel] = useState(false)
   const [showHistoryPanel, setShowHistoryPanel] = useState(false)
@@ -287,8 +288,11 @@ const ChatPanel: React.FC = () => {
     getVsCodeApi()?.postMessage({ type: 'load-chat-list' })
 
     const handleQueuedEdit = (e: Event) => {
-      const customEvent = e as CustomEvent<{ text: string }>
-      setQueuedEdit(customEvent.detail.text)
+      const customEvent = e as CustomEvent<QueuedEditPayload>
+      setQueuedEdit({
+        text: customEvent.detail.text ?? '',
+        attachments: customEvent.detail.attachments ?? [],
+      })
     }
     window.addEventListener('vertex-queued-edit', handleQueuedEdit)
     return () => {
@@ -558,7 +562,7 @@ const ChatPanel: React.FC = () => {
               ideContextEnabled={currentIdeContextEnabled}
               onToggleIdeContext={handleToggleIdeContext}
               onQueuedPromptApplied={() => setQueuedPrompt('')}
-              onQueuedEditApplied={() => setQueuedEdit('')}
+              onQueuedEditApplied={() => setQueuedEdit(null)}
             />
           </div>
           </div>

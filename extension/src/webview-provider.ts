@@ -81,6 +81,10 @@ export class VertexSwarmSidebarProvider implements vscode.WebviewViewProvider {
     await this.runtime.handleLogout(reason);
   }
 
+  public maintainSession(): Promise<void> {
+    return this.runtime.maintainSession();
+  }
+
   /**
    * Post message to webview
    */

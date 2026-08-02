@@ -159,7 +159,10 @@ export class LocalChatStore {
     }
   }
 
-  public async truncateMessages(chatId: string, messageId: string): Promise<{ sessionId: string, deletedCount: number }> {
+  public async truncateMessages(
+    chatId: string,
+    messageId: string,
+  ): Promise<{ sessionId: string; deletedCount: number; deletedAttachmentPaths: string[] }> {
     const messagesPath = path.join(this.chatsDir, chatId, 'messages.jsonl');
     try {
       const content = await fs.readFile(messagesPath, 'utf8');
@@ -168,27 +171,57 @@ export class LocalChatStore {
       const finalLines: string[] = [];
       let deletedCount = 0;
       let isTruncating = false;
+      const keptAttachmentPaths = new Set<string>();
+      const deletedAttachmentPaths = new Set<string>();
+
+      const collectAttachmentPaths = (message: { attachments?: unknown }): string[] => {
+        if (!Array.isArray(message.attachments)) {
+          return [];
+        }
+        const paths: string[] = [];
+        for (const attachment of message.attachments) {
+          if (
+            attachment
+            && typeof attachment === 'object'
+            && typeof (attachment as { relativePath?: unknown }).relativePath === 'string'
+          ) {
+            paths.push((attachment as { relativePath: string }).relativePath);
+          }
+        }
+        return paths;
+      };
       
       for (const line of lines) {
         const msg = JSON.parse(line);
         const msgId = msg.message_id || msg.id;
         
-        // As soon as we find the message to truncate after, we start ignoring the rest
         if (msgId === messageId) {
           isTruncating = true;
         }
+
+        const attachmentPaths = collectAttachmentPaths(msg);
         
         if (isTruncating) {
           deletedCount++;
+          for (const relativePath of attachmentPaths) {
+            deletedAttachmentPaths.add(relativePath);
+          }
         } else {
           finalLines.push(line);
+          for (const relativePath of attachmentPaths) {
+            keptAttachmentPaths.add(relativePath);
+          }
         }
       }
+
+      const pathsToDelete = [...deletedAttachmentPaths].filter(
+        (relativePath) => !keptAttachmentPaths.has(relativePath),
+      );
       
       const newContent = finalLines.length > 0 ? finalLines.join('\n') + '\n' : '';
       await fs.writeFile(messagesPath, newContent, 'utf8');
       
-      return { sessionId: chatId, deletedCount };
+      return { sessionId: chatId, deletedCount, deletedAttachmentPaths: pathsToDelete };
     } catch (error) {
       console.error(`Failed to truncate messages for ${chatId}:`, error);
       throw new Error(`Failed to truncate messages for ${chatId}`);

@@ -72,6 +72,17 @@ const ContextPolicySection: React.FC<Props> = ({ policy, onChange }) => {
         }
       />
 
+      <label className="context-policy-toggle">
+        <input
+          type="checkbox"
+          checked={policy.text.compaction_enabled}
+          onChange={(event) =>
+            patch({ text: { ...policy.text, compaction_enabled: event.target.checked } })
+          }
+        />
+        <span>Compact long chats (trim old messages sent to model)</span>
+      </label>
+
       <RangeField
         label="Max upload size"
         value={policy.images.save_max_bytes}

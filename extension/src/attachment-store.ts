@@ -82,25 +82,6 @@ export class AttachmentStore {
     return path.join(this.chatDir(chatId), 'attachments');
   }
 
-  resolveAbsolutePath(chatId: string, relativePath: string): string {
-    const chatRoot = path.resolve(this.chatDir(chatId));
-    const attachmentsRoot = path.resolve(this.attachmentsDir(chatId));
-    const normalized = relativePath.replace(/\\/g, '/').replace(/^\/+/, '');
-    if (normalized.includes('..')) {
-      throw new Error(`Invalid attachment path: ${relativePath}`);
-    }
-
-    const resolved = path.resolve(chatRoot, normalized);
-    if (
-      resolved !== attachmentsRoot
-      && !resolved.startsWith(`${attachmentsRoot}${path.sep}`)
-    ) {
-      throw new Error(`Attachment path escapes attachments root: ${relativePath}`);
-    }
-
-    return resolved;
-  }
-
   async saveAttachments(
     chatId: string,
     items: IncomingAttachmentPayload[],
@@ -167,11 +148,134 @@ export class AttachmentStore {
     }
   }
 
+  async resolveExistingAttachments(
+    chatId: string,
+    items: Array<{
+      id: string;
+      filename: string;
+      mimeType: string;
+      relativePath: string;
+    }>,
+    limits: AttachmentSaveLimits = DEFAULT_SAVE_LIMITS,
+  ): Promise<ChatAttachmentRecord[]> {
+    if (items.length === 0) {
+      return [];
+    }
+    if (items.length > limits.maxCountPerMessage) {
+      throw new Error(`Maximum ${limits.maxCountPerMessage} attachments per message.`);
+    }
+
+    const records: ChatAttachmentRecord[] = [];
+    for (const item of items) {
+      const absolutePath = this.resolveAbsolutePath(chatId, item.relativePath);
+      let stat;
+      try {
+        stat = await fs.stat(absolutePath);
+      } catch {
+        throw new Error(`Attachment "${item.filename}" is no longer available on disk.`);
+      }
+      if (!stat.isFile()) {
+        throw new Error(`Attachment "${item.filename}" is no longer available on disk.`);
+      }
+      if (stat.size > limits.maxFileBytes) {
+        const limitMb = Math.round(limits.maxFileBytes / (1024 * 1024));
+        throw new Error(`Attachment "${item.filename}" exceeds the ${limitMb} MB limit.`);
+      }
+
+      records.push({
+        id: item.id,
+        filename: item.filename,
+        mimeType: item.mimeType,
+        size: stat.size,
+        relativePath: item.relativePath,
+      });
+    }
+
+    return records;
+  }
+
   private resolveExtension(filename: string, mimeType: string): string {
     const fromName = path.extname(filename).replace(/^\./, '').toLowerCase();
     if (fromName && fromName !== 'svg') {
       return fromName;
     }
     return MIME_TO_EXT[mimeType.toLowerCase()] ?? 'bin';
+  }
+
+  resolveAbsolutePath(chatId: string, relativePath: string): string {
+    const chatRoot = path.resolve(this.chatDir(chatId));
+    const attachmentsRoot = path.resolve(this.attachmentsDir(chatId));
+    const normalized = relativePath.replace(/\\/g, '/').replace(/^\/+/, '');
+    if (normalized.includes('..')) {
+      throw new Error(`Invalid attachment path: ${relativePath}`);
+    }
+
+    const resolved = path.resolve(chatRoot, normalized);
+    if (
+      resolved !== attachmentsRoot
+      && !resolved.startsWith(`${attachmentsRoot}${path.sep}`)
+    ) {
+      throw new Error(`Attachment path escapes attachments root: ${relativePath}`);
+    }
+
+    return resolved;
+  }
+
+  async deleteAttachmentFiles(chatId: string, relativePaths: string[]): Promise<number> {
+    if (relativePaths.length === 0) {
+      return 0;
+    }
+
+    let deleted = 0;
+    for (const relativePath of new Set(relativePaths)) {
+      try {
+        const absolutePath = this.resolveAbsolutePath(chatId, relativePath);
+        await fs.unlink(absolutePath);
+        deleted += 1;
+      } catch (error) {
+        const code = (error as NodeJS.ErrnoException | undefined)?.code;
+        if (code !== 'ENOENT') {
+          console.warn(`Failed to delete attachment ${relativePath} for chat ${chatId}:`, error);
+        }
+      }
+    }
+    return deleted;
+  }
+
+  async sweepStagingDirectories(): Promise<number> {
+    const chatsRoot = path.join(this.baseDir, 'chats');
+    let removed = 0;
+
+    let chatEntries: string[] = [];
+    try {
+      chatEntries = await fs.readdir(chatsRoot);
+    } catch {
+      return 0;
+    }
+
+    for (const chatId of chatEntries) {
+      const attachmentsDir = this.attachmentsDir(chatId);
+      let attachmentEntries: string[] = [];
+      try {
+        attachmentEntries = await fs.readdir(attachmentsDir);
+      } catch {
+        continue;
+      }
+
+      for (const entry of attachmentEntries) {
+        if (!entry.startsWith('.staging-')) {
+          continue;
+        }
+        const stagingPath = path.join(attachmentsDir, entry);
+        try {
+          await fs.rm(stagingPath, { recursive: true, force: true });
+          removed += 1;
+        } catch (error) {
+          console.warn(`Failed to remove orphan staging dir ${stagingPath}:`, error);
+        }
+      }
+    }
+
+    return removed;
   }
 }

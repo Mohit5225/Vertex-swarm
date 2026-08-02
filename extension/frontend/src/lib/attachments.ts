@@ -5,15 +5,20 @@ export interface ChatAttachment {
   size: number;
   /** Webview URI or blob/data URL for display */
   uri: string;
+  /** Present for attachments already saved under the chat directory. */
+  relativePath?: string;
 }
 
 export interface DraftAttachment {
   id: string;
-  file: File;
+  /** Omitted when the attachment was restored from an edited message. */
+  file?: File;
   previewUrl: string;
   filename: string;
   mimeType: string;
   size: number;
+  /** Reuse an on-disk attachment when resending after edit. */
+  relativePath?: string;
 }
 
 export const ACCEPTED_IMAGE_TYPES = [
@@ -31,6 +36,11 @@ export const ACCEPTED_IMAGE_INPUT = ACCEPTED_IMAGE_TYPES.join(',');
 export interface ImageSaveLimits {
   maxAttachments: number;
   maxAttachmentBytes: number;
+}
+
+export interface QueuedEditPayload {
+  text: string;
+  attachments: ChatAttachment[];
 }
 
 export const isImageMimeType = (mimeType: string): boolean =>
@@ -73,8 +83,27 @@ export const fileToBase64 = (file: File): Promise<string> =>
     reader.readAsDataURL(file);
   });
 
+export const createRestoredComposerAttachment = (
+  attachment: ChatAttachment,
+): DraftAttachment | null => {
+  if (!attachment.uri) {
+    return null;
+  }
+
+  return {
+    id: attachment.id,
+    previewUrl: attachment.uri,
+    filename: attachment.filename,
+    mimeType: attachment.mimeType,
+    size: attachment.size,
+    relativePath: attachment.relativePath,
+  };
+};
+
 export const revokeDraftAttachments = (attachments: DraftAttachment[]): void => {
   for (const attachment of attachments) {
-    URL.revokeObjectURL(attachment.previewUrl);
+    if (attachment.previewUrl.startsWith('blob:')) {
+      URL.revokeObjectURL(attachment.previewUrl);
+    }
   }
 };
