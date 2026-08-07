@@ -13,9 +13,7 @@ import {
   getThoughtDurationMs,
   segmentIsAlwaysVisible,
   segmentIsLive,
-  summarizeLiveActivity,
   summarizeTurnRollup,
-  turnHasLiveWork,
 } from '../lib/agentTurnTimeline'
 import { isSpawnRowToolName } from '../lib/subagentTrace'
 import { type SessionEvent } from '../store/chatStore'
@@ -98,21 +96,17 @@ const AgentTurnView: React.FC<Props> = ({
     [timeline.segments]
   )
 
-  const isWorking =
-    isLive &&
-    (hasToolWork
-      ? turnHasLiveWork(timeline.segments, isLive)
-      : !hasVisibleNarrative)
+  // While the turn is live, the header is always "Working…" + shimmer —
+  // it never drops to nothing between tool calls, even if no single
+  // tool is in-flight at this exact moment.
+  const isWorking = isLive && (hasToolWork || !hasVisibleNarrative)
   const turnDurationMs = timeline.durationMs
   const rollup = useMemo(
-    () => (!isWorking ? summarizeTurnRollup(timeline.segments) : null),
-    [isWorking, timeline.segments]
+    () => (!isLive ? summarizeTurnRollup(timeline.segments) : null),
+    [isLive, timeline.segments]
   )
-  const liveActivity = isWorking
-    ? summarizeLiveActivity(timeline.segments)
-    : null
   const turnLabel = isWorking
-    ? (liveActivity ?? 'Working…')
+    ? 'Working…'
     : alwaysExpandTrace
       ? `Subagent ran ${formatDuration(turnDurationMs)}`
       : `Worked for ${formatDuration(turnDurationMs)}`
